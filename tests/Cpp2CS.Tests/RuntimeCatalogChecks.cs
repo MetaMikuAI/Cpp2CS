@@ -78,6 +78,10 @@ internal static class RuntimeCatalogChecks
                 checks.True(function.Arguments.All(a => function.Operation.Inputs.Any(i => i.Name == a)), function.Name + " 每个形参均对应操作输入");
                 checks.True(function.Arguments.Length == function.RequireSignature().Parameters.Length && ReferenceEquals(function.Operation, RuntimeOperations.Get(function.Operation.Name)), "参数与唯一语义");
                 checks.True(function.Basis.Length > 0 && function.Recognition is { Symbol: true, Export: null, CallGraph: null, ReferenceShape: null }, "仅符号识别依据");
+                if (function.ManagedMethod is { } managed)
+                    checks.True(function.Recognition.Import == function.Name && managed.DeclaringType == "System.Math"
+                        && managed.TypeArguments.IsEmpty && managed.Parameters.Length == function.Arguments.Length,
+                        "数学导入的身份与完整签名来自目录");
             }
             Reject<KeyNotFoundException>(checks, () => catalog.ByName("missing"));
             Reject<KeyNotFoundException>(checks, () => catalog.ByMangledName("missing"));

@@ -19,6 +19,7 @@ public sealed record RuntimeFunction(
     ImmutableArray<string> ParameterTypes, string ResultType,
     ImmutableArray<string> Basis, RuntimeRecognition Recognition)
 {
+    public RuntimeManagedMethod? ManagedMethod { get; init; }
     public CSignature RequireSignature() => Signature ?? throw new NotSupportedException(
         $"运行时原型 {MangledName} 不可表示：{string.Join('；', Unsupported)}");
 }
@@ -155,7 +156,9 @@ public sealed class RuntimeFunctionCatalog
             {
                 var input = op.Inputs.Single(i => i.Name == args[index]);
                 var scalar = input.Kind is RuntimeValueKind.Integer or RuntimeValueKind.Boolean && input.Use == RuntimeInputUse.Value;
-                if (scalar ? signature.Parameters[index] is not CInteger : signature.Parameters[index] is not CPointer)
+                if (input.Kind == RuntimeValueKind.Floating && input.Use == RuntimeInputUse.Value
+                    ? signature.Parameters[index] is not CFloat
+                    : scalar ? signature.Parameters[index] is not CInteger : signature.Parameters[index] is not CPointer)
                     throw new InvalidDataException($"{source}：{name} 的输入 {input.Name} 与 C 类型不一致");
             }
         }
@@ -171,9 +174,22 @@ public sealed class RuntimeFunctionCatalog
             }, u.GetProperty("parameter").GetInt32(), Text(u, "basis"))).ToImmutableArray() : [];
         if (conditions.Any(c => c.Parameter < 0 || c.Parameter >= parameters.Length || signature?.Parameters[c.Parameter] is not CPointer))
             throw new InvalidDataException($"{source}：{name} 的使用处条件必须引用指针形参");
+        RuntimeManagedMethod? managed = null;
+        if (f.TryGetProperty("managed_method", out var identity))
+        {
+            RuntimeManagedType ManagedType(JsonElement type) => new(Text(type, "name"), ByRef: type.TryGetProperty("by_ref", out var byref) && byref.GetBoolean());
+            managed = new(Text(identity, "declaring_type"), Text(identity, "name"),
+                identity.GetProperty("parameters").EnumerateArray().Select(ManagedType).ToImmutableArray(),
+                ManagedType(identity.GetProperty("result")), [], "Math");
+            if (op.Il.Name != "CallManagedMethod" || managed.Parameters.Length != args.Length || signature is null
+                || managed.Parameters.Where((p, i) => !Matches(p, signature.Parameters[i])).Any() || !Matches(managed.Result, signature.ReturnType))
+                throw new InvalidDataException($"{source}：{name} 的托管数学签名与 C 原型不一致");
+            static bool Matches(RuntimeManagedType type, CType native) => !type.ByRef && (type.Name, native) is
+                ("System.Single", CFloat { Bits: 32 }) or ("System.Double", CFloat { Bits: 64 });
+        }
         return new(name, Text(f, "mangled_name"), Text(f, "declaration"), new(Text(location, "file"), location.GetProperty("line").GetInt32()),
             signature, unsupported, declaredNoReturn, op, args, result, types, Text(f, "result_type"), Strings(f, "basis"),
-            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null) { UsageConditions = conditions });
+            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null) { UsageConditions = conditions }) { ManagedMethod = managed };
     }
     private static CType Type(JsonElement t) => Text(t, "kind") switch
     {

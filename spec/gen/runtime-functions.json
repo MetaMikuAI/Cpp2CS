@@ -572,6 +572,90 @@
         "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::ExchangePointer → os/Atomic.h: Atomic::ExchangePointer；随后 gc/GarbageCollector::SetWriteBarrier",
         "codegen/il2cpp-codegen-il2cpp.h: InterlockedExchangeImpl / InterlockedExchangeImplRef 直接调用 icall，无方法信息实参；只恢复引用位置"
       ]
+    },
+    {
+      "name": "Unbox_internal",
+      "operation": "UnboxUnchecked",
+      "arguments": [
+        "object"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: Unbox_internal；操作语义与调用链见 RuntimeOperations.UnboxUnchecked"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_profile_exception",
+      "operation": "ThrowProfile",
+      "arguments": [
+        "method"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_profile_exception；操作语义与调用链见 RuntimeOperations.ThrowProfile"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_get_thread_static_data",
+      "operation": "GetThreadStaticData",
+      "arguments": [
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_thread_static_data；操作语义与调用链见 RuntimeOperations.GetThreadStaticData"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName1",
+      "arguments": [
+        "name",
+        "target",
+        "caller"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName1"
+      ],
+      "parameters": "String_t* typeName, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod"
+    },
+    {
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName2",
+      "arguments": [
+        "name",
+        "throwOnError",
+        "target",
+        "caller"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName2"
+      ],
+      "parameters": "String_t* typeName, bool throwOnError, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod"
+    },
+    {
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName3",
+      "arguments": [
+        "name",
+        "throwOnError",
+        "ignoreCase",
+        "target",
+        "caller"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName3"
+      ],
+      "parameters": "String_t* typeName, bool throwOnError, bool ignoreCase, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod"
     }
   ]
 }

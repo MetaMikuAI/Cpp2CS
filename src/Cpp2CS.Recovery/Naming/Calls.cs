@@ -16,6 +16,7 @@ public sealed record ClassifiedCall(CallKind Kind, CallCandidates? Candidates = 
     ImmutableDictionary<string, BoundValue>? Inputs = null, BoundValue? Result = null, Term? Target = null, Reason? Why = null)
 {
     public RuntimeOperation? Operation => Function?.Operation;
+    public RuntimeManagedMethod? ManagedMethod => Function?.ManagedMethod ?? Operation?.Il.Method;
     /// <summary>运行时函数与系统函数按 C 层签名的绑定；给出被调方实际读取的输入槽。</summary>
     public BoundCall? Binding { get; init; }
 }

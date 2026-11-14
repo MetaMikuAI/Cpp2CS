@@ -38,8 +38,13 @@ public sealed partial class IntegerLowering
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
         if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
-        if (c.Operation?.Il.Method is { } registered)
+        if (c.ManagedMethod is { } registered)
         { PrepareRegisteredCall(call, c, registered); return; }
+        if (c.Operation?.Il.Name == "ThrowProfile") { PrepareProfileException(call, c); return; }
+        if (c.Operation?.Il.Name == "GetTypeByName") { PrepareGetType(call, c); return; }
+        if (c.Operation?.Il.Name == "UnboxUnchecked") { PrepareUncheckedUnbox(call, c); return; }
+        if (c.Operation?.Il.Name == "ThreadStaticData")
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "尚无线程静态字段的数据块位置与字段偏移查询", code: "lowering.ThreadStatic.Location"); return; }
         if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
             for (int i = 0; i < external.Arguments.Length; i++)
             {

@@ -4,7 +4,7 @@ using System.Collections.Immutable;
 namespace Cpp2CS.Runtime;
 
 public enum RuntimeInputUse { Value, Location, Pointee }
-public enum RuntimeValueKind { Void, ManagedReference, Class, Method, Metadata, Integer, Boolean, NativePointer, ManagedAddress, InvokeData }
+public enum RuntimeValueKind { Void, ManagedReference, Class, Method, Metadata, Integer, Boolean, Floating, NativePointer, ManagedAddress, InvokeData }
 public enum RuntimeWidth { None, Bit, Int32, Int64, Pointer }
 public enum RuntimeHeapEffect { None, Read, MayWrite, ArbitraryManagedCode }
 public enum RuntimeObservation { Observable, Unobservable, IdempotentEvent }
@@ -101,6 +101,14 @@ public static class RuntimeOperations
 
     private static IEnumerable<RuntimeOperation> Build()
     {
+        foreach (var (suffix, width) in new[] { ("Single", RuntimeWidth.Int32), ("Double", RuntimeWidth.Int64) })
+        foreach (bool binary in new[] { false, true })
+            yield return Op("Math" + (binary ? "Binary" : "Unary") + suffix,
+                binary ? [V("x", RuntimeValueKind.Floating), V("y", RuntimeValueKind.Floating)] : [V("x", RuntimeValueKind.Floating)],
+                RuntimeValueKind.Floating, width, RuntimeHeapEffect.None, RuntimeObservation.Observable, "返回登记的数学函数结果",
+                "CallManagedMethod", "按函数目录中的精确核心库方法身份调用；浮点值按 C 原型绑定",
+                "vm-utils/icalls/mscorlib/System/Math.cpp；逐项函数对应与排除依据保存在系统导入目录",
+                preconditions: "匹配核心库与 libm 实现；目录只登记无额外特殊值处理的对应", managedCode: "无");
         foreach (bool compare in new[] { true, false })
         {
             var inputs = new List<RuntimeInput> { new("location", RuntimeInputUse.Location, RuntimeValueKind.ManagedReference), V("value", RuntimeValueKind.ManagedReference) };
@@ -125,6 +133,32 @@ public static class RuntimeOperations
         var klass = P("class", RuntimeValueKind.Class);
         var obj = P("object", RuntimeValueKind.ManagedReference);
         var method = P("method", RuntimeValueKind.Method);
+        yield return Op("UnboxUnchecked", [obj], RuntimeValueKind.ManagedAddress, RuntimeWidth.Pointer,
+            RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "返回 object 的对象头之后的数据地址；不检查空值或盒类型",
+            "UnboxUnchecked", "仅在盒类型与非空已有凭据时沿用拆箱下降，否则保留类型洞",
+            "codegen/il2cpp-codegen-il2cpp.cpp: Unbox_internal → vm/Object.cpp: Object::Unbox；codegen/il2cpp-codegen-il2cpp.h: UnBox 在调用前检查空值与类型",
+            preconditions: "生成代码已保证 object 是非空的有效盒；本操作本身不建立该凭据", managedCode: "无");
+        yield return Op("ThrowProfile", [method], RuntimeValueKind.Void, RuntimeWidth.None,
+            RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable, "", "ThrowProfile", "抛出消息为运行时方法全名的 NotSupportedException",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_profile_exception → Method::GetFullName → GetNotSupportedException → raise_exception；vm/Exception.cpp: FromNameMsg 先调用无参构造再设置 message",
+            ["System.NotSupportedException"], noReturn: true, managedCode: "基础库异常构造；不执行输入方法");
+        yield return Op("GetThreadStaticData", [klass], RuntimeValueKind.NativePointer, RuntimeWidth.Pointer,
+            RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "返回当前线程中 class 的线程静态数据块",
+            "ThreadStaticData", "需要线程静态字段位置查询；缺少时保留洞",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_thread_static_data → vm/Thread.cpp: Thread::GetThreadStaticData(klass->thread_static_fields_offset)",
+            managedCode: "无");
+        for (int count = 1; count <= 3; count++)
+        {
+            var inputs = new List<RuntimeInput> { V("name", RuntimeValueKind.ManagedReference) };
+            if (count >= 2) inputs.Add(V("throwOnError", RuntimeValueKind.Boolean));
+            if (count >= 3) inputs.Add(V("ignoreCase", RuntimeValueKind.Boolean));
+            inputs.Add(P("target", RuntimeValueKind.Method)); inputs.Add(P("caller", RuntimeValueKind.Method));
+            yield return Op("GetTypeByName" + count, [.. inputs], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer,
+                RuntimeHeapEffect.ArbitraryManagedCode, RuntimeObservation.Observable, "使用 caller 的程序集提示调用 target；未找到时以原始 name 重试",
+                "GetTypeByName", "调用对应的 System.Type.GetType 重载；须证明提示程序集与输出调用位置相同",
+                "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type(String_t*, ...) / il2cpp_codegen_type_append_assembly_name_if_necessary → Runtime::Invoke",
+                ["AnyManagedException"], upperBound: true, managedCode: "可能触发程序集解析回调");
+        }
         yield return Op("AllocateObject", [klass], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer,
             RuntimeHeapEffect.ArbitraryManagedCode, RuntimeObservation.Observable, "分配指定类对象；可能先触发类初始化", "NewObject", "分配对象，与随后的构造函数调用合成 newobj", "vm/Object.cpp: Object::New → NewAllocSpecific → Class::Init / Allocate / AllocateSpec / NewPtrFree → Runtime::ClassInit; vm/Runtime.cpp: ClassInit → Invoke(cctor)；用户静态构造可改写既有对象与静态字段", ["System.TypeInitializationException", "System.TypeLoadException", "System.NotSupportedException"], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "当前线程可能执行输入类静态构造；分配触发的终结器在其他线程执行", resultRelation: new(RuntimeResultRelationKind.InstanceOfInput, "class"));
         yield return Op("AllocateVector", [klass, V("length", RuntimeValueKind.Integer)], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer,

@@ -32,6 +32,7 @@ public sealed partial class IntegerLowering
 
     private bool CheckRegisteredArgument(BoundValue bound, TypeRef target, Point point, RuntimeManagedMethod registration)
     {
+        if (registration.TypeArguments.IsEmpty) return true;
         var term = BoundTerm(bound.Source, point);
         if (term is null) return false;
         var resolved = context.Get(state.Resolve, term);

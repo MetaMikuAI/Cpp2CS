@@ -61,7 +61,7 @@ def generate(root, unity, target, mapping):
         if len(slot) != 1:
             raise ValueError('Il2CppMethodSlot 必须有唯一的真实定义')
         body = '#include "primitives.h"\n' + '\n'.join('struct ' + n + ';' for n in names)
-        body += '\nstruct Exception_t; struct VirtualInvokeData;\n' + '\n'.join(aliases + slot)
+        body += '\nstruct Exception_t; struct Type_t; struct VirtualInvokeData;\n' + '\n'.join(aliases + slot)
         body += '\n#define IL2CPP_FORCE_INLINE inline\n#define IL2CPP_NO_INLINE\n'
         array_size = re.findall(r'^typedef \w+ il2cpp_array_size_t;', (root / 'il2cpp-api-types.h').read_text(), re.M)
         if len(array_size) != 1:

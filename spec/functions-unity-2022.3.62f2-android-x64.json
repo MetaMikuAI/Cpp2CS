@@ -328,6 +328,51 @@
     },
     {
       "arguments": [
+        "object"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: Unbox_internal；操作语义与调用链见 RuntimeOperations.UnboxUnchecked"
+      ],
+      "declaration": "void* Unbox_internal(Il2CppObject* obj)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 312
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z14Unbox_internalP12Il2CppObject",
+      "name": "Unbox_internal",
+      "operation": "UnboxUnchecked",
+      "parameter_names": [
+        "obj"
+      ],
+      "parameter_types": [
+        "Il2CppObject *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
         "object",
         "class"
       ],
@@ -629,6 +674,204 @@
       },
       "result": "operation",
       "result_type": "const RuntimeMethod *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "name",
+        "target",
+        "caller"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName1"
+      ],
+      "declaration": "Type_t* il2cpp_codegen_get_type(String_t* typeName, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 774
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z23il2cpp_codegen_get_typeP8String_tPK10MethodInfoS3_",
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName1",
+      "parameter_names": [
+        "typeName",
+        "getTypeMethod",
+        "callingMethod"
+      ],
+      "parameter_types": [
+        "String_t *",
+        "const RuntimeMethod *",
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Type_t *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "name",
+        "throwOnError",
+        "target",
+        "caller"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName2"
+      ],
+      "declaration": "Type_t* il2cpp_codegen_get_type(String_t* typeName, bool throwOnError, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 775
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z23il2cpp_codegen_get_typeP8String_tbPK10MethodInfoS3_",
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName2",
+      "parameter_names": [
+        "typeName",
+        "throwOnError",
+        "getTypeMethod",
+        "callingMethod"
+      ],
+      "parameter_types": [
+        "String_t *",
+        "bool",
+        "const RuntimeMethod *",
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 8,
+            "kind": "integer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Type_t *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "name",
+        "throwOnError",
+        "ignoreCase",
+        "target",
+        "caller"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName3"
+      ],
+      "declaration": "Type_t* il2cpp_codegen_get_type(String_t* typeName, bool throwOnError, bool ignoreCase, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 776
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z23il2cpp_codegen_get_typeP8String_tbbPK10MethodInfoS3_",
+      "name": "il2cpp_codegen_get_type",
+      "operation": "GetTypeByName3",
+      "parameter_names": [
+        "typeName",
+        "throwOnError",
+        "ignoreCase",
+        "getTypeMethod",
+        "callingMethod"
+      ],
+      "parameter_types": [
+        "String_t *",
+        "bool",
+        "bool",
+        "const RuntimeMethod *",
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 8,
+            "kind": "integer"
+          },
+          {
+            "bits": 8,
+            "kind": "integer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Type_t *",
       "unsupported": []
     },
     {
@@ -1040,6 +1283,95 @@
       },
       "result": "operation",
       "result_type": "String_t *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_thread_static_data；操作语义与调用链见 RuntimeOperations.GetThreadStaticData"
+      ],
+      "declaration": "void* il2cpp_codegen_get_thread_static_data(RuntimeClass* klass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 169
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z37il2cpp_codegen_get_thread_static_dataP11Il2CppClass",
+      "name": "il2cpp_codegen_get_thread_static_data",
+      "operation": "GetThreadStaticData",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "method"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_profile_exception；操作语义与调用链见 RuntimeOperations.ThrowProfile"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_profile_exception(const RuntimeMethod* method)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 1021
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z38il2cpp_codegen_raise_profile_exceptionPK10MethodInfo",
+      "name": "il2cpp_codegen_raise_profile_exception",
+      "operation": "ThrowProfile",
+      "parameter_names": [
+        "method"
+      ],
+      "parameter_types": [
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
       "unsupported": []
     },
     {
@@ -2128,8 +2460,8 @@
       "unsupported": []
     }
   ],
-  "generator_sha256": "a29bea3453ac7e4b84071bc32797e0e5931222d89b7c33613eb5737b233e1553",
-  "mapping_sha256": "341e2514ea65710e008ad26252bfd5106c74bf590f559b7fe56b149313cae9db",
+  "generator_sha256": "132a628dc66f38e2e453be7e56bb01ec4b06d7244749fb1575cee3325069bc9c",
+  "mapping_sha256": "998db45526101a806a340c5d3d32431e1cc538f7d66c253d4c77ae18a03eef6b",
   "schema_version": 1,
   "shared_generator_sha256": "ab5f57df145d9958a050c9a43f0b8f940f4d9ff5039718ad3e039b2b6215f1cb",
   "source": {

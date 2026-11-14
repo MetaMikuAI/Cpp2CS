@@ -689,6 +689,1370 @@
         "reference_shape": null,
         "import": "__cxa_throw"
       }
+    },
+    {
+      "name": "fabs",
+      "mangled_name": "fabs",
+      "declaration": "double fabs(double value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 20
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Abs；libil2cpp.icalls: System.Math::Abs"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "fabs"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Abs",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "acos",
+      "mangled_name": "acos",
+      "declaration": "double acos(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 25
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Acos；libil2cpp.icalls: System.Math::Acos"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "acos"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Acos",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "acosh",
+      "mangled_name": "acosh",
+      "declaration": "double acosh(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 30
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Acosh；libil2cpp.icalls: System.Math::Acosh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "acosh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Acosh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "asin",
+      "mangled_name": "asin",
+      "declaration": "double asin(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 35
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Asin；libil2cpp.icalls: System.Math::Asin"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "asin"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Asin",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "asinh",
+      "mangled_name": "asinh",
+      "declaration": "double asinh(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 40
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Asinh；libil2cpp.icalls: System.Math::Asinh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "asinh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Asinh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "atan",
+      "mangled_name": "atan",
+      "declaration": "double atan(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 45
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Atan；libil2cpp.icalls: System.Math::Atan"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "atan"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Atan",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "atan2",
+      "mangled_name": "atan2",
+      "declaration": "double atan2(double y, double x)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 50
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          },
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x",
+        "y"
+      ],
+      "parameter_types": [
+        "double",
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathBinaryDouble",
+      "arguments": [
+        "x",
+        "y"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Atan2；libil2cpp.icalls: System.Math::Atan2"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "atan2"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Atan2",
+        "parameters": [
+          {
+            "name": "System.Double"
+          },
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "atanh",
+      "mangled_name": "atanh",
+      "declaration": "double atanh(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 55
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Atanh；libil2cpp.icalls: System.Math::Atanh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "atanh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Atanh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "cbrt",
+      "mangled_name": "cbrt",
+      "declaration": "double cbrt(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 60
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Cbrt；libil2cpp.icalls: System.Math::Cbrt"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "cbrt"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Cbrt",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "ceil",
+      "mangled_name": "ceil",
+      "declaration": "double ceil(double a)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 65
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Ceiling；libil2cpp.icalls: System.Math::Ceiling"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "ceil"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Ceiling",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "cos",
+      "mangled_name": "cos",
+      "declaration": "double cos(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 70
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Cos；libil2cpp.icalls: System.Math::Cos"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "cos"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Cos",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "cosh",
+      "mangled_name": "cosh",
+      "declaration": "double cosh(double value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 75
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Cosh；libil2cpp.icalls: System.Math::Cosh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "cosh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Cosh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "exp",
+      "mangled_name": "exp",
+      "declaration": "double exp(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 80
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Exp；libil2cpp.icalls: System.Math::Exp"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "exp"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Exp",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "floor",
+      "mangled_name": "floor",
+      "declaration": "double floor(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 85
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Floor；libil2cpp.icalls: System.Math::Floor"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "floor"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Floor",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "fmod",
+      "mangled_name": "fmod",
+      "declaration": "double fmod(double x, double y)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 90
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          },
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x",
+        "y"
+      ],
+      "parameter_types": [
+        "double",
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathBinaryDouble",
+      "arguments": [
+        "x",
+        "y"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::FMod；libil2cpp.icalls: System.Math::FMod"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "fmod"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "FMod",
+        "parameters": [
+          {
+            "name": "System.Double"
+          },
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "log10",
+      "mangled_name": "log10",
+      "declaration": "double log10(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 108
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Log10；libil2cpp.icalls: System.Math::Log10"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "log10"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Log10",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "sin",
+      "mangled_name": "sin",
+      "declaration": "double sin(double a)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 196
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Sin；libil2cpp.icalls: System.Math::Sin"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "sin"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Sin",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "sinh",
+      "mangled_name": "sinh",
+      "declaration": "double sinh(double value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 201
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Sinh；libil2cpp.icalls: System.Math::Sinh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "sinh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Sinh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "sqrt",
+      "mangled_name": "sqrt",
+      "declaration": "double sqrt(double d)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 206
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Sqrt；libil2cpp.icalls: System.Math::Sqrt"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "sqrt"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Sqrt",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "tan",
+      "mangled_name": "tan",
+      "declaration": "double tan(double a)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 211
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Tan；libil2cpp.icalls: System.Math::Tan"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "tan"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Tan",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "tanh",
+      "mangled_name": "tanh",
+      "declaration": "double tanh(double value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 216
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "double"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathUnaryDouble",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Tanh；libil2cpp.icalls: System.Math::Tanh"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "tanh"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Tanh",
+        "parameters": [
+          {
+            "name": "System.Double"
+          }
+        ],
+        "result": {
+          "name": "System.Double"
+        }
+      }
+    },
+    {
+      "name": "fabsf",
+      "mangled_name": "fabsf",
+      "declaration": "float fabsf(float value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 221
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 32
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 32
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x"
+      ],
+      "parameter_types": [
+        "float"
+      ],
+      "result_type": "float",
+      "unsupported": [],
+      "operation": "MathUnarySingle",
+      "arguments": [
+        "x"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Abs；libil2cpp.icalls: System.Math::Abs"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "fabsf"
+      },
+      "managed_method": {
+        "declaring_type": "System.Math",
+        "name": "Abs",
+        "parameters": [
+          {
+            "name": "System.Single"
+          }
+        ],
+        "result": {
+          "name": "System.Single"
+        }
+      }
+    }
+  ],
+  "unmapped_math_imports": [
+    {
+      "names": [
+        "pow",
+        "powf"
+      ],
+      "reason": "Math::Pow / MathF::Pow 对 NaN、无穷和负零另有处理；无输入域证明时不与 libm 等同",
+      "basis": "vm-utils/icalls/mscorlib/System/Math.cpp / MathF.cpp: Pow"
+    },
+    {
+      "names": [
+        "log",
+        "logf"
+      ],
+      "reason": "Math::Log 对非正值另有返回定义；MathF 没有匹配实现依据",
+      "basis": "vm-utils/icalls/mscorlib/System/Math.cpp: Log"
+    },
+    {
+      "names": [
+        "modf",
+        "modff"
+      ],
+      "reason": "输出指针须恢复为可写位置；裁剪核心库可能没有 ModF 方法，尚未建立输出位置改写",
+      "basis": "vm-utils/icalls/mscorlib/System/Math.cpp: ModF"
+    },
+    {
+      "names": [
+        "sincos",
+        "sincosf"
+      ],
+      "reason": "一次调用写两个结果；需要相邻 Sin / Cos 的联合逆变换，单方法调用下降不能表达",
+      "basis": "编译器合并的多结果调用"
+    },
+    {
+      "names": [
+        "exp2",
+        "exp2f"
+      ],
+      "reason": "匹配核心库没有以二为底的直接方法；不能替换为特殊值定义不同的 Pow",
+      "basis": "libil2cpp.icalls: System.Math / System.MathF"
+    },
+    {
+      "names": [
+        "acosf",
+        "acoshf",
+        "asinf",
+        "asinhf",
+        "atanf",
+        "atan2f",
+        "atanhf",
+        "cbrtf",
+        "ceilf",
+        "cosf",
+        "coshf",
+        "expf",
+        "floorf",
+        "fmodf",
+        "log10f",
+        "sinf",
+        "sinhf",
+        "sqrtf",
+        "tanf",
+        "tanhf"
+      ],
+      "reason": "MathF.h 有声明，但提供的 MathF.cpp 与 icall 表只有 Pow；缺少逐项生成代码或实现凭据",
+      "basis": "vm-utils/icalls/mscorlib/System/MathF.h / MathF.cpp；libil2cpp.icalls"
     }
   ]
 }

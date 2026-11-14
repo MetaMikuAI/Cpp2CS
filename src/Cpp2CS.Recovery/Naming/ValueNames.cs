@@ -162,7 +162,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     if (klass.Value == NameLattice.Pending) return Yes(NameLattice.Pending);
                     instance = klass.Value.Name is EntityName { Entity: ClassEntity { Type: var type } } ? type : null;
                 }
-                if (function.Operation.Il.Method is { } registration && locations is not null)
+                if (call.ManagedMethod is { } registration && locations is not null)
                 {
                     var arguments = RuntimeManagedMethods.TypeArguments(c, call, locations, registration);
                     if (arguments.IsSuccess) instance = RuntimeManagedMethods.Type(registration.Result, arguments.Value, null);
@@ -210,6 +210,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         RuntimeValueKind.Metadata => new(ValueKind.RuntimePointer,name),
         RuntimeValueKind.ManagedReference => new(ValueKind.ManagedReference,name,"Il2CppObject"),
         RuntimeValueKind.Integer or RuntimeValueKind.Boolean => new(ValueKind.Integer,name),
+        RuntimeValueKind.Floating => new(ValueKind.Floating,name),
         RuntimeValueKind.ManagedAddress => new(ValueKind.ManagedAddress,name),
         _ => new(ValueKind.NativePointer,name)
     };
