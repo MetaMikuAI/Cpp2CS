@@ -201,17 +201,22 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             }
             if (call.Candidates is { } candidates)
             {
-                if (witness is not null && candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
+                if (candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
                 {
+                    // 共用代码的结果类型取方法信息给出的实例，调用方是不是泛型都一样；候选自己的规范实例只说明结果是引用。
                     var target = (sharedResults ??= new(binder, calls, this, new(state))).Resolve(c, id);
                     if (!target.IsSuccess && target.Why?.Code == "binding.shared-call.pending") return Yes(NameLattice.Pending);
-                    if (!target.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: target.Why));
-                    var bound = target.Value.Binding;
-                    var method = target.Value.Method;
-                    var type = method.Concrete(method.Method.ReturnType);
-                    return Yes(bound.Result.Source is TermSource output && output.Term == key
-                        ? Typed(bound.Result.Type, type, new CallResultName(id, type, null))
-                        : NamedValue.Unknown("naming.result-binding", "共享调用结果未完整绑定。"));
+                    if (target.IsSuccess)
+                    {
+                        var bound = target.Value.Binding;
+                        var method = target.Value.Method;
+                        var type = method.Concrete(method.Method.ReturnType);
+                        return Yes(bound.Result.Source is TermSource output && output.Term == key
+                            ? Typed(bound.Result.Type, type, new CallResultName(id, type, null))
+                            : NamedValue.Unknown("naming.result-binding", "共享调用结果未完整绑定。"));
+                    }
+                    // 泛型上下文里实例只能由方法信息给出。封闭的调用方解析不出实例时退回候选的规范实例：类型只是上界，不会定位出错的字段。
+                    if (witness is not null) return Yes(new(ValueKind.Unnamed, null, Why: target.Why));
                 }
                 var names = candidates.Candidates.Select(candidate => candidate.Binding.Value is { } bound &&
                     bound.Result.Source is TermSource source && source.Term == key && candidate.Entry.Method is { } method
