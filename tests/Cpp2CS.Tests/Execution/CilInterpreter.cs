@@ -15,6 +15,9 @@ internal enum StackKind { I4, I8, F, O, Struct }
 /// <summary>Single：F 上的 float32。双方都是 float32 的运算结果仍是 float32：IL2CPP 和 CLR 都这样编译，ECMA-335 只是允许更高精度。</summary>
 internal readonly record struct StackValue(StackKind Kind, ulong Bits, byte[]? Data = null, bool Single = false)
 {
+    // 仅供显式判空溯源；数值运算与转换不传播这些标记。
+    public bool NullLiteral { get; init; }
+    public bool TestedNull { get; init; }
     public static StackValue I4(long value) => new(StackKind.I4, (uint)value);
     public static StackValue I8(ulong value) => new(StackKind.I8, value);
     public static StackValue F(double value) => new(StackKind.F, BitConverter.DoubleToUInt64Bits(value));
@@ -69,6 +72,10 @@ internal sealed class CilThrow(TypeRef type, ulong value = 0) : Exception(type.T
     public bool Recorded { get; set; }
     public TypeRef Type { get; } = type;
     public ulong Object { get; set; } = value;
+    public ConversionFailure? Conversion { get; init; }
+    public NullCheckSource NullCheck { get; init; }
+    public TraceEvent? Event { get; set; }
+    public bool Caught { get; set; }
 }
 
 /// <summary>CIL 解释器：托管字段存储、事件、异常流及有预算的调用执行。</summary>
@@ -92,7 +99,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         }
         catch (CilThrow e)
         {
-            side.ThrowObject(e.Object == 0 ? side.ExceptionObject(e.Type) : e.Object, !e.Recorded);
+            side.ThrowObject(e.Object == 0 ? side.ExceptionObject(e.Type) : e.Object, !e.Recorded, e.Caught ? null : e.Event);
         }
         finally
         {
@@ -150,6 +157,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var exceptionFlow = executed.HasExceptionHandlers ? new CilExceptionFlow(executed) : null;
         var escaping = false;
         TypeRef? constraint = null;
+        var nullGuard = false;
+        int? explicitNullThrow = null;
         for (var steps = 0; ; steps++)
         {
             if (--budget.Remaining < 0)
@@ -158,6 +167,9 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             }
             var at = pc;
             var instruction = instructions[pc++];
+            if (explicitNullThrow != at) explicitNullThrow = null;
+            if (instruction.OpCode.Code is not (Code.Nop or Code.Br or Code.Br_S or Code.Call or Code.Callvirt or Code.Pop or Code.Newobj or Code.Throw))
+                nullGuard = false;
             Coverage?.Visit(method, instruction);
             var operand = instruction.Operand;
             var callsBefore = side.CallEvents;
@@ -234,7 +246,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldc_I8: stack.Push(StackValue.I8(unchecked((ulong)(long)operand))); break;
                 case Code.Ldc_R4: stack.Push(StackValue.F32((float)operand)); break;
                 case Code.Ldc_R8: stack.Push(StackValue.F((double)operand)); break;
-                case Code.Ldnull: stack.Push(StackValue.O(0)); break;
+                case Code.Ldnull: stack.Push(StackValue.O(0) with { NullLiteral = true }); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
                 case Code.Ldtoken:
                     stack.Push(StackValue.I8(operand switch
@@ -396,7 +408,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var type = context.Type((TypeReference)operand);
                     var compatible = value.Bits == 0 || Types.IsAssignable(side.TypeOf(value.Bits), type);
                     if (!compatible && instruction.OpCode.Code != Code.Isinst)
-                        throw new CilThrow(Types.Corlib("System.InvalidCastException"));
+                        throw new CilThrow(Types.Corlib("System.InvalidCastException")) { Conversion = new(value.Bits, type) };
                     stack.Push(StackValue.O(compatible ? value.Bits : 0));
                     break;
                 }
@@ -407,7 +419,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var target = context.Type((TypeReference)operand);
                     var actual = side.TypeOf(instance);
                     if (!ManagedTypes.Underlying(actual).Equals(ManagedTypes.Underlying(target)))
-                        throw new CilThrow(Types.Corlib("System.InvalidCastException"));
+                        throw new CilThrow(Types.Corlib("System.InvalidCastException")) { Conversion = new(instance, target) };
                     if (target is DefinitionRef { Definition.FullName: "System.Nullable" }) throw new Unsupported("Nullable 拆箱");
                     stack.Push(instruction.OpCode.Code == Code.Unbox ? StackValue.I8(instance + StorageLayout.ObjectHeaderSize)
                         : ReadValue(side, target, instance + StorageLayout.ObjectHeaderSize));
@@ -440,6 +452,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         break;
                     }
                     var layout = index.Layouts.Of(type) ?? throw new Unsupported($"对象 {type} 的布局");
+                    if (nullGuard && constructor.Method.Parameters.Count == 0
+                        && type.Equals(Types.Corlib("System.NullReferenceException"))
+                        && pc < instructions.Count && instructions[pc].OpCode.Code == Code.Throw)
+                        explicitNullThrow = pc;
+                    nullGuard = false;
                     var created = side.New(type, layout.InstanceSize);
                     side.RunClassConstructor(type);
                     InvokeAt(side, instruction, constructor, [StackValue.O(created), .. values]);
@@ -454,12 +471,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     // 前缀只作用于这一条调用（ECMA-335 III.2.1）。先取走：下面可能抛异常，处理块里的调用不能再受它影响。
                     var constrainedTo = constraint;
                     constraint = null;
-                    if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0]);
+                    if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0], NullCheckSource.CallReceiver);
                     // 约束到引用类型时，指针先解引用，再按 callvirt 调用，空引用要抛异常（ECMA-335 III.2.1、III.4.2）。
                     if (constrainedTo is { } dereferenced && ManagedTypes.IsReferenceType(dereferenced))
                     {
                         values[0] = ReadValue(side, dereferenced, values[0].Bits);
-                        NotNull(values[0]);
+                        NotNull(values[0], NullCheckSource.CallReceiver);
                     }
                     if (side.RuntimeTypeReturn(target, values.Select(v => v.Bits).ToArray()) is { } reflected)
                     {
@@ -535,7 +552,10 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 {
                     var right = Pop();
                     var left = Pop();
-                    stack.Push(StackValue.I4(Compare(instruction.OpCode.Code, left, right) ? 1 : 0));
+                    var compared = Compare(instruction.OpCode.Code, left, right);
+                    stack.Push(StackValue.I4(compared ? 1 : 0) with
+                    { TestedNull = instruction.OpCode.Code == Code.Ceq && left.Kind == StackKind.O && right.Kind == StackKind.O
+                        && (left.NullLiteral || right.NullLiteral) && compared });
                     break;
                 }
                 case Code.Conv_I1 or Code.Conv_U1 or Code.Conv_I2 or Code.Conv_U2 or Code.Conv_I4 or Code.Conv_U4 or Code.Conv_I8 or Code.Conv_U8
@@ -565,9 +585,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Brtrue or Code.Brtrue_S or Code.Brfalse or Code.Brfalse_S:
                 {
-                    var taken = (Pop().Bits != 0) == (instruction.OpCode.Code is Code.Brtrue or Code.Brtrue_S);
+                    var value = Pop();
+                    var taken = (value.Bits != 0) == (instruction.OpCode.Code is Code.Brtrue or Code.Brtrue_S);
                     Coverage?.Branch(method, instruction, taken ? 1 : 0);
                     if (taken) pc = positions[(Instruction)operand];
+                    // 仅跟踪当前方法实际走过的空引用分支；之后只容许跳板与调用。
+                    nullGuard = depth == 0 && (value is { Kind: StackKind.O, Bits: 0 } || value.TestedNull == true);
                     break;
                 }
                 case Code.Leave or Code.Leave_S:
@@ -596,18 +619,20 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Throw:
                     var thrown = NotNull(Pop());
-                    throw new CilThrow(side.TypeOf(thrown), thrown);
+                    throw new CilThrow(side.TypeOf(thrown), thrown) { NullCheck = explicitNullThrow == at ? NullCheckSource.ExplicitBranch : NullCheckSource.None };
                 default:
                     throw new Unsupported($"指令 {instruction.OpCode}");
             }
             }
             catch (Exception raised) when (!escaping && raised is CilThrow or PlannedThrow)
             {
+                explicitNullThrow = null;
+                nullGuard = false;
                 var exception = raised is CilThrow cil ? cil : new CilThrow(side.TypeOf(((PlannedThrow)raised).Object), ((PlannedThrow)raised).Object);
                 if (exception.Object == 0) exception.Object = side.ExceptionObject(exception.Type);
                 if (!exception.Recorded)
                 {
-                    side.Event($"throw {exception.Type} @0x{exception.Object:x}");
+                    exception.Event = side.Event($"throw {exception.Type} @0x{exception.Object:x}", TraceEventKind.Throw, exception.Conversion, exception.NullCheck);
                     exception.Recorded = true;
                 }
                 stack.Clear();
@@ -653,8 +678,9 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     private static bool BeforeFieldInitValue(TypeRef type) => type is DefinitionRef { Definition: { IsValueType: true } d }
         && (d.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0;
 
-    private ulong NotNull(StackValue value) =>
-        value.Bits != 0 ? value.Bits : throw new CilThrow(Types.Corlib("System.NullReferenceException"));
+    private ulong NotNull(StackValue value, NullCheckSource source = NullCheckSource.None) =>
+        value.Bits != 0 ? value.Bits : throw new CilThrow(Types.Corlib("System.NullReferenceException"))
+        { NullCheck = depth == 0 ? source : NullCheckSource.None };
 
     /// <summary>字段地址：引用类型的字段相对对象（含对象头）；值类型的字段经指向数据的托管指针访问，减去对象头。</summary>
     private ulong FieldAddress(World world, FieldRef field, StackValue receiver)
@@ -662,7 +688,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var offset = world.FieldOffset(field);
         if (field.DeclaringType is DefinitionRef { Definition.IsValueType: true })
             return receiver.Bits + (ulong)(offset - StorageLayout.ObjectHeaderSize);
-        return NotNull(receiver) + (ulong)offset;
+        return NotNull(receiver, NullCheckSource.FieldReceiver) + (ulong)offset;
     }
 
     private ulong Element(CilSide side, TypeRef type, StackValue indexValue, StackValue arrayValue)

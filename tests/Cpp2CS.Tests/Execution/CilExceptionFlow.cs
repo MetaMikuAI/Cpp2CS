@@ -49,6 +49,7 @@ internal sealed class CilExceptionFlow(MethodBody body)
             faults.Push((handler, exception, route, 0));
             return (positions[handler.HandlerStart], null);
         }
+        exception.Caught = true;
         caught[handler] = exception;
         return (positions[handler.HandlerStart], exception.Object);
     }

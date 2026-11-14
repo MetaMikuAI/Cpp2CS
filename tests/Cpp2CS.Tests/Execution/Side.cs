@@ -3,9 +3,12 @@ using Cpp2CS.Model;
 
 namespace Cpp2CS.Tests.Execution;
 
-/// <summary>可观察事件：分配、调用、抛出、返回。State 为事件发生时本侧写过的（受比较区域内）字节的当前值。</summary>
-/// <summary>事件与发生时写入日志的长度；比较时按日志重放出两侧当时写过的内存。</summary>
-internal sealed record TraceEvent(string Text, int Log);
+internal enum TraceEventKind { Other, Call, Throw }
+internal enum NullCheckSource { None, CallReceiver, FieldReceiver, ExplicitBranch }
+internal sealed record ConversionFailure(ulong Object, TypeRef Target);
+/// <summary>事件携带写入日志位置与写入次数；转换失败与判空的来源独立于诊断文字。</summary>
+internal sealed record TraceEvent(string Text, int Log, int Writes, TraceEventKind Kind, ConversionFailure? Conversion, NullCheckSource NullCheck);
+internal sealed record TraceDifference(string Message, ComparisonReason ReasonKind = ComparisonReason.None);
 
 /// <summary>
 /// 一侧（原生或 CIL）的一次执行：内存读写、写入日志与事件序列。
@@ -37,6 +40,10 @@ internal abstract partial class Side(World world)
     /// <summary>结果：return 值、throw 类型；null 表示尚未结束。</summary>
     public string? Result { get; protected set; }
     public IReadOnlyDictionary<ulong, byte> Written => written;
+    /// <summary>未被 catch 接住且最终逃出方法的原始抛出事件。</summary>
+    public TraceEvent? UnhandledThrow { get; private set; }
+    /// <summary>执行中的写入次数，含同值写入与临时存储；异常对象的内部构造不计。</summary>
+    public int Writes { get; private set; }
 
     public abstract void Read(ulong address, Span<byte> bytes);
     /// <summary>直接写入本侧内存，不记日志。</summary>
@@ -53,6 +60,7 @@ internal abstract partial class Side(World world)
 
     protected void Log(ulong address, ReadOnlySpan<byte> bytes)
     {
+        if (bytes.Length > 0) Writes++;
         for (var i = 0; i < bytes.Length; i++)
             if (World.Observable(address + (ulong)i))
             {
@@ -85,7 +93,12 @@ internal abstract partial class Side(World world)
     /// <summary>按次序写入的可观察字节。</summary>
     public IReadOnlyList<(ulong Address, byte Value)> WriteLog => log;
 
-    public void Event(string text) => Events.Add(new TraceEvent(text, log.Count));
+    public TraceEvent Event(string text, TraceEventKind kind = TraceEventKind.Other, ConversionFailure? conversion = null, NullCheckSource nullCheck = NullCheckSource.None)
+    {
+        var entry = new TraceEvent(text, log.Count, Writes, kind, conversion, nullCheck);
+        Events.Add(entry);
+        return entry;
+    }
 
     /// <summary>下一次调用的序号（两侧按同样的顺序取返回值）。</summary>
     public int NextCall() => calls++;
@@ -106,8 +119,15 @@ internal abstract partial class Side(World world)
         cursor += (ulong)size;
         if (cursor > (exception ? World.ExceptionBase + World.ExceptionSize : World.HeapBase + World.HeapSize)) throw new Unsupported("堆已满");
         World.RegisterObject(address, type);
-        Write(address, new byte[size]);
-        WriteValue(address + StorageLayout.ObjectKlass, World.Klass(type), 8);
+        // 隐式异常对象的构造是解释器内部记账；IL 对异常对象的显式写入仍计数。
+        void Initialize(ulong at, ReadOnlySpan<byte> bytes)
+        {
+            if (exception) Store(at, bytes); else Write(at, bytes);
+        }
+        Initialize(address, new byte[size]);
+        Span<byte> klass = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(klass, World.Klass(type));
+        Initialize(address + StorageLayout.ObjectKlass, klass);
         if (!exception) Event(detail is null ? $"new {type}" : $"new {type} {detail}");
         return address;
     }
@@ -135,7 +155,7 @@ internal abstract partial class Side(World world)
     public bool PlannedThrowReached { get; private set; }
     public void CallEvent(ulong target, IEnumerable<ulong> arguments, MethodRef? instance)
     {
-        Event($"call 0x{target:x}({string.Join(", ", arguments.Select(a => $"0x{a:x}"))}){(instance is null ? "" : $" <{instance}>")}");
+        Event($"call 0x{target:x}({string.Join(", ", arguments.Select(a => $"0x{a:x}"))}){(instance is null ? "" : $" <{instance}>")}", TraceEventKind.Call);
         PlannedCall();
     }
 
@@ -152,9 +172,10 @@ internal abstract partial class Side(World world)
     public ulong ExceptionObject(TypeRef type) => New(type, (type is DefinitionRef definition ? World.Index.Layouts.Of(definition) : null)?.InstanceSize
         ?? throw new Unsupported($"异常类型 {type} 缺少布局"));
 
-    public void ThrowObject(ulong value, bool record = true)
+    public void ThrowObject(ulong value, bool record = true, TraceEvent? origin = null)
     {
-        if (record) Event($"throw {TypeOf(value)} @0x{value:x}");
+        if (record) origin = Event($"throw {TypeOf(value)} @0x{value:x}", TraceEventKind.Throw);
+        UnhandledThrow = origin;
         Result = $"throw @0x{value:x}";
     }
 
@@ -196,7 +217,7 @@ internal static class Trace
     /// 第一处不同；相同为 null。每个事件发生时，两侧写过的内存（未写的字节取初值）须相同：按事件次序重放两侧的写入日志，
     /// 增量维护取值不同的地址，等价于逐事件比较两侧当时的全部写入。
     /// </summary>
-    public static string? Difference(World world, Side native, Side cil)
+    public static TraceDifference? Difference(World world, Side native, Side cil)
     {
         var (nState, cState) = (new Dictionary<ulong, byte>(), new Dictionary<ulong, byte>());
         var differs = new SortedSet<ulong>();
@@ -211,23 +232,67 @@ internal static class Trace
                 if (Value(nState, address) != Value(cState, address)) differs.Add(address); else differs.Remove(address);
             }
         }
-        var count = Math.Max(native.Events.Count, cil.Events.Count);
-        for (var i = 0; i < count; i++)
+        TraceDifference? implementationDifference = null;
+        var nullCheckDifference = false;
+        for (int i = 0, j = 0; i < native.Events.Count || j < cil.Events.Count; i++, j++)
         {
             var n = i < native.Events.Count ? native.Events[i] : null;
-            var c = i < cil.Events.Count ? cil.Events[i] : null;
-            if (n?.Text != c?.Text) return $"事件 {i}：左侧 {n?.Text ?? "（无）"}，右侧 {c?.Text ?? "（无）"}";
+            var c = j < cil.Events.Count ? cil.Events[j] : null;
+            var deferred = false;
+            if (n?.Text != c?.Text)
+            {
+                if (n is not null && c is not null)
+                {
+                    Replay(native, nState, ref nAt, n.Log);
+                    Replay(cil, cState, ref cAt, c.Log);
+                    if (differs.Count == 0 && DeferredConversion(native, cil, n, j) is { } calls)
+                    {
+                        j += calls;
+                        c = cil.Events[j];
+                        nullCheckDifference = c.NullCheck != NullCheckSource.None;
+                        var ending = nullCheckDifference
+                            ? $"(b) 接收者判空先抛未捕获 NullReferenceException（{c.NullCheck}）"
+                            : "(a) 同一对象与目标类型的转换抛未捕获 InvalidCastException";
+                        implementationDifference = new($"事件 {i}：转换对象 0x{n.Conversion!.Object:x} 到 {n.Conversion.Target} 被推迟到 {calls} 次无写入调用之后；{ending}",
+                            ComparisonReason.ImplementationDifference);
+                        deferred = true;
+                    }
+                }
+                if (!deferred && n?.Text != c?.Text) return new($"事件 {i}：左侧 {n?.Text ?? "（无）"}，右侧 {c?.Text ?? "（无）"}");
+            }
             Replay(native, nState, ref nAt, n!.Log);
             Replay(cil, cState, ref cAt, c!.Log);
             if (differs.Count > 0)
             {
                 var address = differs.Min;
-                return $"事件 {i}（{n.Text}）时内存 0x{address:x}：左侧 {Value(nState, address):x2}，右侧 {Value(cState, address):x2}";
+                return new($"事件 {i}（{n.Text}）时内存 0x{address:x}：左侧 {Value(nState, address):x2}，右侧 {Value(cState, address):x2}");
             }
         }
-        if (native.Result != cil.Result) return $"结局：左侧 {native.Result}，右侧 {cil.Result}";
+        // (b) 的两个已确认未捕获抛出就是各自结局，不要求异常对象身份相同。
+        if (!nullCheckDifference && native.Result != cil.Result) return new($"结局：左侧 {native.Result}，右侧 {cil.Result}");
         Replay(native, nState, ref nAt, native.WriteLog.Count);
         Replay(cil, cState, ref cAt, cil.WriteLog.Count);
-        return differs.Count == 0 ? null : $"结局时堆内存 0x{differs.Min:x} 不同";
+        return differs.Count == 0 ? implementationDifference : new($"结局时堆内存 0x{differs.Min:x} 不同");
+    }
+
+    /// <summary>仅登记参考先抛、输出经无写入调用后由同一转换或当前方法接收者判空失败退出的实现差异。</summary>
+    private static int? DeferredConversion(Side reference, Side output, TraceEvent expected, int at)
+    {
+        if (expected.Conversion is null || !ReferenceEquals(expected, reference.UnhandledThrow)) return null;
+        var end = at;
+        while (end < output.Events.Count && output.Events[end].Kind == TraceEventKind.Call)
+        {
+            if (output.Events[end].Writes != output.Events[at].Writes) return null;
+            end++;
+        }
+        if (end == at || end == output.Events.Count) return null;
+        var actual = output.Events[end];
+        if (expected.Kind != TraceEventKind.Throw || actual.Kind != TraceEventKind.Throw
+            || !ReferenceEquals(actual, output.UnhandledThrow)
+            || output.Events[at].Writes != actual.Writes)
+            return null;
+        if (actual.NullCheck == NullCheckSource.None
+            && (expected.Conversion != actual.Conversion || expected.Text != actual.Text)) return null;
+        return end - at;
     }
 }

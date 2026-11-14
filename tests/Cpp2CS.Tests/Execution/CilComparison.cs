@@ -34,6 +34,7 @@ internal static partial class CilComparison
         CilComparisonResult Result(CilComparisonStatus status, int? at, string? reason, ComparisonReason kind = ComparisonReason.None) =>
             new(status, completed, at, reason) { ReasonKind = kind, NaNSkippedCases = skipped, Coverage = coverage.Result(), AttemptedCoverage = attempted.Result() };
         int? seed = null;
+        (int Seed, string Message)? implementationDifference = null;
         try
         {
             if (valueInstance is null && (!left.HasBody || !right.HasBody || left.Body.Instructions.Count == 0 || right.Body.Instructions.Count == 0))
@@ -80,11 +81,17 @@ internal static partial class CilComparison
                     coverage.Merge(currentCoverage);
                     completed++;
                     if (Trace.Difference(world, ls, rs) is { } difference)
-                        return Result(CilComparisonStatus.Mismatch, seed, difference);
+                    {
+                        if (difference.ReasonKind != ComparisonReason.ImplementationDifference)
+                            return Result(CilComparisonStatus.Mismatch, seed, difference.Message);
+                        implementationDifference ??= (seed.Value, difference.Message);
+                    }
                 }
                 catch (Unsupported e) when (e.Kind == ComparisonReason.NaN) { skipped++; }
             }
-            return completed == 0
+            return implementationDifference is { } deferred
+                ? Result(CilComparisonStatus.Inconclusive, deferred.Seed, deferred.Message, ComparisonReason.ImplementationDifference)
+                : completed == 0
                 ? Result(CilComparisonStatus.Inconclusive, null, "所有用例均因 NaN 跳过", ComparisonReason.NaN)
                 : Result(CilComparisonStatus.Match, null, null);
         }

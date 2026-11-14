@@ -19,7 +19,7 @@ internal static class DelegateModel
     public static string Signature(MethodRef method) => string.Join("|", method.Method.Parameters.Select(p => p.Type.Substitute(method.TypeArguments, method.MethodArguments)).Prepend(method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments)));
     public static void Event(Side side, ulong receiver, IEnumerable<ulong> arguments)
     {
-        side.Event($"delegate 0x{receiver:x}({string.Join(", ", arguments.Select(a => $"0x{a:x}"))})");
+        side.Event($"delegate 0x{receiver:x}({string.Join(", ", arguments.Select(a => $"0x{a:x}"))})", TraceEventKind.Call);
         side.PlannedCall();
     }
 }

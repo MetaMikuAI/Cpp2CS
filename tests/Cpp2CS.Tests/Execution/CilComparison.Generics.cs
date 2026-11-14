@@ -35,6 +35,12 @@ internal static partial class CilComparison
         }
         // 两轮都完成后再归并；一致不能遮住另一轮的差异。
         var selected = instances.FirstOrDefault(p => p.Value.Result.Status == CilComparisonStatus.Mismatch);
+        if (selected.Value is null && instances.Values.Any(i => i.Result.ReasonKind == ComparisonReason.ImplementationDifference))
+        {
+            selected = instances.FirstOrDefault(p => p.Value.Applicable && p.Value.Result.Status == CilComparisonStatus.Inconclusive
+                && p.Value.Result.ReasonKind != ComparisonReason.ImplementationDifference);
+            if (selected.Value is null) selected = instances.First(p => p.Value.Result.ReasonKind == ComparisonReason.ImplementationDifference);
+        }
         if (selected.Value is null) selected = instances.FirstOrDefault(p => p.Value.Result.Status == CilComparisonStatus.Match);
         if (selected.Value is null) selected = instances.FirstOrDefault(p => p.Value.Result.ReasonKind != ComparisonReason.GenericDefinition);
         if (selected.Value is null) selected = instances.First();

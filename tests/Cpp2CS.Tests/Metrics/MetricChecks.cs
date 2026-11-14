@@ -4,7 +4,7 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Tests.Metrics;
 
-internal static class MetricChecks
+internal static partial class MetricChecks
 {
     public const string Command = "il-metrics-check";
     private const string Source = """
@@ -87,6 +87,7 @@ internal static class MetricChecks
             r.Body = original;
         }
         Correspondence(a, options);
+        DeferredConversions(a);
         return a.Finish("IL 指标快速检查");
     }
     private static void Correspondence(Assertions a, MetricOptions options)

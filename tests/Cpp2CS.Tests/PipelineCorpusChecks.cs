@@ -178,6 +178,10 @@ internal static class PipelineCorpusChecks
         var complete = IlMetrics.Report(metrics.Where(p => byId.GetValueOrDefault(p.Key)?.Status == MethodStatus.Complete).Select(p => p.Value).ToArray(), options);
         table.AppendLine("完整写出方法：" + string.Join("，", complete.Summary.Statuses.Select(p => $"{p.Key}={p.Value.Count}")) + "。");
         table.AppendLine("完整写出方法无法判定原因：" + string.Join("，", complete.Summary.Reasons.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}")) + "。");
+        var implementationDifferences = complete.Methods.Where(m => m.ReasonKind == Execution.ComparisonReason.ImplementationDifference).ToArray();
+        table.AppendLine($"实现差异 ImplementationDifference：{implementationDifferences.Length} 个方法。");
+        foreach (var method in implementationDifferences.OrderBy(m => m.Identity, StringComparer.Ordinal))
+            table.AppendLine($"- {method.Identity}：{method.Difference}");
         table.AppendLine($"管线耗时 {report.Summary.ElapsedSeconds:F2}s，进程峰值 {report.Summary.PeakWorkingSetBytes / 1048576.0:F1} MiB。");
         File.WriteAllText(Path.Combine(output, "progress.local.md"), table.ToString());
         Console.Write(table);
