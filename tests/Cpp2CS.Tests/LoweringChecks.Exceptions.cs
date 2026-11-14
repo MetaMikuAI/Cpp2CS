@@ -29,7 +29,7 @@ internal static partial class LoweringChecks
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         var method = MethodRef.Open(program.Methods.Single(m => m.Name == "Add" && m.Owner.Name == "Cases"));
         var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(), catalog);
-        foreach (var mode in new[] { "Catch", "Rethrow", "Transparent", "TransparentBegin", "TransparentShared", "SplitEntry", "NoThrowCall", "UnknownProtectedCall", "State", "Typed", "TwoClauses", "Fault", "EscapingFrame", "WrongResume", "SelectorUse", "OtherCxxType" })
+        foreach (var mode in new[] { "Catch", "Rethrow", "Transparent", "TransparentBegin", "TransparentShared", "SplitEntry", "SplitColdEntry", "SplitDependent", "NoThrowCall", "UnknownProtectedCall", "State", "Typed", "TwoClauses", "Fault", "EscapingFrame", "WrongResume", "SelectorUse", "OtherCxxType" })
         {
             var terms = new TermTable(); var entry = new BlockIdentity(); var handler = new BlockIdentity(); var body = new BlockIdentity();
             var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
@@ -64,6 +64,15 @@ internal static partial class LoweringChecks
                 writes.Add(protectedCall with { Identity = firstId, Results = [new(slot,firstResult)], Unwind = null });
             }
             writes.Add(protectedCall);
+            if (mode == "SplitDependent")
+            {
+                var middleId = new CallIdentity(); var middleResult = terms.Atom(new ResultAtom(middleId),64);
+                writes.Add(protectedCall with { Identity = middleId, Unwind = null,
+                    Arguments = protectedCall.Arguments.SetItem(0,new(slot,callResult)), Results = [new(slot,middleResult)] });
+                var lastId = new CallIdentity();
+                writes.Add(protectedCall with { Identity = lastId,
+                    Arguments = protectedCall.Arguments.SetItem(0,new(slot,middleResult)), Results = [new(slot,terms.Atom(new ResultAtom(lastId),64))] });
+            }
             if (mode is "NoThrowCall" or "UnknownProtectedCall")
             {
                 map.TypeTest = catalog.Functions.Single(x=>x.Operation.Name=="IsAssignableFrom");
@@ -71,6 +80,16 @@ internal static partial class LoweringChecks
                 writes.Add(new Call(nextId,new ImageFunction(mode == "NoThrowCall" ? 2UL : 30UL),[new(slot,parameter),new(other,parameter)],[new(slot,nextResult)]));
             }
             builder.Blocks.Add(new(entry, [], [.. writes], new Return([new(slot, terms.Constant(1, 32))])));
+            if (mode == "SplitColdEntry")
+            {
+                var work = new BlockIdentity(); var cold = new BlockIdentity();
+                builder.Blocks[0] = builder.Blocks[0] with { Statements = [protectedCall with { Unwind = null }],
+                    End = new Branch(terms.Apply(new CoreOperator(CoreOperation.Equal),1,terms.Slice(parameter,0,32),terms.Constant(0,32)),cold,work) };
+                var workId = new CallIdentity();
+                builder.Blocks.Add(new(work,[],[protectedCall with { Identity = workId, Results = [new(slot,terms.Atom(new ResultAtom(workId),64))] }],new Return([new(slot,terms.Constant(1,32))])));
+                map.Raise = catalog.Functions.Single(x=>x.Operation.Name=="ThrowManaged");
+                builder.Blocks.Add(new(cold,[],[System("il2cpp_codegen_raise_exception",[terms.Constant(0,64),terms.Constant(0,64)],out _,true) with { Target = new ImageFunction(4), Unwind = handler }],new Unreachable()));
+            }
             builder.Blocks.Add(new(handler, [], [], new Jump(body), new(exception, selector, mode == "OtherCxxType" ? [new(ClauseKind.Catch, [new PointerTarget.Internal(100)]) { Selector = 1, TypeName = "other" }]
                 : [new(ClauseKind.CatchAll, [])])));
             if (mode == "TransparentShared")
@@ -134,11 +153,11 @@ internal static partial class LoweringChecks
             var names = mode is "Typed" or "TwoClauses" ? new NamingFacts(ImmutableDictionary<ulong, Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>>.Empty.Add(0,
                 Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>.Success(new ClassEntity(types.Object))), ImmutableDictionary<ulong, FlagEvidence>.Empty, true) : NamingFacts.Empty;
             var function = builder.Freeze();
-            if (mode == "SplitEntry")
+            if (mode is "SplitEntry" or "SplitColdEntry" or "SplitDependent")
             {
                 var originalBlocks = function.Blocks.Length;
                 function = ExceptionScaffolding.Project(function,namedCalls,splitEntries:true);
-                checks.True(function.Blocks.Length==originalBlocks+1 && ExitChecker.Check(function).IsValid,"受保护调用之前切块保持原生契约");
+                checks.True(function.Blocks.Length == originalBlocks + 1 && ExitChecker.Check(function).IsValid,"异常程序点切块保持原生契约");
             }
             if (mode is "NoThrowCall" or "UnknownProtectedCall")
             {
@@ -155,13 +174,15 @@ internal static partial class LoweringChecks
                 checks.True(state.CreateContext(function).Get(state.Escapes, 0) is { IsSuccess: true, Value.Any: true }, "反例帧地址确实逃逸");
             }
             var result = new IntegerLowering(function, method, binder, types, calls: namedCalls, effects: new ManagedCallEffects(namedCalls), spec: spec, names: names).Run();
+            if (mode == "SplitDependent")
+            { checks.True(result.Failure?.Reason.Code == "lowering.Exception.Region", "有值依赖的调用夹在两个受保护调用之间时，切块不能将它移出 try"); continue; }
             if (mode is "SelectorUse" or "OtherCxxType")
             { checks.True(result.Failure?.Reason.Code == "lowering.Exception.Selector", "选择值其他用法和其他 C++ 类型均报 Selector 洞"); continue; }
             if (mode is "Fault" or "EscapingFrame" or "WrongResume") { checks.True(result.Failure?.Reason.Code == "lowering.Exception.Fault", "没有包装对象的可观察清理报 fault 洞"); continue; }
             checks.True(result.Body is not null, "异常下降 " + mode + ": " + result.Failure);
             if (result.Body is null) continue;
             checks.True(result.Body.Regions.Count == (mode is "Transparent" or "TransparentBegin" or "TransparentShared" ? 0 : mode == "TwoClauses" ? 2 : 1), "异常子句数量 " + mode);
-            if (mode == "SplitEntry") checks.True(!result.Body.Regions.Single().Try.Contains(0UL),"无保护的前置调用保留在 try 之外");
+            if (mode is "SplitEntry" or "SplitColdEntry") checks.True(!result.Body.Regions.Single().Try.Contains(0UL),"无保护的前置调用保留在 try 之外");
             if (mode == "Rethrow") checks.True(result.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedRethrow>().Any(), "当前捕获对象下降为 rethrow");
             var emitter = new BodyEmitter(new Skeleton(program, 16), types);
             var problems = emitter.Emit([result.Body]); checks.True(problems.Count == 0, "异常 CIL 契约 " + mode + ": " + string.Join(';', problems.Values));

@@ -12,6 +12,7 @@ using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Exceptions;
 using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Structure;
 using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Targets.Arm64.Abi;
@@ -27,6 +28,8 @@ internal static partial class LoweringChecks
             public class E : System.Exception { public int Value; }
             public static class Cases {
                 public static int Add(int a,int b) => a+b;
+                public static int EntryBeforeCheck(int a,int b) { Add(a,b); try { if(a==0) throw null; Add(a,b); return 0; } catch { return 7; } }
+                public static int EntryBeforeCheckOut(int a,int b) => 0;
                 public static int SharedFinally(int a,int b) { try { Add(a,b); } finally { Add(b,a); } return 7; }
                 public static int SharedBranch(int a,int b) { try { Add(a,b); } finally { if(a!=0) Add(b,a); } return 7; }
                 public static int CopiedFinally(int a,int b) { try { Add(a,b); } finally { Add(b,a); } return 7; }
@@ -88,7 +91,7 @@ internal static partial class LoweringChecks
         var field = new FieldDef { Index = 0, Owner = e, Name = "Value", Type = Type("Int32"), Attributes = FieldAttributes.Public, Offset = 16 };
         e.Fields = [field];
         var owner = defs.Single(d => d.Name == "Cases");
-        var methods = new[] { "Add", "ReadCaptured", "IncomingState", "TypedField", "NestedInCatch", "Disjoint", "NestedTry", "TypedFieldSplit", "RethrowState", "SharedFinally", "SharedBranch", "SharedUse", "SharedWrongThrow", "SharedRaise", "ThrowCaptured", "CopiedFinally", "CopiedGuarded", "CopiedUnknownGuard", "CopiedMismatch", "CopiedEmpty", "CopiedSharedEntry", "SharedMulti", "SharedThrow", "FinallyInFinally", "FinallyInTry" }.Select((name, i) => new MethodDef {
+        var methods = new[] { "Add", "EntryBeforeCheck", "ReadCaptured", "IncomingState", "TypedField", "NestedInCatch", "Disjoint", "NestedTry", "TypedFieldSplit", "RethrowState", "SharedFinally", "SharedBranch", "SharedUse", "SharedWrongThrow", "SharedRaise", "ThrowCaptured", "CopiedFinally", "CopiedGuarded", "CopiedUnknownGuard", "CopiedMismatch", "CopiedEmpty", "CopiedSharedEntry", "SharedMulti", "SharedThrow", "FinallyInFinally", "FinallyInTry" }.Select((name, i) => new MethodDef {
             Index = i, Owner = owner, Name = name, Token = 0, Attributes = MethodAttributes.Public | MethodAttributes.Static,
             ImplAttributes = 0, Slot = -1, ReturnType = Type(name == "ReadCaptured" ? "Object" : "Int32"),
             Parameters = [new("a", Type("Int32"), 0, null, false), new("b", Type("Int32"), 0, null, false)] }).ToArray();
@@ -98,7 +101,7 @@ internal static partial class LoweringChecks
         var spec = InputCorpusChecks.Spec("arm64-v8a"); var layouts = new FieldLayouts(spec, 8, 8);
         var types = new ManagedTypes(program, layouts, 8); var binder = new MethodBinder(new(layouts), new Aapcs64());
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
-        foreach (var name in new[] { "ReadCaptured", "IncomingState", "TypedField", "NestedInCatch", "Disjoint", "NestedTry", "TypedFieldSplit", "RethrowState", "SharedFinally", "SharedBranch", "SharedUse", "SharedWrongThrow", "SharedRaise", "ThrowCaptured", "CopiedFinally", "CopiedGuarded", "CopiedUnknownGuard", "CopiedMismatch", "CopiedEmpty", "CopiedSharedEntry", "SharedMulti", "SharedThrow", "FinallyInFinally", "FinallyInTry" })
+        foreach (var name in new[] { "EntryBeforeCheck", "ReadCaptured", "IncomingState", "TypedField", "NestedInCatch", "Disjoint", "NestedTry", "TypedFieldSplit", "RethrowState", "SharedFinally", "SharedBranch", "SharedUse", "SharedWrongThrow", "SharedRaise", "ThrowCaptured", "CopiedFinally", "CopiedGuarded", "CopiedUnknownGuard", "CopiedMismatch", "CopiedEmpty", "CopiedSharedEntry", "SharedMulti", "SharedThrow", "FinallyInFinally", "FinallyInTry" })
         {
             var t = new TermTable(); var entry = new BlockIdentity(); var second = new BlockIdentity(); var h = new BlockIdentity(); var body = new BlockIdentity();
             var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
@@ -124,7 +127,17 @@ internal static partial class LoweringChecks
             var read = new MemoryRead(readId,payload,64,captured); var end = Runtime("__cxa_end_catch",[],out _);
             var runtimeMap = new ExceptionRuntimeMap();
             var facts = NamingFacts.Empty;
-            if (name.StartsWith("Shared", StringComparison.Ordinal) || name is "FinallyInFinally" or "FinallyInTry")
+            if (name == "EntryBeforeCheck")
+            {
+                var cold = new BlockIdentity();
+                f.Blocks[0] = f.Blocks[0] with { Statements = [first with { Unwind = null }],
+                    End = new Branch(t.Apply(new CoreOperator(CoreOperation.Equal),1,t.Slice(a,0,32),t.Constant(0,32)),cold,second) };
+                f.Blocks.Add(new(second,[],[next],new Return([new(slot,t.Constant(0,32))])));
+                runtimeMap.Raise = catalog.Functions.Single(x=>x.Operation.Name=="ThrowManaged");
+                f.Blocks.Add(new(cold,[],[new Call(new(),new ImageFunction(4),[new(slot,t.Constant(0,64)),new(other,t.Constant(0,64))],[],true,Unwind:h)],new Unreachable()));
+                f.Blocks.Add(new(body,[],[begin,read,end],new Return([new(slot,t.Constant(7,32))])));
+            }
+            else if (name.StartsWith("Shared", StringComparison.Ordinal) || name is "FinallyInFinally" or "FinallyInTry")
             {
                 var cleanup = new BlockIdentity(); var test = new BlockIdentity(); var thrown = new BlockIdentity(); var continuation = new BlockIdentity();
                 var savedId = new MergeIdentity(); var saved = t.Atom(new ResultAtom(savedId),64);
@@ -292,6 +305,7 @@ internal static partial class LoweringChecks
             else f.Blocks.Add(new(body,[],[begin,read,end],new Return([new(slot,name == "ReadCaptured" ? captured : merged)])));
             var calls = new CallNamingQuery(binder,new NamingChecks.Map([new(MethodRef.Open(methods[0]),BindingEntryKind.Ordinary)]),runtimeMap,catalog);
             var function = f.Freeze(); checks.True(ExitChecker.Check(function).IsValid,name + " 原生契约");
+            if (name == "EntryBeforeCheck") function = ExceptionScaffolding.Project(function,calls,splitEntries:true);
             if (name is "SharedUse" or "SharedWrongThrow" or "SharedRaise")
             {
                 var state = new StateQueries(new ManagedCallEffects(calls));
@@ -340,6 +354,8 @@ internal static partial class LoweringChecks
                 };
             var comparison = CilComparison.Compare(source.Method("Cases",name),testedMethod);
             checks.True(comparison.Status == CilComparisonStatus.Match,name + " 执行对照：" + comparison);
+            if (name == "EntryBeforeCheck") checks.True(comparison.CompletedCases == 32 && comparison.Coverage?.Complete == true,
+                "调用后的冷检查覆盖正常返回、显式抛出与捕获分支；前置调用保持在 try 外");
             if (name == "IncomingState") checks.True(result.Body.Blocks.Sum(block => block.Statements.Count(s => s is ManagedAssignment { ExceptionArrival: true })) == 4,
                 "两条展开边在各自调用之前完成并行赋值");
         }

@@ -79,7 +79,7 @@ public sealed partial class ExceptionRegionQuery(StateQueries state, CallNamingQ
             _ => SnapshotRewrite.Uses(statement),
         });
         if (handlers.Any(h => selectorUses.Used(h.Handler!.Selector)))
-            return No("Selector", "选择值存在未折叠的测试或其他语义用法");
+            return No("Selector", "选择值存在未折叠的测试或其他语义用法；未证明各使用点只选择托管包装子句");
         bool Private(Statement s) => s switch
         {
             MemoryRead => true,
@@ -218,7 +218,7 @@ public sealed partial class ExceptionRegionQuery(StateQueries state, CallNamingQ
                         return No("Filter", "类型选择之前存在可观察操作");
                     prefix.Add(cursor);
                     var body = scope.Where(id => Dominates(typeTest.Accepted, id)).ToImmutableHashSet();
-                    if (body.Count == 0) return No("Region", "类型子句没有唯一入口");
+                    if (body.Count == 0) return No("Region", "类型子句没有唯一入口；缺少按入边复制处理区域的凭据");
                     clauses.Add(new(h.Identity, typeTest.Type, typeTest.Accepted, body)); cursor = typeTest.Rejected; continue;
                 }
                 if (block.End is Branch branchEnd)
@@ -254,7 +254,7 @@ public sealed partial class ExceptionRegionQuery(StateQueries state, CallNamingQ
             }
             for (int i = 0; i < clauses.Count; i++)
                 for (int j = i + 1; j < clauses.Count; j++)
-                    if (clauses[i].Body.Overlaps(clauses[j].Body)) return No("Region", "不同 catch 子句共用了处理块");
+                    if (clauses[i].Body.Overlaps(clauses[j].Body)) return No("Region", "不同 catch 子句共用了处理块；缺少逐子句复制区域与合流取值的凭据");
             removed.UnionWith(prefix);
             var throwing = f.Blocks.Where(b => !removed.Contains(b.Identity) && b.Statements.OfType<Call>().Any(call => !privateCalls.Contains(call.Identity) && unwind[call.Identity] == h.Identity)).Select(b => b.Identity).ToHashSet();
             if (throwing.Count == 0) return No("Region", "处理入口没有受保护的调用");
@@ -372,7 +372,7 @@ public sealed partial class ExceptionRegionQuery(StateQueries state, CallNamingQ
                     var target = unwind[call.Identity];
                     if (target == p.Source || target is null && classified[call.Identity].Operation?.Exceptions.MayThrow == false) continue;
                     var child = plans.SingleOrDefault(inner => inner.Source == target);
-                    if (child is null || !Whole(child).IsSubsetOf(p.Try)) return No("Region", "try 扩张会改变某个调用的处理入口");
+                    if (child is null || !Whole(child).IsSubsetOf(p.Try)) return No("Region", "try 内仍有处理入口不同的调用；未证明调用可移出区域或检查可归位");
                 }
             }
         }

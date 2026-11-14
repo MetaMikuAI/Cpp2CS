@@ -25,7 +25,7 @@ public static class ExceptionScaffolding
         return splitEntries ? SplitEntries(projected) : projected;
     }
 
-    /// <summary>受保护调用前已有调用时，在前一次调用之后切块，使 try 可以从精确的程序点进入。</summary>
+    /// <summary>在受保护调用前与调用后的控制流分支前切块，使 try 可以从精确程序点进入。</summary>
     private static NativeFunction SplitEntries(NativeFunction function)
     {
         var pieces = new Dictionary<BlockIdentity, Block[]>();
@@ -38,12 +38,14 @@ public static class ExceptionScaffolding
                     if (call.Unwind is not null && previous >= 0 && previous + 1 != cuts[^1]) cuts.Add(previous + 1);
                     previous = i;
                 }
+            // 检查可以通过终结跳转到冷抛出块；入口不能因此连同前面的调用一起纳入 try。
+            if (previous >= 0 && (block.End is Jump or Branch or JumpTable) && previous + 1 != cuts[^1]) cuts.Add(previous + 1);
             if (cuts.Count == 1) continue;
             var ids = cuts.Select((_, i) => i == 0 ? block.Identity : new BlockIdentity(block.Identity)).ToArray();
             pieces.Add(block.Identity, cuts.Select((start, i) => new Block(ids[i], i == 0 ? block.Merges : [],
                 block.Statements[start..(i + 1 == cuts.Count ? block.Statements.Length : cuts[i + 1])],
                 i + 1 == cuts.Count ? block.End : new Jump(ids[i + 1]), i == 0 ? block.Handler : null)
-                { Trace = i == 0 ? block.Trace : block.Statements[start].Trace ?? block.Trace }).ToArray());
+                { Trace = i == 0 || start == block.Statements.Length ? block.Trace : block.Statements[start].Trace ?? block.Trace }).ToArray());
         }
         if (pieces.Count == 0) return function;
         var builder = new FunctionBuilder(function.Terms, function.Entry, function.AddressWidth, function.Frame)
