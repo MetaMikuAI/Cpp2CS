@@ -514,7 +514,10 @@ internal static partial class InliningChecks
             var evidence = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128, Outcome<MetadataEntity>.Success(new ClassEntity(f.OwnerType))) };
             var selectedQuery = mode == "Direct" ? new ConstructorQuery(f.Types, new(new BodySource(_ => null), f.Types)) : query;
             var body = new IntegerLowering(function.Freeze(), MethodRef.Open(make), f.Binder, f.Types, calls: calls, spec: f.Spec, names: evidence, constructors: selectedQuery).Run();
-            if (mode is "Deferred" or "Mixed") checks.True(body.Failure?.Reason.Code == "lowering.Allocation.Deferred", "延迟或部分路径显式构造保留洞：" + mode);
+            // Deferred：中间隔着另一次没有构造的同类分配；Mixed：构造调用只在一条路径上。两者都不能写出。
+            if (mode == "Mixed") checks.True(body.Failure?.Reason.Code == "lowering.Allocation.Deferred.Flow", "部分路径的显式构造保留洞");
+            else if (mode == "Deferred") checks.True(body.Failure?.Reason.Code.StartsWith("lowering.Allocation.", StringComparison.Ordinal) == true,
+                "未构造的分配保留洞（" + body.Failure?.Reason.Code + "）");
             else
             {
                 var created = body.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().SingleOrDefault(a => a.Value is NewObjectValue);
