@@ -1,10 +1,12 @@
 using System.Collections.Immutable;
 using System.Reflection;
+using Cpp2CS.Input;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
+using Cpp2CS.Pipeline;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Recovery.Structure;
@@ -124,7 +126,155 @@ internal static class InitializationGuardChecks
                 "带返回值的类布局就绪保持既有处理，不纳入静态构造守卫");
         }
         GenericContextCases(checks, spec, catalog, binder, klass, voidType);
+        MethodBodyCases(checks, spec, catalog, binder, klass, voidType);
         return checks.Finish("初始化守卫");
+    }
+
+    private sealed class MetadataRuntimeMap(RuntimeFunction metadata) : IRuntimeFunctionMap
+    {
+        public RuntimeFunction? Find(CallTarget target) => target is ImageFunction { EntryOffset: 20 } ? metadata : null;
+    }
+
+    private sealed class SlotDecoder(TypeRef type) : IMetadataSlotDecoder
+    {
+        public Outcome<MetadataEntity> Decode(ulong address) => Outcome<MetadataEntity>.Success(new ClassEntity(type));
+    }
+
+    private static void MethodBodyCases(Assertions checks, RuntimeSpec spec, RuntimeFunctionCatalog catalog,
+        MethodBinder binder, TypeDef owner, TypeRef voidType)
+    {
+        var type = new DefinitionRef(owner, []);
+        var step = new MethodRef(new MethodDef { Index = 1, Owner = owner, Name = "Step", Token = 0x06000002,
+            Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = voidType,
+            Parameters = [new("value", type, 0, null, false)] }, [], []);
+        var metadata = catalog.Functions.First(f => f.Operation.Name == "InitializeMetadata" && f.Signature is { ReturnType.Size: 0 });
+        var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(step, BindingEntryKind.Ordinary)]), new MetadataRuntimeMap(metadata), catalog);
+        string[] primitives = ["Object", "String", "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Single", "Double", "IntPtr", "UIntPtr", "RuntimeTypeHandle", "RuntimeFieldHandle", "RuntimeMethodHandle"];
+        var definitions = primitives.Select((name, index) => new TypeDef { Index = index + 2, Assembly = "mscorlib.dll", Namespace = "System", Name = name,
+            Token = (uint)(0x02000003 + index), Attributes = TypeAttributes.Public, IsValueType = name is not ("Object" or "String"), IsEnum = false }).ToArray();
+        var caller = new MethodRef(new MethodDef { Index = 2, Owner = owner, Name = "Caller", Token = 0x06000003,
+            Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = voidType,
+            Parameters = [new("control", new DefinitionRef(definitions.Single(t => t.Name == "Int32"), []), 0, null, false)] }, [], []);
+        TypeDef[] types = [owner, ((DefinitionRef)voidType).Definition, .. definitions];
+        var model = new ProgramModel { MetadataVersion = 0, Types = types, Methods = [.. owner.Methods, step.Method, caller.Method],
+            Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = types.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key),
+                Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var codeEntry = new CodeEntry(64, EntryKind.Method, caller, 2, null);
+        CodeEntry[] entries = [new(10, EntryKind.Method, step, 1, null), codeEntry];
+        var map = new Registrations { CodeRegistration = 0, MetadataRegistration = 0, Entries = entries,
+            ByAddress = entries.ToDictionary(e => e.Address, e => ImmutableArray.Create(e)), Rgctx = new Dictionary<(string, uint), ImmutableArray<RgctxEntry>>(),
+            MetadataUsageSlots = [], TypePointers = new Dictionary<ulong, int>(), InvokerOf = new Dictionary<MethodDef, int>(), UsageEntities = new Dictionary<ulong, Usage>() };
+        var entryBinding = binder.Entry(caller, BindingEntryKind.Ordinary).Value;
+        string[] cases = ["调用和分支之后", "分支的一臂", "循环体", "两个不同标志", "同一标志重复", "其他写入", "其他调用", "标志额外读取", "槽位提前读取", "异常区域", "第二个模板失败", "两臂各自初始化同一槽位", "槽位读取绕过守卫", "异常路径未完成初始化", "未使用的提前读取", "槽位实体合流物化"];
+        for (int scenario = 0; scenario < cases.Length; scenario++)
+        {
+            var t = new TermTable(); var entry = new BlockIdentity(); var before = new BlockIdentity(); var head = new BlockIdentity();
+            var arm = new BlockIdentity(); var join = new BlockIdentity(); var exit = new BlockIdentity(); var handler = new BlockIdentity(); var alternative = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            Term Address(int offset) => t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(offset, 64));
+            var slot = new AbstractSlot(SlotKind.Integer);
+            var f = new FunctionBuilder(t, entry, 64, new(frame)) { ImageBase = image };
+            var parameter = t.Atom(new EntryAtom(slot), 64); f.Inputs.Add(new(slot, parameter));
+            var control = t.Apply(new CoreOperator(CoreOperation.NotEqual), 1, t.Slice(parameter, 0, 32), t.Constant(0, 32));
+            Call Step(Term? value = null) => new(new(), new ImageFunction(10), [new(slot, value ?? t.Constant(0, 64)), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []);
+            Term Read(List<Statement> statements, int offset, int width, ulong trace)
+            {
+                var id = new ReadIdentity(); var value = t.Atom(new ResultAtom(id), width);
+                statements.Add(new MemoryRead(id, Address(offset), width, value) { Trace = new(trace) }); return value;
+            }
+            var first = new List<Statement> { Step() };
+            if (scenario == 8) first.Add(Step(Read(first, 100, 64, 9)));
+            if (scenario == 14) Read(first, 100, 64, 9);
+            f.Blocks.Add(new(entry, [], [.. first], scenario == 2 ? new Jump(head) : new Branch(control, before, scenario is 1 or 12 ? exit : scenario == 11 ? alternative : head)));
+            if (scenario != 2) f.Blocks.Add(new(before, [], [Step()], new Jump(head)));
+            void Guard(BlockIdentity test, BlockIdentity initialize, BlockIdentity continuation, int flag, int metadataSlot, ulong trace, bool bad = false)
+            {
+                var reads = new List<Statement>(); var value = Read(reads, flag, 8, trace);
+                // 补零后的全宽测试与原字节的零测试相同；无关读取不改变模板凭据。
+                Read(reads, 400, 32, trace + 1);
+                if (scenario == 7) Read(reads, flag, 8, trace + 2);
+                var zero = t.Apply(new CoreOperator(CoreOperation.Equal), 1, t.Concat(value, t.Constant(0, 24)), t.Constant(0, 32));
+                f.Blocks.Add(new(test, [], [.. reads], new Branch(zero, initialize, continuation)));
+                var body = new List<Statement>();
+                if (scenario == 5) body.Add(new MemoryWrite(new(), frame, 32, t.Constant(3, 32)));
+                if (scenario == 6 || bad) body.Add(Step());
+                body.Add(new Call(new(), new ImageFunction(20), [new(slot, Address(metadataSlot))], [], Unwind: scenario is 9 or 13 ? handler : null));
+                if (scenario == 15) body.Add(new Call(new(), new ImageFunction(20), [new(slot, Address(108))], []));
+                body.Add(new MemoryWrite(new(), Address(flag), 8, t.Constant(1, 8)));
+                f.Blocks.Add(new(initialize, [], [.. body], new Jump(continuation)));
+            }
+            Guard(head, arm, join, 200, 100, 10);
+            if (scenario is 3 or 4 or 10)
+            {
+                var secondArm = new BlockIdentity(); var secondJoin = new BlockIdentity();
+                Guard(join, secondArm, secondJoin, scenario == 3 ? 201 : 200, scenario == 3 ? 108 : 100, 20, scenario == 10);
+                f.Blocks.Add(new(secondJoin, [], [], new Jump(exit)));
+            }
+            else
+            {
+                var after = new List<Statement>(); after.Add(Step(Read(after, 100, 64, 30)));
+                if (scenario == 15)
+                {
+                    var read = (MemoryRead)after[0];
+                    after[0] = read with { Address = t.Apply(new CoreOperator(CoreOperation.Select), 64, control, Address(100), Address(108)) };
+                }
+                f.Blocks.Add(new(join, [], [.. after], scenario == 2 ? new Branch(control, head, exit) : new Jump(exit)));
+            }
+            if (scenario == 11)
+            {
+                var alternativeArm = new BlockIdentity(); var alternativeJoin = new BlockIdentity();
+                Guard(alternative, alternativeArm, alternativeJoin, 201, 100, 40);
+                var after = new List<Statement>(); after.Add(Step(Read(after, 100, 64, 50)));
+                f.Blocks.Add(new(alternativeJoin, [], [.. after], new Jump(exit)));
+            }
+            var end = new List<Statement>();
+            if (scenario == 12) end.Add(Step(Read(end, 100, 64, 60)));
+            f.Blocks.Add(new(exit, [], [.. end], new Return([])));
+            if (scenario is 9 or 13)
+            {
+                var exception = t.Atom(new ExceptionAtom(handler), 64); var selector = t.Atom(new SelectorAtom(handler), 64);
+                var body = new List<Statement>();
+                if (scenario == 13) body.Add(Step(Read(body, 100, 64, 70)));
+                f.Blocks.Add(new(handler, [], [.. body], new ResumeUnwind(exception), new(exception, selector, [new(Cpp2CS.Native.Images.ClauseKind.Cleanup, [])])));
+            }
+            var function = f.Freeze();
+            checks.True(ExitChecker.Check(function).IsValid, cases[scenario] + "输入契约");
+            var memory = new InputMemoryImage();
+            var survey = new NamingSurvey(calls, new SlotDecoder(type), memory, binder, spec, entryBinding); survey.Observe(function);
+            var facts = survey.Finish();
+            checks.True(facts.Flags[200].IsFlag == (scenario is not (5 or 6 or 7 or 10)), cases[scenario] + "标志凭据");
+            var state = new StateQueries(image: memory); var names = new ValueNamingQuery(state, calls, facts, spec, binder, entryBinding);
+            var output = new UnobservableEffects(state, calls, names, memory, new HashSet<AbstractSlot>()).Run(function);
+            checks.True(ExitChecker.Check(output.Function).IsValid, cases[scenario] + "输出契约");
+            int expected = scenario is 3 or 4 or 11 ? 2 : scenario is 5 or 6 or 7 or 8 or 10 or 12 or 13 or 14 ? 0 : 1;
+            checks.True(output.Records.Count(r => r.Kind == "init-guard" && r.Removed) == expected, cases[scenario] + "各次模板独立证明");
+            if (expected > 0)
+            {
+                checks.True(!output.Function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Any(r => r.Width == 8)
+                    && output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().All(call => call.Target is ImageFunction { EntryOffset: 10 }),
+                    cases[scenario] + "只消去初始化效果");
+                checks.True(output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count() == (scenario is 2 or 3 or 4 ? 2 : scenario == 11 ? 4 : 3),
+                    cases[scenario] + "保留业务调用");
+            }
+            else
+            {
+                var diagnostic = output.Records.FirstOrDefault(r => !r.Removed && r.Address == 10 && r.Reason is not null);
+                checks.True(output.Function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Any(r => r.Width == 8)
+                    && diagnostic is not null, cases[scenario] + "保留守卫并在读取位置携带原因链");
+                var codes = new List<string>();
+                for (var why = diagnostic?.Reason; why is not null; why = why.Cause) codes.Add(why.Code);
+                checks.True(codes.Contains(scenario is 8 or 12 or 13 or 14 ? "structure.init-guard.slot-before-init" : scenario == 7 ? "naming.flag-read" : "structure.init-guard.effect-before-event"),
+                    cases[scenario] + "具体拒绝原因：" + string.Join("、", codes));
+                var global = new GlobalFacts(memory, model, map, spec, "arm64") { Symbols = [new(metadata.MangledName, 20, 4)] };
+                var recovered = new IntegerRecoveryStage(enableAccessorInlining: false, enableConstructorInlining: false).Run(function, new(caller.Method, codeEntry, global));
+                var reasons = new List<string>();
+                for (var why = (recovered as Missing<Cpp2CS.Managed.ManagedBody>)?.Hole.Reason; why is not null; why = why.Cause) reasons.Add(why.Code);
+                checks.True(recovered is Missing<Cpp2CS.Managed.ManagedBody> && reasons.Contains(scenario is 8 or 12 or 13 or 14
+                    ? "structure.init-guard.slot-before-init" : scenario == 7 ? "naming.flag-read" : "structure.init-guard.effect-before-event"),
+                    cases[scenario] + "下降保持洞且传播具体原因：" + string.Join("、", reasons));
+            }
+        }
     }
 
     private sealed class GuardContextDecoder(MethodRef method, TypeRef type) : IRgctxDecoder

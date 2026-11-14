@@ -31,7 +31,7 @@ internal static class InitializationFlagChecks
             Slot = -1, ReturnType = voidType, Parameters = [new("value", single, 0, null, false)] }, [], []);
         var caller = new MethodRef(new MethodDef { Index = 1, Owner = type, Name = "Caller", Token = 0, Attributes = MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = single, Parameters = [] }, [], []);
         var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(method, BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(runtime), catalog);
-        for (int scenario = 0; scenario < 15; scenario++)
+        for (int scenario = 0; scenario < 20; scenario++)
         {
             var t = new TermTable(); var head = new BlockIdentity(); var arm = new BlockIdentity(); var skip = new BlockIdentity(); var join = new BlockIdentity();
             var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
@@ -60,7 +60,16 @@ internal static class InitializationFlagChecks
             var start = scenario == 11 ? new BlockIdentity() : head;
             var builder = new FunctionBuilder(t, start, 64, new(frame)) { ImageBase = image };
             if (scenario == 11) builder.Blocks.Add(new(start, [], [], new Branch(t.Unknown(1, new("test.path", "另一入口")), head, arm)));
-            builder.Blocks.Add(new(head, [], statements.ToImmutableArray(), new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, value, t.Constant(0, 8)), arm, skip)));
+            var tested = scenario switch
+            {
+                15 => t.Concat(value, t.Constant(0, 24)),
+                16 => t.Concat(t.Constant(0, 8), value, t.Constant(0, 16)),
+                17 => t.Concat(t.Slice(value, 1, 3), t.Constant(0, 29)),
+                18 => t.Concat(value, t.Unknown(24, new("test.bits", "独立的高位。"))),
+                19 => t.Concat(value, t.Constant(1, 24)),
+                _ => value,
+            };
+            builder.Blocks.Add(new(head, [], statements.ToImmutableArray(), new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, tested, t.Constant(0, tested.Width)), arm, skip)));
             bool merged = scenario is 7 or 9 or 12;
             builder.Blocks.Add(new(arm, [], body, merged ? new Jump(join) : new Return([])));
             builder.Blocks.Add(new(skip, [], [], merged ? new Jump(join) : new Return([])));
@@ -75,7 +84,7 @@ internal static class InitializationFlagChecks
             var function = builder.Freeze(); checks.True(ExitChecker.Check(function).IsValid, $"字节凭据 {scenario} 输入契约");
             var survey = new NamingSurvey(calls, new Decoder(), new InputMemoryImage(), binder, spec, entry);
             survey.Observe(function); var evidence = survey.Finish().Flags[200];
-            bool expected = scenario is 0 or 3 or 6 or 7 or 8 or 9 or 14;
+            bool expected = scenario is 0 or 3 or 6 or 7 or 8 or 9 or 14 or 15 or 16;
             checks.True(evidence.IsFlag == expected, $"字节凭据 {scenario} 判定：{string.Join("；", evidence.Reasons.Select(r => r.Message))}");
             if (scenario is 1 or 5) checks.True(evidence.Reasons.Any(r => r.Message.Contains(scenario == 1 ? "0x67" : "0x65", StringComparison.Ordinal)), "凭据拒绝指出具体访问");
             survey.Incomplete(); checks.True(survey.Finish().Flags[200].IsFlag == evidence.IsFlag, "未观察函数不影响当前函数的模板凭据");

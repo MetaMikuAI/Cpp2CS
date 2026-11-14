@@ -48,13 +48,14 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
 
     public StructureResult Run(NativeFunction input)
     {
+        var sourceReads = input.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Select(r => r.Identity).ToHashSet();
         var records = new List<StructureRecord>();
         var rejected = new List<StructureRecord>();
         var assumptions = new HashSet<string>();
         var timings = new Dictionary<string, double>();
         while (true)
         {
-            var result = Normalize(input);
+            var result = Normalize(input, sourceReads);
             records.AddRange(result.Records.Where(r => r.Removed));
             assumptions.UnionWith(result.Assumptions);
             foreach (var (key, seconds) in result.Timings) timings[key] = timings.GetValueOrDefault(key) + seconds;
@@ -89,7 +90,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
 
     private bool contextInitialization;
 
-    private StructureResult Normalize(NativeFunction input)
+    private StructureResult Normalize(NativeFunction input, IReadOnlySet<ReadIdentity> sourceReads)
     {
         contextInitialization = false;
         var timer = Stopwatch.StartNew();
@@ -102,7 +103,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         if (!ReferenceEquals(input, original)) c = names.CreateContext(input);
         MethodProgress.Mark("结构：初始化守卫");
         var guardStart = timer.Elapsed.TotalSeconds;
-        input = FoldInitializationGuards(input, records, c, out var retainedGuards, out c, ref assumed);
+        input = FoldInitializationGuards(input, records, c, sourceReads, out var retainedGuards, out c, ref assumed);
         timings["初始化守卫"] = timer.Elapsed.TotalSeconds - guardStart;
         MethodProgress.Mark("结构：候选消去与读取转发");
         var edit = new SnapshotRewrite(input);

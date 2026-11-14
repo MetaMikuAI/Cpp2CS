@@ -12,8 +12,13 @@ namespace Cpp2CS.Recovery.Structure;
 
 public sealed partial class UnobservableEffects
 {
-    private NativeFunction FoldInitializationGuards(NativeFunction input, List<StructureRecord> records, QueryContext context, out HashSet<BlockIdentity> retainedGuards, out QueryContext finalContext, ref bool assumed)
+    private NativeFunction FoldInitializationGuards(NativeFunction input, List<StructureRecord> records, QueryContext context, IReadOnlySet<ReadIdentity> sourceReads, out HashSet<BlockIdentity> retainedGuards, out QueryContext finalContext, ref bool assumed)
     {
+        var original = input;
+        int recordStart = records.Count, discoveredStart = DiscoveredCaches.Count, verifiedStart = VerifiedInternalCallCaches.Count;
+        bool originalAssumed = assumed, originalCacheFold = foldedInternalCall;
+        var metadataGuards = new List<(MemoryRead Read, BlockIdentity Head)>();
+        var guardedSlots = new HashSet<ulong>();
         var rejected = new Dictionary<ReadIdentity, StructureRecord>();
         var rejectedHeads = new Dictionary<ReadIdentity, BlockIdentity>();
         while (true)
@@ -131,18 +136,103 @@ public sealed partial class UnobservableEffects
                 occupied.UnionWith(region);
                 if (cache) occupied.UnionWith(input.Blocks.Select(b => b.Identity));
                 rejected.Remove(read.Identity);
+                if (methodFlag)
+                {
+                    metadataGuards.Add((read, head.Identity));
+                    foreach (var call in moved.OfType<Call>())
+                        if (InitializationSlotAddress(c, call) is { } slot) guardedSlots.Add(slot);
+                }
                 records.Add(new("init-guard", read.Trace?.NativeAddress, (cache ? "内部调用缓存初始化" : classFlag ? "类初始化" : methodContext ? "方法泛型上下文初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
                 changed = true;
             }
             if (!changed) break;
             input = batch.Apply();
         }
-        var remaining = input.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Select(r => r.Identity).ToHashSet();
-        records.AddRange(rejected.Where(p => remaining.Contains(p.Key)).Select(p => p.Value));
-        retainedGuards = rejected.Where(p => remaining.Contains(p.Key) && p.Value.Reason?.Code != "structure.init-guard.generic-context")
-            .Select(p => rejectedHeads[p.Key]).ToHashSet();
         finalContext = ReferenceEquals(context.Snapshot, input) ? context : names.CreateContext(input);
+        // 全部守卫归位后统一核对，允许不同分支上的守卫分别建立同一槽位的初始化事实。
+        if (guardedSlots.Count != 0 && InitializationSlotReads(finalContext, guardedSlots, sourceReads) is { } scopeFailure)
+        {
+            // 范围凭据不足时保留原守卫；快照、诊断与附带事实一起撤回，下降在标志读取处得到具体原因。
+            input = original;
+            assumed = originalAssumed;
+            foldedInternalCall = originalCacheFold;
+            records.RemoveRange(recordStart, records.Count - recordStart);
+            DiscoveredCaches.RemoveRange(discoveredStart, DiscoveredCaches.Count - discoveredStart);
+            VerifiedInternalCallCaches.RemoveRange(verifiedStart, VerifiedInternalCallCaches.Count - verifiedStart);
+            foreach (var (read, head) in metadataGuards)
+            {
+                rejected[read.Identity] = new("init-guard", read.Trace?.NativeAddress, scopeFailure.Why.Message, false) { Reason = scopeFailure.Why };
+                rejectedHeads[read.Identity] = head;
+            }
+            records.Add(new("init-guard", scopeFailure.Read.Trace?.NativeAddress, scopeFailure.Why.Message, false) { Reason = scopeFailure.Why });
+            finalContext = names.CreateContext(input);
+        }
+        var remaining = input.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().ToDictionary(r => r.Identity);
+        // 测试项未被模板视图接受时，仍保留字节候选的否决凭据，不依赖测试已经进入结构候选。
+        foreach (var read in remaining.Values.Where(r => r.Width == 8 && !rejected.ContainsKey(r.Identity)))
+        {
+            var address = finalContext.Get(state.Resolve, read.Address);
+            var location = address.IsSuccess ? finalContext.Get(state.Locations, new(address.Value, read.Width)) : default;
+            if (!location.IsSuccess || location.Value is not { Region: Region.Image, Offset: { } offset }
+                || offset < 0 || offset > ulong.MaxValue || !names.Flags.TryGetValue((ulong)offset, out var flag)
+                || flag.IsFlag || flag.Writes == 0) continue;
+            var why = new Reason("structure.init-guard.flag-evidence", "本函数未证明该字节是方法元数据初始化标志。", Chain(flag.Reasons));
+            rejected[read.Identity] = new("init-guard", read.Trace?.NativeAddress, why.Message, false) { Reason = why };
+        }
+        records.AddRange(rejected.Where(p => remaining.ContainsKey(p.Key)).Select(p => p.Value));
+        retainedGuards = rejected.Where(p => remaining.ContainsKey(p.Key) && rejectedHeads.ContainsKey(p.Key)
+                && p.Value.Reason?.Code != "structure.init-guard.generic-context")
+            .Select(p => rejectedHeads[p.Key]).ToHashSet();
         return input;
+    }
+
+    private ulong? InitializationSlotAddress(QueryContext c, Call call)
+    {
+        if (calls.RuntimeIdentity(call.Target)?.Operation.Name != "InitializeMetadata") return null;
+        var named = c.Get(calls, call.Identity);
+        if (!named.IsSuccess || named.Value.Operation?.Name != "InitializeMetadata"
+            || named.Value.Inputs?.GetValueOrDefault("slot")?.Source is not TermSource source) return null;
+        var address = c.Get(state.Resolve, source.Term);
+        var location = address.IsSuccess ? c.Get(state.Locations, new(address.Value, c.Snapshot.AddressWidth)) : default;
+        return location.IsSuccess && location.Value is { Region: Region.Image, Offset: { } offset }
+            && offset >= 0 && offset <= ulong.MaxValue ? (ulong)offset : null;
+    }
+
+    private (MemoryRead Read, Reason Why)? InitializationSlotReads(QueryContext c, IReadOnlySet<ulong> guardedSlots, IReadOnlySet<ReadIdentity> sourceReads)
+    {
+        // 槽位名字按地址复用；未使用的提前读取也不能成为后续读取转发的凭据。
+        var initializations = new Dictionary<ulong, List<Point>>();
+        foreach (var block in c.Snapshot.Blocks)
+        for (int i = 0; i < block.Statements.Length; i++)
+            if (block.Statements[i] is Call call && InitializationSlotAddress(c, call) is { } slot && guardedSlots.Contains(slot))
+            {
+                if (!initializations.TryGetValue(slot, out var points)) initializations[slot] = points = [];
+                points.Add(new(block.Identity, i + 1));
+            }
+        foreach (var block in c.Snapshot.Blocks)
+        for (int i = 0; i < block.Statements.Length; i++)
+        {
+            // 实体合流物化的读取仅承载已有实体凭据，不是发生在入口的原生内存访问。
+            if (block.Statements[i] is not MemoryRead read || read.Width != c.Snapshot.AddressWidth || !sourceReads.Contains(read.Identity)) continue;
+            var address = c.Get(state.Resolve, read.Address);
+            var location = address.IsSuccess ? c.Get(state.Locations, new(address.Value, read.Width)) : default;
+            if (!location.IsSuccess || location.Value is not { Region: Region.Image, Offset: { } offset }
+                || offset < 0 || offset > ulong.MaxValue || !guardedSlots.Contains((ulong)offset)) continue;
+            var point = new Point(block.Identity, i);
+            Reason? cause = null;
+            bool initialized = false;
+            foreach (var before in initializations.GetValueOrDefault((ulong)offset) ?? [])
+            {
+                if (before == point) { initialized = true; break; }
+                var dominates = c.Get(flow.PointDominates, new(before, point));
+                if (dominates is { IsSuccess: true, Value: true }) { initialized = true; break; }
+                if (!dominates.IsSuccess) cause ??= dominates.Why;
+            }
+            if (initialized) continue;
+            var position = read.Trace is { } trace ? $"0x{trace.NativeAddress:x}" : $"块 {c.Snapshot.Blocks.IndexOf(block)} 的语句 {i}";
+            return (read, new("structure.init-guard.slot-before-init", position + "：元数据槽位在守卫之前或不受初始化完成点支配的位置被读取。", cause));
+        }
+        return null;
     }
 
     /// <summary>删边后消失的使用不再计活跃；跨合流复用必须有同位置的事件后重读和非零后稳定凭据。</summary>

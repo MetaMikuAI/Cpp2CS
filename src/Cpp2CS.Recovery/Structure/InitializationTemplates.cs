@@ -29,6 +29,13 @@ internal sealed record InitializationTest(ReadIdentity Read, bool ZeroWhenTrue, 
             condition = value;
         }
         else if (condition.Width != 1) return null;
+        // 零填充不参与零测试；其他常量位和多个变量片段不提供单次读取的测试凭据。
+        if (condition.Kind == TermKind.Concat)
+        {
+            var parts = condition.Operands.Where(part => part.ConstantValue is not { IsZero: true }).ToArray();
+            if (parts.Length != 1) return null;
+            condition = parts[0];
+        }
         int low = 0, width = condition.Width;
         if (condition.Kind == TermKind.Slice) { low = condition.SliceLow!.Value; condition = condition.Operands[0]; }
         return condition.Identity is ResultAtom { Definition: ReadIdentity read } ? new(read, zero, low, width) : null;
