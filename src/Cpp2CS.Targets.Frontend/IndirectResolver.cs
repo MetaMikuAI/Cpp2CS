@@ -256,6 +256,13 @@ public static class IndirectResolver
                 t = t.Operands[0];
             return t;
         }
+        private static Term Unextended(Term t)
+        {
+            if (t.Kind != TermKind.Concat || t.ConstantValue is not null) return t;
+            int count = t.Operands.Length;
+            while (count > 1 && t.Operands[count - 1].ConstantValue == 0) count--;
+            return count == t.Operands.Length ? t : count == 1 ? t.Operands[0] : t.Table.Concat(t.Operands.Take(count).ToArray());
+        }
         private static bool RelativeShape(Term target, Term read)
         {
             var parts = new List<Term>(); Flatten(target, parts);
@@ -302,9 +309,10 @@ public static class IndirectResolver
             }
             if (Is(condition, UnsignedLess))
             {
-                var a = condition.Operands[0]; var b = condition.Operands[1];
-                if (truth && a == selector && b.ConstantValue is { } upper) return upper - 1;
-                if (!truth && b == selector && a.ConstantValue is { } inclusive) return inclusive;
+                // 零扩展不改变无符号值：比较的是下标扩展到寄存器宽度的写法时，去掉高位的零段再对照。
+                var a = Unextended(condition.Operands[0]); var b = Unextended(condition.Operands[1]); var index = Unextended(selector);
+                if (truth && a == index && b.ConstantValue is { } upper) return upper - 1;
+                if (!truth && b == index && a.ConstantValue is { } inclusive) return inclusive;
             }
             if (Is(condition, Equal) && truth)
             {

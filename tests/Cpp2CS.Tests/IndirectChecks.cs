@@ -53,6 +53,12 @@ internal static class IndirectChecks
         var adjustedCarry = t.Slice(Op(Add, 33, Op(ZeroExtend, 33, shifted), t.Constant((System.Numerics.BigInteger.One << 32) - 1, 33)), 32, 1);
         adjusted.Context.Conditions = [new(Op(And, 1, adjustedCarry, Op(Not, 1, Op(Equal, 1, index, t.Constant(4, 32)))), false)];
         checks.True(IndirectResolver.Resolve(adjusted.Value, adjusted.Context) is IndirectTable { Cases.Length: 2 }, "偏移后的下标由进位与等值边界共同约束");
+        var narrow = t.Slice(index, 0, 16);
+        var narrowRead = Read(narrow, 64);
+        narrowRead.Context.Conditions = [new(Op(UnsignedLess, 1, Op(ZeroExtend, 32, narrow), t.Constant(2, 32)), true)];
+        checks.True(IndirectResolver.Resolve(narrowRead.Value, narrowRead.Context) is IndirectTable { Cases.Length: 2 }, "条件比较的是下标零扩展后的写法时仍证明上界");
+        narrowRead.Context.Conditions = [new(Op(UnsignedLess, 1, t.Constant(1, 32), Op(ZeroExtend, 32, narrow)), false)];
+        checks.True(IndirectResolver.Resolve(narrowRead.Value, narrowRead.Context) is IndirectTable { Cases.Length: 2 }, "取反的比较同样去掉零扩展再对照");
         path.Context.Conditions = [];
         checks.True(IndirectResolver.Resolve(path.Value, path.Context) is IndirectUnknown { Reason.Code: "indirect.bound" }, "没有上界必须报洞");
         image.Values[264] = 1000;
