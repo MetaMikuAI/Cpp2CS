@@ -1,8 +1,8 @@
 using System.Diagnostics;
 
-namespace Cpp2CS.Pipeline;
+namespace Cpp2CS.Native;
 
-/// <summary>当前线程正在恢复的方法走到了哪一步。只供慢方法诊断读取，不参与判定。</summary>
+/// <summary>当前线程正在恢复的方法走到了哪一步。各层在进入耗时的步骤前标记；只供慢方法诊断读取，不参与判定。</summary>
 public sealed class MethodProgress
 {
     [ThreadStatic] private static MethodProgress? current;

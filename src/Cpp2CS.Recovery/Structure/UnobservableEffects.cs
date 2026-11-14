@@ -90,11 +90,14 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         double regionTime = 0, liveTime = 0, rewriteTime = 0;
         var records = new List<StructureRecord>(); bool assumed = false;
         var original = input;
+        MethodProgress.Mark("结构：规格结果替换");
         input = ReplaceSpecificationResults(input, records, out var c);
         if (!ReferenceEquals(input, original)) c = names.CreateContext(input);
+        MethodProgress.Mark("结构：初始化守卫");
         var guardStart = timer.Elapsed.TotalSeconds;
         input = FoldInitializationGuards(input, records, c, out var retainedGuards, out c, ref assumed);
         timings["初始化守卫"] = timer.Elapsed.TotalSeconds - guardStart;
+        MethodProgress.Mark("结构：候选消去与读取转发");
         var edit = new SnapshotRewrite(input);
         var erased = new Dictionary<Statement, StructureRecord>();
         var classRecords = new Dictionary<CallIdentity, StructureRecord>();
@@ -182,6 +185,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         var retainedInitializations = new Dictionary<CallIdentity, StructureRecord>();
         while (true)
         {
+            MethodProgress.Mark("结构：区域折叠");
             var foldStart = timer.Elapsed.TotalSeconds;
             while (true)
             {
@@ -304,9 +308,11 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             }
             timings["折叠总计"] = timings.GetValueOrDefault("折叠总计") + timer.Elapsed.TotalSeconds - foldStart;
             timings["区域查询"] = regionTime; timings["活跃性"] = liveTime; timings["改写"] = rewriteTime;
+            MethodProgress.Mark("结构：死读取");
             var deadStart = timer.Elapsed.TotalSeconds;
             if (!ReferenceEquals(current, input) || !ReferenceEquals(input, original)) current = RemoveDeadPrivateReads(current, records);
             timings["死读取"] = timings.GetValueOrDefault("死读取") + timer.Elapsed.TotalSeconds - deadStart;
+            MethodProgress.Mark("结构：类初始化吸收");
             var absorptionStart = timer.Elapsed.TotalSeconds;
             var beforeAbsorption = current;
             current = AbsorbClassInitialization(current, records, retainedInitializations, classRecords);
