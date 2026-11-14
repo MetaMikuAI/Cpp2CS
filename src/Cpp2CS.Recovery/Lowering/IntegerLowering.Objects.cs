@@ -55,14 +55,36 @@ public sealed partial class IntegerLowering
     private void PairConstructions()
     {
         if (calls is null) return;
+        var requests = function.Blocks.SelectMany(b => b.Statements.Select((statement, i) => (Block: b, Statement: statement, Index: i)))
+            .Where(p => p.Statement is Call call && allocations.ContainsKey(call.Identity)).Select(p =>
+            {
+                var call = (Call)p.Statement; var definition = allocations[call.Identity];
+                return new AllocationConstructorRequest(new(p.Block.Identity, p.Index), definition.Type, definition.Result,
+                    new(method, call.Trace?.NativeAddress ?? p.Block.Trace?.NativeAddress ?? 0, definition.Type, ConstructorAnchor.Allocation));
+            }).ToDictionary(r => r.Result);
+        var pairedInputs = new HashSet<Term>();
         var query = new AllocationConstructorQuery(state, locations, calls,
-            callDefinitions.ToDictionary(p => p.Key, p => new ConstructorCall(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)), constructors);
+            callDefinitions.ToDictionary(p => p.Key, p => new ConstructorCall(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)), constructors, requests, valueNames);
         foreach (var definition in allocations.Values)
             definition.Local = new(new(nextLocal++), definition.Type, types.PointerSize * 8);
+        // 先建立全部合流别名，再绑定构造模板实参，避免缓存尚未统一的源分配局部。
+        foreach (var request in requests.Values)
+        {
+            if (pairedInputs.Contains(request.Result)) continue;
+            var answer = context.Get(query, request);
+            if (!answer.IsSuccess || answer.Value.Failure is not null || answer.Value.MergedResult is not { } merged) continue;
+            var definition = objects[request.Result]; objects[merged] = definition;
+            foreach (var alias in answer.Value.MergedAliases) objects[alias] = definition;
+            foreach (var input in answer.Value.MergedInputs)
+            {
+                objects[input] = definition;
+                if (input != request.Result) pairedInputs.Add(input);
+            }
+        }
         foreach (var b in function.Blocks)
             for (int i = 0; i < b.Statements.Length; i++)
             {
-                if (b.Statements[i] is not Call call || !allocations.TryGetValue(call.Identity, out var definition)) continue;
+                if (b.Statements[i] is not Call call || !allocations.TryGetValue(call.Identity, out var definition) || pairedInputs.Contains(definition.Result)) continue;
                 position = call.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 var result = context.Get(query, new(new(b.Identity, i), definition.Type, definition.Result,
                     new(method, position, definition.Type, ConstructorAnchor.Allocation)));
@@ -71,6 +93,12 @@ public sealed partial class IntegerLowering
                     var why = result.IsSuccess ? result.Value.Failure! : result.Why!;
                     Fail<object>(LoweringFailureKind.RuntimeCall, why.Message, why.Cause, why.Code);
                     continue;
+                }
+                if (result.Value.MergedResult is { } merged)
+                {
+                    objects[merged] = definition;
+                    foreach (var alias in result.Value.MergedAliases) objects[alias] = definition;
+                    foreach (var input in result.Value.MergedInputs) { objects[input] = definition; pairedInputs.Add(input); }
                 }
                 if (result.Value.Call is { } paired) constructions.Add(paired, definition);
                 else if (constructors is not null)

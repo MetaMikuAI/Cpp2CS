@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
@@ -17,14 +18,19 @@ public sealed record ConstructorInitialRegion(IReadOnlyList<ConstructorInitialWr
 public sealed record AllocationConstructorAnswer(MethodRef? Constructor, CallIdentity? Call, Reason? Failure)
 {
     public ConstructorInitialRegion Region { get; init; } = new([]);
+    public Term? MergedResult { get; init; }
+    public ImmutableArray<Term> MergedInputs { get; init; } = [];
+    public ImmutableArray<Term> MergedAliases { get; init; } = [];
 }
 
-/// <summary>紧邻配对沿用原条件；模板锚点保留共享前沿对延迟构造调用的保护。</summary>
+/// <summary>直线配对与模板锚点沿用原条件；未配对的同类新分配可由合流前沿证明。</summary>
 public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocationQuery? locations, CallNamingQuery calls,
-    IReadOnlyDictionary<CallIdentity, ConstructorCall> bindings, ConstructorQuery? constructors)
+    IReadOnlyDictionary<CallIdentity, ConstructorCall> bindings, ConstructorQuery? constructors,
+    IReadOnlyDictionary<Term, AllocationConstructorRequest>? allocations = null, ValueNamingQuery? names = null)
     : Query<AllocationConstructorRequest, AllocationConstructorAnswer>
 {
     private readonly BoundSourceQuery sources = new(state);
+    private readonly MergedAllocationConstructorQuery? merged = allocations is not { Count: > 0 } ? null : new(state, locations, calls, bindings, allocations, names);
     public override Outcome<AllocationConstructorAnswer> Compute(QueryContext c, AllocationConstructorRequest key)
     {
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<AllocationConstructorAnswer>();
@@ -32,7 +38,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         while (next < block.Statements.Length && block.Statements[next] is not Call && PrivateAccess(c, state, locations, block.Statements[next])) next++;
         if (next < block.Statements.Length && block.Statements[next] is Call call && Direct(c, new(block.Identity, next), call, key) is { } method)
             return Outcome<AllocationConstructorAnswer>.Success(new(method, call.Identity, null));
-        if (constructors is null) return Outcome<AllocationConstructorAnswer>.Success(new(null, null,
+        if (constructors is null) return Outcome<AllocationConstructorAnswer>.Success(TryMerged(c, key) ?? new(null, null,
             new("lowering.Allocation.Constructor", "对象分配之后的第一个事件不是对它的同类构造函数调用。")));
         var initial = InitialRegion(c, new(block.Identity, key.Point.Before + 1), key.Result);
         if (initial.Call is { } delayed && bindings[delayed].Method.DeclaringType.Equals(key.Type)) return Deferred(null);
@@ -52,12 +58,39 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         { Region = initial });
         Outcome<AllocationConstructorAnswer> Reject(string code, string message, Reason? cause)
         {
+            if (TryMerged(c, key) is { } answer)
+            {
+                if (answer.Failure is { } failure) constructors.Reject(key.Access, failure);
+                return Outcome<AllocationConstructorAnswer>.Success(answer);
+            }
             var reason = new Reason(code, message, cause);
             constructors.Reject(key.Access, reason);
             return Outcome<AllocationConstructorAnswer>.Success(new(null, null, reason));
         }
         Outcome<AllocationConstructorAnswer> Deferred(Reason? cause) => Reject("lowering.Allocation.Deferred", "对象首次使用是构造调用，但不满足紧邻配对条件。", cause);
         Outcome<AllocationConstructorAnswer> Unproved(Reason? cause) => Reject("lowering.Allocation.Constructor", "不能证明各路径的首次对象使用都不是构造调用。", cause);
+    }
+    private AllocationConstructorAnswer? TryMerged(QueryContext c, AllocationConstructorRequest key)
+    {
+        if (merged is null) return null;
+        AllocationConstructorAnswer? rejected = null;
+        foreach (var b in c.Snapshot.Blocks)
+            foreach (var merge in b.Merges)
+            {
+                if (merge.Result.Width != key.Result.Width) continue;
+                bool directInput = merge.Inputs.Any(i => c.Get(state.Resolve, i.Value) is { IsSuccess: true } input && input.Value == key.Result);
+                if (!directInput)
+                {
+                    var sources = c.Get(merged.Sources, merge.Result);
+                    if (!sources.IsSuccess || !sources.Value.Inputs.Any(i => i.Result == key.Result)) continue;
+                }
+                var result = c.Get(merged, new(b.Identity, merge));
+                var answer = result.IsSuccess ? result.Value : new AllocationConstructorAnswer(null, null,
+                    new("lowering.Allocation.Merge.Proof", "新分配合流的配对证明失败。", result.Why));
+                if (answer.Failure is null) return answer;
+                rejected ??= answer;
+            }
+        return rejected;
     }
     /// <summary>只沿唯一前驱的直线后继收集；一次同对象直接构造调用划分写入的前后两段。</summary>
     public ConstructorInitialRegion InitialRegion(QueryContext c, Point start, Term receiver)
@@ -138,7 +171,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         }
         return new(writes, paired, callPoint);
     }
-    private MethodRef? Direct(QueryContext c, Point point, Call call, AllocationConstructorRequest key)
+    internal MethodRef? Direct(QueryContext c, Point point, Call call, AllocationConstructorRequest key)
     {
         if (!bindings.TryGetValue(call.Identity, out var target) || target.Virtual || target.Receiver is not null
             || target.Method.Method is not { Name: ".ctor", IsStatic: false } || !target.Method.DeclaringType.Equals(key.Type)
