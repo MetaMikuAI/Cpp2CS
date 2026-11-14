@@ -4,27 +4,20 @@ namespace Cpp2CS.Tests.Execution;
 
 internal abstract partial class Side
 {
-    private readonly Dictionary<TypeRef, ulong> reflectedTypes = new();
-    private readonly Dictionary<ulong, TypeRef> reflectionObjects = new();
     private readonly Dictionary<ulong, (ulong Array, int Index)> enumIterators = new();
 
-    /// <summary>枚举数组的库契约：GetValues 按无符号值排序，ArrayEnumerator.Current 每次装箱当前元素。</summary>
+    /// <summary>已知类型句柄返回缓存的非空类型对象；枚举 GetValues 按无符号值排序，Current 每次装箱当前元素。</summary>
     public byte[]? EnumArrayReturn(MethodRef callee, ulong[] arguments)
     {
         if (callee.Method is { Owner.FullName: "System.Type", Name: "GetTypeFromHandle", IsStatic: true }
-            && arguments is [var handle] && World.TypeOfHandle(handle) is DefinitionRef { Definition.IsEnum: true } enumType)
+            && arguments is [var handle])
         {
-            if (!reflectedTypes.TryGetValue(enumType, out var reflected))
-            {
-                var runtimeType = World.Types.Corlib("System.RuntimeType");
-                reflected = New(runtimeType, World.Index.Layouts.Of(runtimeType)!.InstanceSize);
-                reflectedTypes.Add(enumType, reflected);
-                reflectionObjects.Add(reflected, enumType);
-            }
-            return ManagedValues.Bytes(reflected, 8);
+            // vm/Type.cpp::GetTypeFromHandle 经 Reflection::GetTypeObject 返回句柄所指类型的反射对象。
+            var reflectedType = World.TypeOfHandle(handle);
+            return ManagedValues.Bytes(World.RuntimeTypeObject(reflectedType), 8);
         }
         if (callee.Method is { Owner.FullName: "System.Enum", Name: "GetValues", IsStatic: true }
-            && arguments is [var typeObject] && reflectionObjects.GetValueOrDefault(typeObject) is DefinitionRef element)
+            && arguments is [var typeObject] && World.ReflectedType(typeObject) is DefinitionRef { Definition.IsEnum: true } element)
         {
             var size = World.StorageSize(element);
             ulong Bits(object value) => Mask(value is ulong unsigned ? unsigned : unchecked((ulong)Convert.ToInt64(value)), size * 8);

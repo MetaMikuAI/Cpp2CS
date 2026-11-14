@@ -204,6 +204,7 @@ internal static partial class LoweringChecks
         InlineTypeChecks(checks, program);
         ArrayStoreChecks(checks, program);
         ConstructorChecks(checks, program);
+        DelegateChecks(checks, program);
         AccessChecks(checks, program);
         ReferenceMergeChecks(checks, program);
         MergedAllocationChecks(checks, program);

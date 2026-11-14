@@ -123,7 +123,7 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
             if (receiver is null) return No(TargetShape.ManagedField, "delegate-type", "委托项未解析。");
             var typed = c.Get(locations.Types, receiver);
             if (!typed.IsSuccess || typed.Value?.Type is not DefinitionRef type || Open(type) ||
-                type.Definition.BaseType is not DefinitionRef { Definition.Assembly: "mscorlib.dll", Definition.FullName: "System.MulticastDelegate" })
+                !IsDelegateType(type))
                 return No(TargetShape.ManagedField, "delegate-type", "静态类型不是具体委托类型。");
             var methods = type.Definition.Methods.Where(m => m.Name == "Invoke" && !m.IsStatic).ToArray();
             if (methods.Length != 1) return No(TargetShape.ManagedField, "delegate-invoke", "委托类型没有唯一 Invoke。");
@@ -162,12 +162,10 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
         if (InterfaceDataQuery.IsPending(data.Value)) return Yes(Pending);
         var interfaceName = c.Get(names, data.Value.Interface);
         if (interfaceName.IsSuccess && interfaceName.Value == NameLattice.Pending) return Yes(Pending);
-        if (!interfaceName.IsSuccess || interfaceName.Value.Name is not EntityName { Entity: ClassEntity { Type: DefinitionRef interfaceType } } || !interfaceType.Definition.IsInterface || Open(interfaceType))
-            return No(shape, "interface-name", "接口没有具体的元数据类型名字。");
-        var interfaceMethods = interfaceType.Definition.Methods.Where(m => m.Slot == data.Value.Slot && !m.IsStatic).ToArray();
-        if (interfaceMethods.Length != 1) return No(shape, "interface-slot-method", "接口槽号没有唯一方法。");
-        if (interfaceMethods[0].GenericParameters.Count != 0) return No(shape, "interface-generic-method", "泛型接口方法不在查询范围内。");
-        var interfaceMethod = new MethodRef(interfaceMethods[0], interfaceType.Arguments, []);
+        var selected = InterfaceMethod(c, data.Value);
+        if (!selected.IsSuccess) return Yes(new(DispatchKind.Unresolved, shape, Why: selected.Why));
+        var interfaceMethod = selected.Value;
+        var interfaceType = interfaceMethod.DeclaringType;
         var interfaceBound = binder.Call(call, interfaceMethod, BindingEntryKind.Ordinary, c.Snapshot.Terms);
         if (interfaceBound.Value is not { } interfaceBinding) return No(shape, "interface-binding", interfaceBound.Failure!.Detail);
         if (Value(c, interfaceBinding.This, site.Point) != data.Value.Object) return No(shape, "interface-receiver", "接收者不是调用数据所属对象。");

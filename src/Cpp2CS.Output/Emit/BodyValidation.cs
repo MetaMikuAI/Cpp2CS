@@ -36,10 +36,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         {
             if (ConstructorInitialization.Check(recovered, out _) is { } initializationProblem) return new(EmissionProblemKind.Constructor, initializationProblem);
         }
-        thisUnmodified = !methodContext.Method.IsStatic && !recovered.Blocks.SelectMany(b => b.Statements).Any(statement =>
-            statement is ManagedStore { Target: ArgumentValue { Index: -1 } }
-            || ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk)
-                .Any(v => v is AddressValue { Target: ArgumentValue { Index: -1 } }));
+        thisUnmodified = DelegateValidation.ThisUnmodified(recovered);
         foreach (var statement in recovered.Blocks.SelectMany(b => b.Statements))
         {
             address = statement.Address;
@@ -288,9 +285,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         if (!CanAccess(value.Method, value.Binding == DelegateBinding.Static ? null : value.Target.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 委托方法 {value.Method}");
         // 直接 Method 符号不能换成 ldvirtftn。非 final 的虚方法用 ldftn 绑定时，CLI 验证要求接收者类型封闭，
         // 或接收者是未被修改的 this（引用类型中 ldarg.0 后 ldftn 基类方法，即 C# 的 base.M 委托）。
-        if (value.Binding != DelegateBinding.VirtualInstance && value.Method.Method.IsVirtual && (value.Method.Method.Attributes & System.Reflection.MethodAttributes.Final) == 0
-            && value.Target.Type is Cpp2CS.Model.DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) == 0
-            && !(value.Target is ArgumentValue { Index: -1 } && thisUnmodified && !methodContext.Method.Owner.IsValueType))
+        if (!DelegateValidation.DirectBindingAllowed(value, methodContext, thisUnmodified))
             return new(EmissionProblemKind.Unsupported, "委托 直接虚方法绑定的验证条件未证明");
         return null;
     }

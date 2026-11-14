@@ -13,6 +13,7 @@ internal static class ManagedExecutionChecks
             public class G { public virtual T Echo<T>(T x) => x; }
             public class H : G { public override T Echo<T>(T x) => x; }
             public struct Pair { public int X; public int Y; }
+            public enum Choice { First = 1, Second = 3 }
             public static class Cases {
                 public static int Add(int x) => x + 7;
                 public static int Same(int x) => 7 + x;
@@ -52,6 +53,13 @@ internal static class ManagedExecutionChecks
                 public static int NewSlot() { B b=new O(); b.X=4; return b.Read(); }
                 public static int GenericVirtual() { G g=new H(); return g.Echo(23); }
                 public static bool Reflection() { object x=new B(); return x.GetType().IsInstanceOfType(x); }
+                public static int TypeLiteral() { object t = typeof(B); return t == null ? 0 : 1; }
+                public static int StructTypeLiteral() { object t = typeof(Pair); return t == null ? 0 : 1; }
+                public static int ArrayTypeLiteral() { object t = typeof(B[]); return t == null ? 0 : 1; }
+                public static int SameTypeLiteral() { object a = typeof(B), b = typeof(B); return a == b ? 1 : 0; }
+                public static int HandleAndObjectType() { object a = typeof(B), b = new B().GetType(); return a == b ? 1 : 0; }
+                public static int DifferentTypeLiteral() { object a = typeof(B), b = typeof(D); return a == b ? 1 : 0; }
+                public static int EnumValuesLength() => ((Choice[])System.Enum.GetValues(typeof(Choice))).Length;
                 public static int Text() => "abc".Length;
                 public static void Heap(B b, System.Action a) { b.X=1; a(); b.X=0; }
                 public static void HeapChanged(B b, System.Action a) { b.X=2; a(); b.X=0; }
@@ -70,11 +78,14 @@ internal static class ManagedExecutionChecks
             return interpreter.Run(new World(index, 0, new Hints([], []), reference.DeclaringType), method, reference, values);
         }
         foreach (var (name, expected) in new[] { ("LocalOut", "13"), ("LocalRef", "4"), ("LocalAlias", "d"), ("LocalStruct", "1c"), ("Arithmetic", "80000000"), ("Fields", "9"), ("Virtual", "5"), ("Interface", "1"),
-            ("NewSlot", "4"), ("GenericVirtual", "17"), ("Reflection", "1"), ("Text", "3"), ("Box", "11"), ("Finally", "8"), ("CatchFinally", "c"), ("CatchClauses", "2"), ("RethrowIdentity", "1"), ("CatchLeave", "7"), ("Struct", "b") })
+            ("NewSlot", "4"), ("GenericVirtual", "17"), ("Reflection", "1"),
+            ("TypeLiteral", "1"), ("StructTypeLiteral", "1"), ("ArrayTypeLiteral", "1"), ("SameTypeLiteral", "1"), ("DifferentTypeLiteral", "0"), ("HandleAndObjectType", "1"), ("EnumValuesLength", "2"), ("Text", "3"), ("Box", "11"), ("Finally", "8"), ("CatchFinally", "c"), ("CatchClauses", "2"), ("RethrowIdentity", "1"), ("CatchLeave", "7"), ("Struct", "b") })
         {
             var side = Run(name);
             a.True(side.Result == $"return 0x{expected}", $"{name} 结果：{side.Result}");
         }
+        a.True(CilComparison.Compare(source.Method("Cases", "SameTypeLiteral"), source.Method("Cases", "DifferentTypeLiteral")).Status == CilComparisonStatus.Mismatch,
+            "类型句柄模型仍区分同一类型与不同类型，不放宽结局比较");
         a.True(Run("RethrowIdentity").Events.Count(e => e.Text.StartsWith("throw ", StringComparison.Ordinal)) == 1, "rethrow 保留对象身份且不重复记录抛出事件");
         var callback = source.Method("Cases", "CallbackFinally");
         var callbackRef = model.Method(callback);

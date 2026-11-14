@@ -253,6 +253,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     {
         RuntimeValueKind.Class => new(ValueKind.RuntimePointer,name,"Il2CppClass"),
         RuntimeValueKind.Method => new(ValueKind.RuntimePointer,name,"MethodInfo"),
+        RuntimeValueKind.InvokeData => new(ValueKind.RuntimePointer,name,"VirtualInvokeData"),
         RuntimeValueKind.Metadata => new(ValueKind.RuntimePointer,name),
         RuntimeValueKind.ManagedReference => new(ValueKind.ManagedReference,name,"Il2CppObject"),
         RuntimeValueKind.Integer or RuntimeValueKind.Boolean => new(ValueKind.Integer,name),

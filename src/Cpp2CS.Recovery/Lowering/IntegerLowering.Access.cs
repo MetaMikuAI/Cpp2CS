@@ -16,6 +16,10 @@ public sealed partial class IntegerLowering
     {
         void Missing(string category, Reason? cause = null) => Fail<object>(LoweringFailureKind.UnsupportedType,
             "访问缺少权限或内联逆证明：" + category, cause, code: "lowering.Access." + category);
+        if (methodLookups.Any(lookup => delegateLookups.GetValueOrDefault(lookup) != 1) || delegateLookups.Values.Any(count => count != 1))
+        {
+            Fail<object>(LoweringFailureKind.Call, "方法信息查找没有唯一的委托构造消费。", code: "lowering.Delegate.LookupUse"); return;
+        }
         foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
         {
             position = statement.Address;
@@ -45,6 +49,17 @@ public sealed partial class IntegerLowering
                 { Missing("Field");
                     if (types.Kind(shared.Type) == TypeKind.Struct) failure = failure! with { StructType = shared.Type };
                     return; }
+                if (value is DelegateValue delegated)
+                {
+                    if (!ManagedAccess.Method(types, method.Method.Owner, delegated.Method,
+                        delegated.Binding == DelegateBinding.Static ? null : delegated.Target.Type))
+                    { Missing("Method"); return; }
+                    if (!DelegateValidation.DirectBindingAllowed(delegated, method,
+                        delegated.Target is ArgumentValue { Index: -1 } && DelegateValidation.ThisUnmodified(body)))
+                    {
+                        Fail<object>(LoweringFailureKind.Call, "委托直接虚方法绑定的验证条件未证明。", code: "lowering.Delegate.DirectBinding"); return;
+                    }
+                }
                 if (value is NewObjectValue created && !ManagedAccess.Method(types, method.Method.Owner, created.Constructor, null))
                 { Missing("Method"); return; }
             }

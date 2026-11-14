@@ -68,6 +68,8 @@ public sealed partial class IntegerLowering
             }
         if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
         { interfaceLookups.Add(call.Identity); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation?.Name is "LookupVirtualMethod" or "LookupInterfaceMethod")
+        { methodLookups.Add(call.Identity); return; }
         if (c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } exception })
         {
             var constructor = types.CorlibMethod(exception, ".ctor");
@@ -199,6 +201,7 @@ public sealed partial class IntegerLowering
         var d = callDefinitions[call.Identity];
         var args = new List<ManagedValue>();
         constructions.TryGetValue(call.Identity, out var created);
+        if (created is not null && DispatchQuery.IsDelegateType(created.Type)) return LowerDelegate(d, created, point);
         constructing = created;
         for (int i = 0; i < d.Binding.Parameters.Length; i++)
         {
