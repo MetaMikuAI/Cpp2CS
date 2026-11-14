@@ -61,7 +61,7 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
                 ? c.Get(state.Resolve, source.Term) is { IsSuccess: true } r ? r.Value : null : null;
             var obj = Input("object"); var itf = Input("interface"); var slot = Input("slot");
             if (obj is null || itf is null || slot?.ConstantValue is not { } n || n < 0 || n > ushort.MaxValue)
-                return No("slot", "运行时调用的对象、接口或槽号没有完整绑定。");
+                return No("slot", "运行时调用的对象、接口或槽号没有完整绑定：" + (obj is null ? "对象" : itf is null ? "接口" : "槽号不是常量") + "。");
             return Yes(new(obj, itf, (long)n, "LookupInterfaceData"));
         }
         var incoming = c.Get(incomingValues, new(value, key.Point.Block));

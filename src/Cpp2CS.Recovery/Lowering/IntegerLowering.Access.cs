@@ -14,8 +14,8 @@ public sealed partial class IntegerLowering
 {
     private void CheckBody(ManagedBody body)
     {
-        void Missing(string category) => Fail<object>(LoweringFailureKind.UnsupportedType,
-            "访问缺少权限或内联逆证明：" + category, code: "lowering.Access." + category);
+        void Missing(string category, Reason? cause = null) => Fail<object>(LoweringFailureKind.UnsupportedType,
+            "访问缺少权限或内联逆证明：" + category, cause, code: "lowering.Access." + category);
         foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
         {
             position = statement.Address;
@@ -37,7 +37,7 @@ public sealed partial class IntegerLowering
                 }
                 if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
                 if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
-                { Missing("Field");
+                { Missing("Field", new("access.field", "字段 " + field.Field.Field.Owner.FullName + "." + field.Field.Field.Name));
                     if (types.Kind(field.Field.DeclaringType) == TypeKind.Struct) failure = failure! with { StructType = field.Field.DeclaringType };
                     else if (types.Kind(field.Type) == TypeKind.Struct) failure = failure! with { StructType = field.Type };
                     return; }
@@ -95,7 +95,7 @@ public sealed partial class IntegerLowering
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(type)
             && value is LocalValue local && merges.Values.Any(m => m.Id == local.Id))
             Fail<object>(LoweringFailureKind.UnsupportedType, "使用位置需要类型 " + type + "，引用合流的静态类型为 " + value.Type, code: "lowering.Merge.StaticType");
-        else Fail<object>(LoweringFailureKind.UnsupportedType, "值的托管类型与使用位置不兼容");
+        else Fail<object>(LoweringFailureKind.UnsupportedType, $"值的托管类型与使用位置不兼容：{types.Kind(value.Type)} → {types.Kind(type)}，{value.GetType().Name}");
         return value;
     }
     private int registeredAccessorReads;

@@ -94,7 +94,7 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
             if (type.Definition.IsInterface) return No(TargetShape.VtableSlot, "interface-type", "接收者静态类型为接口。");
             if (Open(type)) return No(TargetShape.VtableSlot, "open-type", "开放类型不解析虚调用。");
             var method = SlotMethod(type, slot);
-            if (method is null) return No(TargetShape.VtableSlot, "slot-method", "静态类型及基类没有唯一的槽方法。");
+            if (method is null) return No(TargetShape.VtableSlot, "slot-method", "静态类型及基类没有唯一的槽方法：" + SlotWhy(type, slot));
             if (method.Method.GenericParameters.Count != 0) return No(TargetShape.VtableSlot, "generic-method", "泛型虚方法不在本查询范围内。");
             var bound = binder.Call(call, method, BindingEntryKind.Ordinary, c.Snapshot.Terms);
             if (bound.Value is not { } binding) return No(TargetShape.VtableSlot, "binding", bound.Failure!.Detail);
@@ -156,7 +156,7 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
             if (data.Why?.Code == "dispatch.interface-source")
                 return !named.IsSuccess || named.Value.Kind == ValueKind.Unnamed
                     ? No(shape, "target-unnamed", "调用目标或其基值未命名。", named.IsSuccess ? named.Value.Why : named.Why)
-                    : No(shape, "target-kind", "目标名字没有已支持的分派身份。");
+                    : No(shape, "target-kind", $"目标名字没有已支持的分派身份：{named.Value.Kind}，{shape}。");
             return Yes(new(DispatchKind.Unresolved, shape, Why: data.Why));
         }
         if (InterfaceDataQuery.IsPending(data.Value)) return Yes(Pending);
@@ -184,6 +184,19 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
         return Yes(new(DispatchKind.Interface, shape, data.Value.Object, interfaceType, data.Value.Slot, interfaceMethod, interfaceBinding, data.Value));
     }
     private static bool Open(DefinitionRef type) => type.Definition.GenericParameters.Count != type.Arguments.Count || type.ContainsGenericParameter();
+    /// <summary>诊断用：槽方法没有解析出来的原因类别。</summary>
+    private static string SlotWhy(DefinitionRef type, long slot)
+    {
+        string table = (type.Definition.VTable.Count == 0 ? "类型没有虚表数据" : slot < 0 || slot >= type.Definition.VTable.Count ? "槽号超出虚表"
+            : type.Definition.VTable[(int)slot] is null ? "虚表该槽为空" : "虚表该槽有方法") + (type.Arguments.Count != 0 ? "，泛型实例" : "") + "。";
+        for (DefinitionRef? current = type; current is not null; current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)
+        {
+            int declared = current.Definition.Methods.Count(m => m.Slot == slot && m.IsVirtual && !m.IsStatic);
+            if (declared > 1) return "同一个类有多个同槽虚方法；" + table;
+            if (declared == 1) return "声明该槽的方法与虚表项不同；" + table;
+        }
+        return "类型及基类没有声明该槽的虚方法；" + table;
+    }
     private static MethodRef? SlotMethod(DefinitionRef type, long slot)
     {
         for (DefinitionRef? current = type; current is not null; current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)

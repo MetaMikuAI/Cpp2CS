@@ -236,7 +236,8 @@ public sealed partial class AccessorQuery
                 Reason? failure = best.Length > 1 ? new("inline.Accessor.Ambiguous", $"有 {best.Length} 个最大覆盖或不同实参代入，无法区分原调用")
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
-                        : shapes.Count != 0 ? string.Join("；", shapes.Order(StringComparer.Ordinal)) : "候选模板与完整项或写入组不匹配");
+                        : shapes.Count != 0 ? string.Join("；", shapes.Order(StringComparer.Ordinal)) : "候选模板与完整项或写入组不匹配",
+                        new("inline.anchor", (anchor.Write ? "写入 " : "读取 ") + anchor.Field.Field.Owner.FullName + "." + anchor.Field.Field.Name));
                 var access = new AccessorAccess(caller, anchor.Address, anchor.Field, anchor.ReceiverType,
                     anchor.Write ? AccessorKind.Setter : AccessorKind.Getter, failure is null);
                 if (best.Length == 1 && failure is null)

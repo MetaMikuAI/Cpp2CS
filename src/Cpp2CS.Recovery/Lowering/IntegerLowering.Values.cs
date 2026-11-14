@@ -105,8 +105,12 @@ public sealed partial class IntegerLowering
         }
         if (term.Identity is ResultAtom { Definition: CallIdentity lookup } && interfaceLookups.Contains(lookup))
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedAtom, "接口调用数据没有托管值定义");
-        if (term.Identity is ResultAtom { Definition: CallIdentity })
-            return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了调用结果绑定之外的位，ABI 未定义这些高位");
+        if (term.Identity is ResultAtom { Definition: CallIdentity producer })
+        {
+            var named = calls is null ? default : context.Get(calls, producer);
+            string callee = named.IsSuccess ? named.Value.Kind + (named.Value.Operation is { } operation ? " " + operation.Name : "") : "未分类";
+            return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了调用结果绑定之外的位，ABI 未定义这些高位：" + callee + "，宽 " + term.Width);
+        }
         if (term.Identity is EntryAtom)
             return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了形参绑定未定义的入口位，包括未指定的槽位高位");
         if (term.Identity is MemoryAtom memory) return MissingMemoryValue(memory);
