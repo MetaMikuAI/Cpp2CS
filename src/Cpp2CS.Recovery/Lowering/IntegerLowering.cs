@@ -226,16 +226,26 @@ public sealed partial class IntegerLowering
                         && SnapshotRewrite.Targets(function.Blocks.Single(b => b.Identity == input.Predecessor).End).Contains(merge.Target))) continue;
                 position = function.Blocks.Single(b => b.Identity == input.Predecessor).Trace?.NativeAddress ?? 0;
                 SelectExceptionView(input.Predecessor);
-                var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
+                var numeric = !ReferenceType(merge.Local.Type) && !Opaque(merge.Local.Type);
+                var reference = numeric ? ReferenceSliceSource(input.Value) : null;
+                ManagedValue? v;
+                if (reference is not null)
+                {
+                    if (!NullOnEdge(reference, input.Predecessor, merge.Target, out var why))
+                    {
+                        Fail<object>(LoweringFailureKind.UnsupportedType, "托管引用进入整数合流，这条边上没有它为空的路径事实", why, "lowering.Merge.Reference");
+                        return new(null, failure);
+                    }
+                    v = Constant(0, merge.Width);
+                }
+                else v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
                 // 引用值进入非引用的合流局部：这条边的路径事实已证明它为空时就是常量 0（编译器复用了已知为零的值），否则没有托管写法。
                 if (ReferenceType(v.Type) && !ReferenceType(merge.Local.Type) && !Opaque(merge.Local.Type))
                 {
-                    var isNull = function.Terms.Apply(new CoreOperator(CoreOperation.Equal), 1, input.Value, function.Terms.Constant(0, input.Value.Width));
-                    var fact = context.Get(new PathFactQuery(state), new PathFactKey(default, isNull, new FlowEdge(input.Predecessor, merge.Target)));
-                    if (fact is not { IsSuccess: true, Value: PathTruth.True })
+                    if (!NullOnEdge(input.Value, input.Predecessor, merge.Target, out var why))
                     {
-                        Fail<object>(LoweringFailureKind.UnsupportedType, "托管引用进入整数合流，这条边上没有它为空的路径事实", fact.IsSuccess ? null : fact.Why, "lowering.Merge.Reference");
+                        Fail<object>(LoweringFailureKind.UnsupportedType, "托管引用进入整数合流，这条边上没有它为空的路径事实", why, "lowering.Merge.Reference");
                         return new(null, failure);
                     }
                     v = Constant(0, merge.Width);
@@ -361,7 +371,9 @@ public sealed partial class IntegerLowering
                 }
                 if (bound.Value?.Source is not TermSource source)
                     return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "返回值不是标量项");
-                var value = Value(source.Term, IsFloat(method.Concrete(method.Method.ReturnType)));
+                var reference = !ReferenceType(returnType) && !Opaque(returnType) ? ReferenceSliceSource(source.Term) : null;
+                var value = reference is not null && NullAt(reference, new(b.Identity, b.Statements.Length), null, out _)
+                    ? Constant(0, source.Term.Width) : Value(source.Term, IsFloat(method.Concrete(method.Method.ReturnType)));
                 if (value is null) return null;
                 if (IsFloat(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, FloatBits(value, source.Term.Width));
@@ -391,6 +403,29 @@ public sealed partial class IntegerLowering
         }
     }
 
+    private Term? ReferenceSliceSource(Term term)
+    {
+        if (valueNames is null) return null;
+        while (true)
+        {
+            var resolved = context.Get(state.Resolve, term);
+            if (!resolved.IsSuccess) return null;
+            term = resolved.Value;
+            if (term.Kind != TermKind.Slice) break;
+            term = term.Operands[0];
+        }
+        return context.Get(valueNames, term) is { IsSuccess: true, Value.Kind: ValueKind.ManagedReference } ? term : null;
+    }
+    private bool NullOnEdge(Term term, BlockIdentity from, BlockIdentity to, out Reason? why) =>
+        NullAt(term, default, new FlowEdge(from, to), out why);
+    private bool NullAt(Term term, Point point, FlowEdge? edge, out Reason? why)
+    {
+        var isNull = function.Terms.Apply(new CoreOperator(CoreOperation.Equal), 1, term, function.Terms.Constant(0, term.Width));
+        var fact = context.Get(new PathFactQuery(state), new PathFactKey(point, isNull, edge));
+        why = fact.IsSuccess ? null : fact.Why;
+        return fact is { IsSuccess: true, Value: PathTruth.True };
+    }
+
     private LocalValue? MergeValue(Term term, int low = 0, int? requestedWidth = null, bool floating = false)
     {
         int width = requestedWidth ?? term.Width;
@@ -399,6 +434,8 @@ public sealed partial class IntegerLowering
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
         var staticType = StaticType(term);
+        if (staticType is not null && ManagedTypes.IsReferenceType(staticType) && (low != 0 || width != types.PointerSize * 8))
+            return Fail<LocalValue>(LoweringFailureKind.UnsupportedType, "引用的部分位片没有托管值表示");
         local = new(new(nextLocal++), staticType is not null && (Opaque(staticType) || ReferenceType(staticType) || low == 0 && width == types.PointerSize * 8 && ManagedTypes.IsNativePointer(staticType)) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })

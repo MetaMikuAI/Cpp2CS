@@ -174,6 +174,7 @@ internal static partial class NamingChecks
             a.True(c.Get(names,chained).Value.Kind==ValueKind.Integer,"连续字段读取有底递归");
             a.True(one.Value.Name!=two.Value.Name && c.Get(names,merged).Value is { Kind:ValueKind.ManagedReference, Name:ReferenceValueName, StaticType:var mergedType }
                 && mergedType==itemType,"不同字段的引用读取合流有独立身份与公共类型");
+            a.True(!names.SameValue(c, merged, first).Value && !names.SameValue(c, merged, second).Value,"公共类型不证明合流等于任一输入");
             a.True(one.Value.Name!=c.Get(names,reloaded).Value.Name,"可能改写后的读取保留不同身份");
             a.True(names.FixedValue(c, first).Value is LoadedName && !names.SameValue(c, first, reloaded).Value,
                 "完整读取的定义名字保留内存版本，不同版本的可变字段不等值");

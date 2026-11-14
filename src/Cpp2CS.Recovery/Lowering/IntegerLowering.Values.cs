@@ -81,7 +81,12 @@ public sealed partial class IntegerLowering
             var resolved = context.Get(state.Read, readId);
             return resolved.IsSuccess ? Value(resolved.Value, floating) : Fail<ManagedValue>(LoweringFailureKind.State, "读取查询失败", resolved.Why);
         }
-        if (term.Identity is ResultAtom { Definition: MergeIdentity } or MemoryMerge) return MergeValue(term, floating: floating);
+        if (term.Identity is ResultAtom { Definition: MergeIdentity } or MemoryMerge)
+        {
+            if (valueNames is not null && context.Get(valueNames, term) is { IsSuccess: true } named
+                && NamedConstant(named.Value) is { } constant) return constant;
+            return MergeValue(term, floating: floating);
+        }
         if (term.Kind == TermKind.Constant) return Constant((ulong)term.ConstantValue!.Value, term.Width);
         if (term.Kind is TermKind.Undefined or TermKind.Unknown)
             return Fail<ManagedValue>(LoweringFailureKind.UndefinedValue, "使用未定义或未知的位", term.Why);
@@ -201,8 +206,28 @@ public sealed partial class IntegerLowering
         if (low != 0) value = Binary(BinaryOperator.ShiftRightUnsigned, value, Constant((ulong)low, 32), value.Width);
         return Mask(value, width);
     }
+    private ManagedValue? ReferenceOrNullComparison(Term term, CoreOperation op)
+    {
+        if (op is not (CoreOperation.Equal or CoreOperation.NotEqual)) return null;
+        var source = term.Operands[1].ConstantValue == 0 ? term.Operands[0]
+            : term.Operands[0].ConstantValue == 0 ? term.Operands[1] : null;
+        if (source is null) return null;
+        var resolved = context.Get(state.Resolve, source);
+        if (!resolved.IsSuccess || resolved.Value.Operator is not CoreOperator { Operation: CoreOperation.Or }
+            || resolved.Value.Width != types.PointerSize * 8) return null;
+        source = resolved.Value;
+        var left = Value(source.Operands[0]); var right = Value(source.Operands[1]);
+        if (left is null || right is null || !ManagedTypes.IsReferenceType(left.Type) || !ManagedTypes.IsReferenceType(right.Type)
+            || Opaque(left.Type) || Opaque(right.Type)) return null;
+        var kind = op == CoreOperation.Equal ? ComparisonKind.Equal : ComparisonKind.NotEqual;
+        return new BinaryValue(op == CoreOperation.Equal ? BinaryOperator.And : BinaryOperator.Or,
+            new ComparisonValue(kind, left, new ConstantValue(0, left.Type, left.Width), types.Boolean),
+            new ComparisonValue(kind, right, new ConstantValue(0, right.Type, right.Width), types.Boolean), types.Boolean, 1);
+    }
     private ManagedValue? Operation(Term term, CoreOperation op, bool floating)
     {
+        if (ReferenceOrNullComparison(term, op) is { } nullTest) return nullTest;
+        if (failure is not null) return null;
         if (op == CoreOperation.Select && ConversionRefinement(term) is { } conversion)
             return Value(conversion);
         if (op.ToString().Contains("Float", StringComparison.Ordinal))

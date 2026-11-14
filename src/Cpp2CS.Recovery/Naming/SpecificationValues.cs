@@ -16,7 +16,7 @@ public sealed partial class ValueNamingQuery
         if (!resolved.IsSuccess) return resolved.Propagate<ValueName?>();
         if (resolved.Value.ContainsUndefined) return Outcome<ValueName?>.Success(null);
         var named = c.Get(this, resolved.Value);
-        return named.IsSuccess ? Outcome<ValueName?>.Success(FixedName(named.Value.Name)) : named.Propagate<ValueName?>();
+        return named.IsSuccess ? Outcome<ValueName?>.Success(named.Value.EquivalentName ?? FixedName(named.Value.Name)) : named.Propagate<ValueName?>();
     }
 
     /// <summary>共享同值判断；没有定值凭据的同名位置不消去读取版本。</summary>

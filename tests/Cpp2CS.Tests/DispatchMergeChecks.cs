@@ -149,6 +149,12 @@ internal static partial class DispatchChecks
         checks.True(ManagedTypes.CommonReferenceType([leftType, rightType], obj) == parentType, "类合流取最近公共祖先");
         checks.True(ManagedTypes.CommonReferenceType([new ArrayRef(leftType, 1), new ArrayRef(rightType, 1)], obj) == obj
             && ManagedTypes.CommonReferenceType([new DefinitionRef(itf, []), leftType], obj) == obj
-            && ManagedTypes.CommonReferenceType([leftType, null], obj) == obj, "数组、接口及缺少静态类型的引用退到 object");
+            && ManagedTypes.CommonReferenceType([leftType, null], obj) == obj, "不同数组、接口及缺少静态类型的引用取 object");
+        TypeRef[] references = [obj, parentType, leftType, rightType, new DefinitionRef(itf, []), new ArrayRef(leftType, 1), new ArrayRef(rightType, 1)];
+        TypeRef? Join(TypeRef? x, TypeRef? y) => ManagedTypes.CommonReferenceType([x, y], obj);
+        checks.True(references.All(type => Join(type, type) == type), "引用类型的并满足幂等律，包含接口与数组");
+        checks.True(references.All(x => references.All(y => Join(x, y) == Join(y, x))), "引用类型的并满足交换律");
+        checks.True(references.All(x => references.All(y => references.All(z => Join(Join(x, y), z) == Join(x, Join(y, z))))),
+            "引用类型的并满足结合律，迭代合流不依赖来源次序");
     }
 }

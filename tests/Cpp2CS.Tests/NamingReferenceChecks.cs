@@ -1,5 +1,6 @@
 using System.Reflection;
 using Cpp2CS.Kernel.State;
+using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
@@ -17,6 +18,7 @@ internal static partial class NamingChecks
     {
         var obj = new DefinitionRef(new TypeDef { Index = 0, Assembly = "mscorlib.dll", Namespace = "System", Name = "Object", Token = 0,
             Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false, Size = 16, PackingSize = 0, ClassSizeIsDefault = true }, []);
+        ReferenceEvidenceLattice(checks, obj);
         var parameter = new GenericParameterDef { Name = "T", Position = 0, Attributes = 0 };
         var node = new TypeDef { Index = 1, Assembly = "test", Namespace = "", Name = "Node`1", Token = 0,
             Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false, Size = 32, PackingSize = 0, ClassSizeIsDefault = true,
@@ -57,4 +59,30 @@ internal static partial class NamingChecks
             checks.True(!names.SameValue(c, receiver, returned).Value, "共享调用结果与接收者合流保留不同定义身份");
         }
     }
+    private static void ReferenceEvidenceLattice(Assertions checks, TypeRef root)
+    {
+        var latticeType = typeof(ValueNamingQuery).Assembly.GetType(typeof(ValueNamingQuery).Namespace + ".NameLattice", true)!;
+        var lattice = (ILattice<NamedValue>)Activator.CreateInstance(latticeType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, [root], null)!;
+        var terms = new TermTable();
+        var inner = new LoadedName(terms.Atom(new ResultAtom(new MergeIdentity()), 64), root);
+        var outer = new LoadedName(terms.Atom(new ResultAtom(new MergeIdentity()), 64), root);
+        var allocated = new CallResultName(new CallIdentity(), root, "AllocateObject");
+        var first = new NamedValue(ValueKind.ManagedReference, outer, "Il2CppObject")
+            { ReferenceType = root, EquivalentNames = [allocated, inner] };
+        var fewer = first with { EquivalentNames = [inner] };
+        var none = first with { EquivalentNames = [] };
+        checks.True(lattice.LessOrEqual(first, fewer) && lattice.LessOrEqual(fewer, none) && lattice.LessOrEqual(first, none),
+            "嵌套引用撤销分配凭据后仍保留读取凭据，偏序满足传递性");
+        checks.True(!lattice.LessOrEqual(fewer, first), "固定点不允许重新增加已撤销的同值凭据");
+        var joined = lattice.Join(first, fewer); var reverse = lattice.Join(fewer, first);
+        checks.True(joined.Name == outer && joined.EquivalentName == inner && reverse.EquivalentName == inner
+            && lattice.LessOrEqual(first, joined) && lattice.LessOrEqual(fewer, joined), "同值视图改为内层读取时，并仍是两个输入的上界");
+        checks.True(lattice.Join(first, none).EquivalentName is null, "没有共同凭据时只保留合流定义身份");
+        var unrelated = first with { EquivalentNames = [new CallResultName(new CallIdentity(), root, "AllocateObject")] };
+        checks.True(lattice.Join(first, unrelated).EquivalentName is null, "不同分配的凭据不构成同值视图");
+        var another = first with { Name = new LoadedName(terms.Atom(new ResultAtom(new MergeIdentity()), 64), root) };
+        checks.True(lattice.Join(first, another).Kind == ValueKind.Unnamed, "同值凭据不替换不同合流的定义身份");
+    }
+
 }

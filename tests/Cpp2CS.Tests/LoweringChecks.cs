@@ -185,6 +185,7 @@ internal static partial class LoweringChecks
         InlineTypeChecks(checks, program);
         ConstructorChecks(checks, program);
         AccessChecks(checks, program);
+        ReferenceMergeChecks(checks, program);
         RangeChecks(checks, program);
         AddressChecks(checks, program);
         InterlockedChecks(checks, program);

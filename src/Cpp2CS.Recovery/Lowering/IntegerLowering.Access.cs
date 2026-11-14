@@ -92,7 +92,10 @@ public sealed partial class IntegerLowering
         if (value is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(type))
             return new ConstantValue(0, type, types.PointerSize * 8);
         if (Equals(value.Type, type) || ManagedTypes.IsReferenceType(value.Type) && types.IsAssignable(value.Type, type)) return value;
-        Fail<object>(LoweringFailureKind.UnsupportedType, "值的托管类型与使用位置不兼容");
+        if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(type)
+            && value is LocalValue local && merges.Values.Any(m => m.Id == local.Id))
+            Fail<object>(LoweringFailureKind.UnsupportedType, "使用位置需要类型 " + type + "，引用合流的静态类型为 " + value.Type, code: "lowering.Merge.StaticType");
+        else Fail<object>(LoweringFailureKind.UnsupportedType, "值的托管类型与使用位置不兼容");
         return value;
     }
     private int registeredAccessorReads;
@@ -220,6 +223,8 @@ public sealed partial class IntegerLowering
             }
         }
     }
+    private ManagedValue? NamedConstant(NamedValue named) => (named.EquivalentName ?? named.Name) is EntityName { Entity: StringEntity literal }
+        ? new StringValue(literal.Value, types.String, types.PointerSize * 8) : null;
     private ManagedValue? ReadValue(ReadDefinition definition)
     {
         if (definition.Local is not null) return definition.Local;
@@ -227,8 +232,7 @@ public sealed partial class IntegerLowering
         var read = definition.Read;
         // 字符串字面量的槽位在元数据初始化之后就是那个驻留的字符串对象，与 ldstr 相同；它是常量，不需要落进局部。
         if (valueNames is not null && context.Get(valueNames, read.Result) is { IsSuccess: true } named
-            && named.Value.Name is EntityName { Entity: StringEntity literal })
-            return definition.Constant = new StringValue(literal.Value, types.String, types.PointerSize * 8);
+            && NamedConstant(named.Value) is { } constant) return definition.Constant = constant;
         var usePosition = position; position = read.Trace?.NativeAddress ?? position;
         var range = Range(read.Address, read.Width);
         if (range?.Why is { Code: "location.padding" or "location.overlap" or "location.range" } rangeFailure)
@@ -448,6 +452,8 @@ public sealed partial class IntegerLowering
         {
             if ((write || view.Kind == ManagedLocationKind.FrameLocal) && types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
+            if (ManagedTypes.IsReferenceType(value.Type)) value = Coerce(value, field.DeclaringType);
+            if (failure is not null) return null;
             value = new FieldValue(value, field, type, ValueWidth(type));
         }
         if (!address && !Scalar(value.Type) && types.Kind(value.Type) != TypeKind.Struct

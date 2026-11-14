@@ -35,8 +35,12 @@ public sealed record AddressName(Term Address) : ValueName;
 public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record = null, Reason? Why = null)
 {
     public static NamedValue Unknown(string code, string message, Reason? cause = null) => new(ValueKind.Unnamed, null, Why: new(code, message, cause));
-    /// <summary>运行时登记给出的引用结果类型视图；值身份仍由原来的名字决定。</summary>
+    /// <summary>引用结果的静态类型视图；值身份仍由原来的名字决定。</summary>
     public TypeRef? ReferenceType { get; init; }
+    /// <summary>所有来源共有的同值凭据；集合交允许撤销内层凭据而保留外层读取身份。</summary>
+    public ImmutableArray<ValueName> EquivalentNames { get; init; } = [];
+    /// <summary>可读取的同值视图；优先保留实体常量，不改变合流自身的定义身份。</summary>
+    public ValueName? EquivalentName => EquivalentNames.FirstOrDefault(n => n is EntityName) ?? EquivalentNames.FirstOrDefault();
     public TypeRef? StaticType => ReferenceType ?? (Name switch
     { ParameterName p => p.StaticType, IndirectParameterName p => new ByRefRef(p.ElementType), CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
 }
@@ -315,7 +319,9 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             var type = ManagedTypes.CommonReferenceType(names.Select(n => n.StaticType), ReferenceRoot);
             if (type is null) return Yes(NamedValue.Unknown("naming.merge-type", "引用合流缺少公共祖先的元数据定义。"));
             ValueName identity = key.Identity is MemoryMerge ? new LoadedName(key, type) : new ReferenceValueName(key);
-            return Yes(new(ValueKind.ManagedReference, identity, "Il2CppObject") { ReferenceType = type });
+            var equal = hasNull ? [] : NameLattice.CommonNames(names.Select(n => FixedName(n.Name) is { } defined
+                ? n.EquivalentNames.Add(defined) : n.EquivalentNames));
+            return Yes(new(ValueKind.ManagedReference, identity, "Il2CppObject") { ReferenceType = type, EquivalentNames = equal });
         }
         if (hasNull && names.Count != 0)
         {
@@ -411,7 +417,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     }
 }
 
-/// <summary>定义身份保持不变；引用类型只向基类扩大，其他名字冲突时到顶。</summary>
+/// <summary>定义身份保持不变；引用类型按并扩大，同值凭据只取交，其他名字冲突时到顶。</summary>
 internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedValue>
 {
     internal static NamedValue Pending { get; } = NamedValue.Unknown("naming.pending", "循环尚无外部命名证据。");
@@ -423,6 +429,21 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
         (LoadedName x, LoadedName y) => x.Read == y.Read,
         _ => false,
     });
+    internal static ImmutableArray<ValueName> CommonNames(IEnumerable<ImmutableArray<ValueName>> sources)
+    {
+        List<ValueName>? common = null;
+        foreach (var source in sources)
+        {
+            if (common is null)
+            {
+                common = [];
+                foreach (var name in source)
+                    if (!common.Any(n => Definition(n, name))) common.Add(name);
+            }
+            else common.RemoveAll(name => !source.Any(n => Definition(n, name)));
+        }
+        return common is null ? [] : [.. common];
+    }
     private TypeRef? Common(NamedValue a, NamedValue b) => a.Kind == ValueKind.ManagedReference
         && b.Kind == ValueKind.ManagedReference && Definition(a.Name, b.Name)
         ? ManagedTypes.CommonReferenceType([a.StaticType, b.StaticType], objectType) : null;
@@ -437,8 +458,10 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
             LoadedName read => read with { StaticType = type },
             _ => a.Name,
         };
-        return new(ValueKind.ManagedReference, name, "Il2CppObject") { ReferenceType = type };
+        return new(ValueKind.ManagedReference, name, "Il2CppObject") { ReferenceType = type,
+            EquivalentNames = CommonNames([a.EquivalentNames, b.EquivalentNames]) };
     }
     public bool LessOrEqual(NamedValue a, NamedValue b) => a == Pending || a == b
-        || b.Kind == ValueKind.Unnamed && b != Pending || Common(a, b) is { } type && type == b.StaticType;
+        || b.Kind == ValueKind.Unnamed && b != Pending || Common(a, b) is { } type && type == b.StaticType
+            && b.EquivalentNames.All(name => a.EquivalentNames.Any(n => Definition(n, name)));
 }

@@ -97,7 +97,7 @@ public sealed partial class ManagedTypes
         _ => false,
     };
 
-    /// <summary>引用类型的并；只沿类的基类链取公共祖先，接口、数组和缺少类型的输入退到 object。</summary>
+    /// <summary>引用类型的并；同型取自身，不同的类沿基类链取最近公共祖先，不同的接口、数组或缺少类型的输入取 object。</summary>
     public static TypeRef? CommonReferenceType(IEnumerable<TypeRef?> referenceTypes, TypeRef? objectType = null)
     {
         var inputs = referenceTypes.ToArray();
@@ -109,6 +109,8 @@ public sealed partial class ManagedTypes
         }
         objectType ??= inputs.SelectMany(Bases).FirstOrDefault(t => t.Definition is
             { Assembly: "mscorlib.dll", FullName: "System.Object" });
+        // 同一个类型的并是它自己，接口与数组也一样；只有不同的接口、数组才退到 object。
+        if (inputs.Length != 0 && inputs[0] is { } same && inputs.All(t => same.Equals(t))) return same;
         if (inputs.Length == 0 || inputs.Any(t => t is not DefinitionRef { Definition.IsValueType: false, Definition.IsInterface: false }))
             return objectType;
         var others = inputs.Skip(1).Select(t => Bases(t).ToHashSet()).ToArray();
