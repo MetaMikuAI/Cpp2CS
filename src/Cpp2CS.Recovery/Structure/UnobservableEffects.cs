@@ -195,6 +195,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         timings["消去与读取转发"] = timer.Elapsed.TotalSeconds;
         var rejected = new Dictionary<BlockIdentity, StructureRecord>();
         var rejectedLookups = new Dictionary<MergeIdentity, StructureRecord>();
+        var rejectedLookupReads = new Dictionary<ReadIdentity, StructureRecord>();
         var rejectedTypeChecks = new Dictionary<Term, ImmutableArray<StructureRecord>>();
         bool foldedLookup = false;
         var retainedInitializations = new Dictionary<CallIdentity, StructureRecord>();
@@ -227,7 +228,9 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 var liveStart = timer.Elapsed.TotalSeconds;
                 var liveness = new StructureLiveness(current, EndUses);
                 liveTime += timer.Elapsed.TotalSeconds - liveStart;
-                changed = FoldInterfaceLookup(c, batch, occupied, predecessors, records, rejectedLookups, ref assumed);
+                var lookupStart = timer.Elapsed.TotalSeconds;
+                changed = FoldInterfaceLookup(c, batch, occupied, predecessors, records, rejectedLookups, rejectedLookupReads, liveness, ref assumed);
+                timings["接口查找"] = timings.GetValueOrDefault("接口查找") + timer.Elapsed.TotalSeconds - lookupStart;
                 foldedLookup |= changed;
                 bool hasProtectionFailure = current.Blocks.SelectMany(x => x.Statements).OfType<Call>().Any(call =>
                     c.Get(calls, call.Identity) is { IsSuccess: true, Value.Operation.Name: "StackProtectionFailure" });
@@ -340,6 +343,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         records.AddRange(rejected.Where(p => remaining.Contains(p.Key)).Select(p => p.Value));
         var remainingMerges = current.Blocks.SelectMany(b => b.Merges).Select(m => m.Identity).ToHashSet();
         records.AddRange(rejectedLookups.Where(p => remainingMerges.Contains(p.Key)).Select(p => p.Value));
+        var remainingReads = current.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Select(r => r.Identity).ToHashSet();
+        records.AddRange(rejectedLookupReads.Where(p => remainingReads.Contains(p.Key)).Select(p => p.Value));
         var remainingTerms = SnapshotRewrite.Dependencies(current.Blocks.SelectMany(b => b.Statements.SelectMany(SnapshotRewrite.Uses)
             .Concat(EndUses(b.End)).Concat(b.Merges.SelectMany(m => m.Inputs.Select(i => i.Value)))));
         records.AddRange(rejectedTypeChecks.Where(p => remainingTerms.Contains(p.Key)).SelectMany(p => p.Value));
