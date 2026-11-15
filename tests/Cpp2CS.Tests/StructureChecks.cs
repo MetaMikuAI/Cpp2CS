@@ -60,6 +60,7 @@ internal static partial class StructureChecks
             if (scenario == 5) checks.True(ReferenceEquals(output.Function, function) && output.Records.Any(r => r.Kind == "runtime-result-used"), "实际返回值仍被使用时原样保留并记录");
         }
         ExceptionEntryCases(checks);
+        ExceptionClosureCases(checks);
         SignatureBeforeForwarding(checks);
         SpecificationCases(checks);
         InterfaceLookupCases(checks);

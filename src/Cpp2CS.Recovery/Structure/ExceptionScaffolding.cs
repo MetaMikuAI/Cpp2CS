@@ -35,7 +35,7 @@ public static class ExceptionScaffolding
             for (int i = 0; i < block.Statements.Length; i++)
                 if (block.Statements[i] is Call call)
                 {
-                    if (call.Unwind is not null && previous >= 0 && previous + 1 != cuts[^1]) cuts.Add(previous + 1);
+                    if (call.Unwind is not null && i != cuts[^1]) cuts.Add(i);
                     previous = i;
                 }
             // 检查可以通过终结跳转到冷抛出块；入口不能因此连同前面的调用一起纳入 try。

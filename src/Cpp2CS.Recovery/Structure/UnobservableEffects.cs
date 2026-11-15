@@ -31,6 +31,17 @@ public sealed record StructureResult(NativeFunction Function, ImmutableArray<Str
     /// <summary>变换所依据的命名事实；下降沿用它给变换后留下的槽位读取命名。</summary>
     public NamingFacts Names { get; init; } = NamingFacts.Empty;
     public ImmutableArray<(ulong Cache, InternalCallForwarder Forwarder)> InternalCallCaches { get; init; } = [];
+
+    /// <summary>保留已应用的消去；拒绝原因取当前快照，假设取并集，用时相加。</summary>
+    public StructureResult Accumulate(StructureResult? previous) => previous is null
+        ? this with { Assumptions = [.. Assumptions.Order(StringComparer.Ordinal)] }
+        : this with
+        {
+            Records = [.. previous.Records.Where(r => r.Removed), .. Records],
+            Assumptions = [.. previous.Assumptions.Union(Assumptions).Order(StringComparer.Ordinal)],
+            Timings = previous.Timings.Keys.Union(Timings.Keys).ToImmutableDictionary(key => key,
+                key => previous.Timings.GetValueOrDefault(key) + Timings.GetValueOrDefault(key)),
+        };
 }
 
 /// <summary>按私有状态和运行时登记消去效果；每次改图后重新建立查询上下文。</summary>
@@ -49,16 +60,12 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
     public StructureResult Run(NativeFunction input)
     {
         var sourceReads = input.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Select(r => r.Identity).ToHashSet();
-        var records = new List<StructureRecord>();
+        StructureResult? accumulated = null;
         var rejected = new List<StructureRecord>();
-        var assumptions = new HashSet<string>();
-        var timings = new Dictionary<string, double>();
         while (true)
         {
             var result = Normalize(input, sourceReads);
-            records.AddRange(result.Records.Where(r => r.Removed));
-            assumptions.UnionWith(result.Assumptions);
-            foreach (var (key, seconds) in result.Timings) timings[key] = timings.GetValueOrDefault(key) + seconds;
+            accumulated = result.Accumulate(accumulated);
             // 只有消去了已知实体的元数据初始化（泛型上下文、类的布局就绪），新快照才可能让原先未知的实体可命名；
             // 其余情形一遍就是最终结果，不重复。
             if (ReferenceEquals(result.Function, input) || !contextInitialization)
@@ -68,6 +75,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 // 初始化调用消去后仍可能重跑；守卫的拒绝原因沿用事件尚在时的凭据。
                 var last = result.Records.Where(r => !r.Removed).Select(r => r.Kind == "init-guard"
                     ? rejected.FirstOrDefault(x => x.Kind == r.Kind && x.Address == r.Address) ?? r : r).ToArray();
+                var records = accumulated.Records.Where(r => r.Removed);
                 var kept = rejected.Where(r => !records.Any(x => x.Kind == r.Kind && x.Address == r.Address)
                     && !last.Any(x => x.Kind == r.Kind && x.Address == r.Address)).ToArray();
                 var finalRecords = records.Concat(last).Concat(kept).ToImmutableArray();
@@ -77,8 +85,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                         .Append(b.Identity)).ToHashSet();
                     finalRecords = finalRecords.Where(r => r.Use is null || liveUses.Contains(r.Use)).ToImmutableArray();
                 }
-                return result with { Records = finalRecords,
-                    Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary(), InternalCallCaches = [.. DiscoveredCaches] };
+                return accumulated with { Records = finalRecords, InternalCallCaches = [.. DiscoveredCaches] };
             }
             foreach (var r in result.Records.Where(r => !r.Removed && (r.Reason is not null || r.Why is not null)))
                 if (!rejected.Any(x => x.Kind == r.Kind && x.Address == r.Address)) rejected.Add(r);
@@ -387,6 +394,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         if (locations is null || initialization is null) return function;
         var c = locations.CreateContext(function);
         var edit = new SnapshotRewrite(function);
+        var protectedAbsorptions = new List<ClassInitializationAbsorption>();
         foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
         {
             var classified = c.Get(calls, call.Identity);
@@ -397,15 +405,28 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             if (!result.IsSuccess || !result.Value.CanAbsorb)
             {
                 var why = result.Why ?? result.Value.Why!;
-                while (why.Cause is { } cause) why = cause;
+                while (why.Cause is { } cause && !why.Code.StartsWith("structure.class-init.", StringComparison.Ordinal)) why = cause;
                 retained[call.Identity] = new("class-init-retained", call.Trace?.NativeAddress,
                     why.Code + "：" + why.Message, false) { Reason = why };
                 continue;
             }
             edit.RemovedStatements.Add(call);
             foreach (var value in call.Results) edit.Replacements[value.Value] = function.Terms.Undefined(value.Value.Width);
+            if (!result.Value.ProtectedAccesses.IsEmpty || protectedAbsorptions.Count != 0)
+            {
+                var candidate = edit.Apply();
+                if (!initialization.PreservesProtection(locations.CreateContext(candidate), protectedAbsorptions.Append(result.Value)))
+                {
+                    edit.RemovedStatements.Remove(call);
+                    foreach (var value in call.Results) edit.Replacements.Remove(value.Value);
+                    var why = new Reason("structure.class-init.exception-region", "删除初始化后，未证明内存访问仍由原处理入口保护。");
+                    retained[call.Identity] = new("class-init-retained", call.Trace?.NativeAddress, why.Message, false) { Reason = why };
+                    continue;
+                }
+                if (!result.Value.ProtectedAccesses.IsEmpty) protectedAbsorptions.Add(result.Value);
+            }
             retained.Remove(call.Identity);
-            records.Add(new("class-init-absorbed", call.Trace?.NativeAddress, "每条路径的首个观察均为同类访问，隐含同一精确初始化", true));
+            records.Add(new("class-init-absorbed", call.Trace?.NativeAddress, "每条路径的首个观察均为同类访问，隐含同一精确初始化且逻辑展开目标相同", true));
         }
         return edit.RemovedStatements.Count == 0 ? function : edit.Apply();
     }

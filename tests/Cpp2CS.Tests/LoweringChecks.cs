@@ -86,6 +86,7 @@ internal static partial class LoweringChecks
         InternalCallWrapperChecks(checks, program);
         ExceptionChecks(checks, program);
         ExceptionExecutionChecks(checks, program);
+        ProtectedInitializationExecution(checks, program);
         foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect", "FloatMin", "FloatMax" })
         {
             var reference = MethodRef.Open(methods.Single(m => m.Name == name));

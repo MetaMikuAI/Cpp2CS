@@ -15,7 +15,7 @@ using Cpp2CS.Targets.Arm64.Abi;
 
 namespace Cpp2CS.Tests;
 
-internal static class ClassInitializationChecks
+internal static partial class ClassInitializationChecks
 {
     private sealed class RuntimeMap(RuntimeFunction initialize, RuntimeFunction allocate, RuntimeFunction metadata) : IRuntimeFunctionMap
     {
@@ -129,6 +129,7 @@ internal static class ClassInitializationChecks
                 checks.True(ExitChecker.Check(output.Function).IsValid, "输入槽裁剪保持快照出口契约");
             }
         }
+        ExceptionRegions(checks, spec, layouts, binder, catalog, runtime, owner, nothing, facts);
         return checks.Finish("类初始化吸收");
     }
 }
