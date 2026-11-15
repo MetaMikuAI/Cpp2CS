@@ -58,7 +58,7 @@ public sealed partial class IntegerLowering
             return memoryValue is null || projection.Width == 0 ? memoryValue : Slice(memoryValue, projection.Low, projection.Width);
         }
         var root = StructOriginValue(part.Origin); if (root is null) return null;
-        var projected = ManagedProjections.Project(types, root, part.Projection, field => field);
+        var projected = ManagedProjections.Project(types, root, part.Projection, field => ReadFieldValues(FieldValueOrigin(field, "StructPart：" + (part.Origin.Parameter is not null ? "形参整体" : "调用结果整体") + "的字段投影"), wholeValue: true));
         if (projected is null) return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType,
             "结构体字段投影与整体布局不符", code: "lowering.Struct.Projection");
         return part.Low == 0 && part.Width == part.Projection.Width ? projected.Value : Slice(projected.Value, part.Low, part.Width);
@@ -82,12 +82,12 @@ public sealed partial class IntegerLowering
             result.Why!.Message, result.Why, result.Why.Code.StartsWith("lowering.Struct.", StringComparison.Ordinal) ? result.Why.Code : "lowering.Struct.Source");
         var plan = result.Value;
         if (plan.Origin is { } origin) return StructOriginValue(origin);
-        if (plan.Location is { } stable && plan.Read is null) return AccessView(stable);
+        if (plan.Location is { } stable && plan.Read is null) return AccessView(stable, wholeValue: true);
         if (plan.Location is { } location && plan.Read is { } read)
         {
             var key = (read, location);
             if (structReadValues.TryGetValue(key, out var known)) return known;
-            var value = AccessView(location); if (value is null) return null;
+            var value = AccessView(location, wholeValue: true); if (value is null) return null;
             var native = function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single(r => r.Identity == read);
             var definition = new ReadDefinition(native) { Value = value, Local = new(new(nextLocal++), type, 0) };
             if (!structReads.TryGetValue(read, out var reads)) structReads.Add(read, reads = []);

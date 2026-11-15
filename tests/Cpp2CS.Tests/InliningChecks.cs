@@ -69,6 +69,7 @@ internal static partial class InliningChecks
         ConditionalAccessorChecks(checks);
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
+        ValueAccessorChecks(checks);
         GenericAccessorChecks(checks);
         GenericStaticAccessorChecks(checks);
         ConstructorChecks(checks);
@@ -125,6 +126,12 @@ internal static partial class InliningChecks
         var disabledNative = f.Function(f.Field, false).Function;
         checks.True(new IntegerLowering(disabledNative, MethodRef.Open(caller), f.Binder, f.Types, calls: f.Calls, spec: f.Spec).Run()
             .Failure?.Reason.Code == "lowering.Access.Field", "关闭机制保留权限检查");
+        var disabledStatic = f.Function(f.Shared, false);
+        var staticFailure = new IntegerLowering(disabledStatic.Function, MethodRef.Open(caller), f.Binder, f.Types,
+            calls: f.Calls, spec: f.Spec, names: disabledStatic.Names).Run().Failure;
+        checks.True(staticFailure?.Reason is { Code: "lowering.Access.Field", Cause: { Message: var description,
+            Cause: { Code: "lowering.Access.Field.Source", Cause.Code: "lowering.Access.Field.Query" } } }
+            && description.Contains("Shared", StringComparison.Ordinal), "静态字段诊断保留字段名、下降来源和未查询原因");
         var entries = new[] { getter, caller }.Select((m, i) => new CodeEntry((ulong)(16 + 4 * i), EntryKind.Method, MethodRef.Open(m), i, null)).ToArray();
         var map = new Registrations { CodeRegistration = 0, MetadataRegistration = 0, Entries = entries,
             ByAddress = entries.ToDictionary(e => e.Address, e => ImmutableArray.Create(e)), Rgctx = new Dictionary<(string, uint), ImmutableArray<RgctxEntry>>(),
@@ -584,7 +591,7 @@ internal static partial class InliningChecks
         public ManagedTypes Types { get; }
         public MethodBinder Binder { get; }
         public CallNamingQuery Calls { get; }
-        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false, bool externalCaller = false)
+        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false, bool externalCaller = false, int fieldOffset = 16)
         {
             TypeDef Define(string name, string ns = "", bool value = false, TypeAttributes layout = 0, string? assembly = null) { var type = new TypeDef { Index = definitions.Count,
                 Assembly = assembly ?? (ns == "System" ? "mscorlib.dll" : "InliningChecks.dll"), Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
@@ -595,7 +602,7 @@ internal static partial class InliningChecks
             Owner = Define("Owner", value: valueOwner, layout: explicitOwner ? TypeAttributes.ExplicitLayout : 0); Caller = Define("Caller", assembly: externalCaller ? "InliningCallerChecks.dll" : null);
             if (generic) Owner.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
             OwnerType = new(Owner, Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
-            var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000001 };
+            var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = fieldOffset, Token = 0x04000001 };
             var shared = new FieldDef { Index = 1, Owner = Owner, Name = "Shared", Type = Integer, Attributes = FieldAttributes.Private | FieldAttributes.Static, Offset = 0, Token = 0x04000002 };
             Owner.Fields = [field, shared]; Field = new(field, OwnerType); Shared = new(shared, OwnerType);
             Program = new() { MetadataVersion = 31, Types = definitions, Methods = methods, Fields = new List<FieldDef> { field, shared }, RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],

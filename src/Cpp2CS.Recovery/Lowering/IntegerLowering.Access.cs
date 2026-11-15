@@ -40,13 +40,15 @@ public sealed partial class IntegerLowering
                     return;
                 }
                 if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
-                if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
-                { Missing("Field", new("access.field", "字段 " + field.Field.Field.Owner.FullName + "." + field.Field.Field.Name));
+                if (value is FieldValue field && !(field.Accessor?.Matches(types, method.Method.Owner, field, false)
+                    ?? ManagedAccess.Field(types, method, field.Field, field.Receiver.Type)))
+                { Missing("Field", FieldValueReason(field));
                     if (types.Kind(field.Field.DeclaringType) == TypeKind.Struct) failure = failure! with { StructType = field.Field.DeclaringType };
                     else if (types.Kind(field.Type) == TypeKind.Struct) failure = failure! with { StructType = field.Type };
                     return; }
-                if (value is StaticFieldValue shared && !ManagedAccess.Field(types, method, shared.Field, null))
-                { Missing("Field");
+                if (value is StaticFieldValue shared && !(shared.Accessor?.Matches(types, method.Method.Owner, shared, false)
+                    ?? ManagedAccess.Field(types, method, shared.Field, null)))
+                { Missing("Field", FieldValueReason(shared));
                     if (types.Kind(shared.Type) == TypeKind.Struct) failure = failure! with { StructType = shared.Type };
                     return; }
                 if (value is DelegateValue delegated)
@@ -64,6 +66,66 @@ public sealed partial class IntegerLowering
                 { Missing("Method"); return; }
             }
         }
+    }
+
+    private readonly Dictionary<ManagedValue, Reason> fieldValueOrigins = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ManagedValue, Reason> fieldValueFailures = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ManagedValue, ManagedValue> fieldValueReads = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ManagedValue, ManagedValue> wholeFieldValueReads = new(ReferenceEqualityComparer.Instance);
+    private T FieldValueOrigin<T>(T value, string source) where T : ManagedValue
+    {
+        fieldValueOrigins[value] = new("lowering.Access.Field.Source", source);
+        return value;
+    }
+    private Reason FieldValueReason(ManagedValue value)
+    {
+        var field = Cpp2CS.Managed.FieldAccessor.FieldOf(value)!;
+        var receiver = value is FieldValue instance ? "；接收者 " + instance.Receiver.GetType().Name + "：" + instance.Receiver.Type : "；静态值";
+        var query = fieldValueFailures.TryGetValue(value, out var rejected)
+            ? new Reason("lowering.Access.Field.Query", "字段值已询问访问器，未取得唯一的纯读取模板", rejected)
+            : new Reason("lowering.Access.Field.Query", accessors is null ? "未装配访问器查询" : "字段值未经过内存读取定义的访问器解析");
+        var source = fieldValueOrigins.GetValueOrDefault(value);
+        return new("access.field", "字段 " + field + receiver,
+            source is null ? query : source with { Cause = query });
+    }
+
+    // 按值 getter 保留表达式的求值位置；取地址的目标仍是位置，不改成副本。
+    private ManagedValue ReadFieldValues(ManagedValue value, bool wholeValue = false)
+    {
+        if (value is AddressValue) return value;
+        var rewritten = wholeValue ? wholeFieldValueReads : fieldValueReads;
+        if (rewritten.TryGetValue(value, out var known)) return known;
+        ManagedValue Remember(ManagedValue result) { rewritten.Add(value, result); return result; }
+        bool changed = false;
+        var rebuilt = ManagedValues.Map(value, child =>
+        {
+            var result = ReadFieldValues(child, wholeValue);
+            changed |= !ReferenceEquals(child, result);
+            return result;
+        });
+        if (!changed) rebuilt = value;
+        if (fieldValueOrigins.TryGetValue(value, out var source)) fieldValueOrigins[rebuilt] = source;
+        var field = Cpp2CS.Managed.FieldAccessor.FieldOf(rebuilt);
+        var receiver = Cpp2CS.Managed.FieldAccessor.ReceiverType(rebuilt);
+        if (accessors is null || field is null || ManagedAccess.Field(types, method, field, receiver)
+            || rebuilt is FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null }) return Remember(rebuilt);
+        bool structure = rebuilt is FieldValue && (types.Kind(receiver!) == TypeKind.Struct
+            || wholeValue && receiver is ByRefRef { Element: var element } && types.Kind(element) == TypeKind.Struct);
+        if (!structure && !(wholeValue && rebuilt is StaticFieldValue)) return Remember(rebuilt);
+        // 静态读取仍在原表达式处发生，由同一所属类型的调用承接初始化；只取现有的单字段模板。
+        var answer = accessors.Resolve(new(method, position, field, receiver, AccessorKind.Getter, !structure) { ValueRead = structure });
+        if (answer.Method is not { } getter)
+        {
+            if (answer.Failure is { } why) fieldValueFailures[rebuilt] = why;
+            return Remember(rebuilt);
+        }
+        var proof = new Cpp2CS.Managed.FieldAccessor(getter, field, rebuilt.Type, rebuilt.Width, false);
+        return Remember(rebuilt switch
+        {
+            FieldValue instance => instance with { Accessor = proof },
+            StaticFieldValue shared => shared with { Accessor = proof },
+            _ => rebuilt,
+        });
     }
 
     private sealed class ReadDefinition(MemoryRead read)
@@ -381,6 +443,16 @@ public sealed partial class IntegerLowering
                 _ => ((FieldRef?)null, (TypeRef?)null),
             };
             if (field is null || ManagedAccess.Field(types, method, field, receiver)) continue;
+            if (!write && value is FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null })
+            {
+                // getter 的等式不要求放置；已有读取局部仍须在全部使用之前定义。
+                if (ReferenceEquals(value, storage) && ReadPlacementFailure(read) is { } missing)
+                {
+                    Fail<object>(LoweringFailureKind.State, "读取局部的原定义未能支配全部同值读取", missing, "lowering.Access.ReadPlacement");
+                    return null;
+                }
+                continue;
+            }
             StableIdentity? identity = read is not null ? read.Read.Identity : writeIdentity;
             var programFailure = accessorProgramFailure ?? (identity is not null ? accessorProgram?.Failures.GetValueOrDefault(identity) : null);
             if (programFailure is not null)
@@ -393,19 +465,22 @@ public sealed partial class IntegerLowering
                 ? new("inline.Accessor.Placement.NestedAccess", "不可访问字段只是复合访问的内部位置")
                 : ManagedValues.Children(storage).Any(v => !AccessorReceiver(v))
                     ? new("inline.Accessor.Placement.Receiver", "接收者仍含字段访问或复合位置的取地址，不能保持单次访问的位置") : null;
-            if (placementFailure is null && read is not null)
-            {
-                var placement = context.Get(accessors.ReadPlacement, new(read.Read.Identity,
-                    readDefinitions.Where(p => ReferenceEquals(p.Value, read)).Select(p => p.Key).ToArray()));
-                if (!placement.IsSuccess || !placement.Value)
-                    placementFailure = new("inline.Accessor.Placement.ReadDominance", "原读取未能证明支配全部同值读取", placement.Why);
-            }
+            placementFailure ??= ReadPlacementFailure(read);
             var answer = accessors.Resolve(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter,
                 placementFailure is null, placementFailure));
             if (answer.Failure is { } why) Fail<object>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
             return answer.Method;
         }
         return null;
+    }
+
+    private Reason? ReadPlacementFailure(ReadDefinition? read)
+    {
+        if (read is null) return null;
+        var placement = context.Get(accessors!.ReadPlacement, new(read.Read.Identity,
+            readDefinitions.Where(p => ReferenceEquals(p.Value, read)).Select(p => p.Key).ToArray()));
+        return placement.IsSuccess && placement.Value ? null
+            : new("inline.Accessor.Placement.ReadDominance", "原读取未能证明支配全部同值读取", placement.Why);
     }
 
     private bool AccessorReceiver(ManagedValue value) => value is LocalValue or ArgumentValue
@@ -449,23 +524,23 @@ public sealed partial class IntegerLowering
         if (write && !Writable(view)) return null;
         return AccessView(view, write);
     }
-    private ManagedValue? AccessView(LocationView view, bool write = false, bool address = false)
+    private ManagedValue? AccessView(LocationView view, bool write = false, bool address = false, bool wholeValue = false)
     {
         if (view.Kind == ManagedLocationKind.StaticField)
         {
             // 根是类的静态字段块，不是托管值；路径的第一项就是静态字段本身。
             var head = view.Path[0];
             var headType = head.Field.Type.Substitute((head.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
-            ManagedValue storage = new StaticFieldValue(head, headType, ValueWidth(headType));
+            ManagedValue storage = FieldValueOrigin(new StaticFieldValue(head, headType, ValueWidth(headType)), "AccessView.StaticField：静态字段路径的根");
             foreach (var field in view.Path.Skip(1))
             {
                 if (write && types.Kind(storage.Type) == TypeKind.Struct) storage = new AddressValue(storage, types.PointerSize * 8);
                 var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
-                storage = new FieldValue(storage, field, type, ValueWidth(type));
+                storage = FieldValueOrigin(new FieldValue(storage, field, type, ValueWidth(type)), "AccessView.StaticField：静态结构体字段的嵌套路径");
             }
             if (!address && !Scalar(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
                 return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
-            return storage;
+            return !write && !address ? ReadFieldValues(storage, wholeValue) : storage;
         }
         var root = view.Kind == ManagedLocationKind.FrameLocal ? FrameLocal(frameObjects!.Objects.Single(o => o.Address == view.Root)) : Value(view.Root);
         if (root is null) return null;
@@ -489,11 +564,11 @@ public sealed partial class IntegerLowering
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
             if (ManagedTypes.IsReferenceType(value.Type)) value = Coerce(value, field.DeclaringType);
             if (failure is not null) return null;
-            value = new FieldValue(value, field, type, ValueWidth(type));
+            value = FieldValueOrigin(new FieldValue(value, field, type, ValueWidth(type)), "AccessView." + view.Kind + "：托管位置路径");
         }
         if (!address && !Scalar(value.Type) && types.Kind(value.Type) != TypeKind.Struct
             && !(view.Kind == ManagedLocationKind.FrameLocal && ManagedTypes.IsNativePointer(value.Type)))
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
-        return value;
+        return !write && !address ? ReadFieldValues(value, wholeValue) : value;
     }
 }

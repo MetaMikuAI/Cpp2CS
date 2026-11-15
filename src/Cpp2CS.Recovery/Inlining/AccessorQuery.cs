@@ -6,7 +6,11 @@ namespace Cpp2CS.Recovery.Inlining;
 
 public enum AccessorNoneReason { NoCandidates, Incomplete, NotTemplate, GenericMethod, FieldInstance }
 public sealed record AccessorAccess(MethodRef Caller, ulong Position, FieldRef Field, TypeRef? Receiver,
-    AccessorKind Kind, bool HasPlacement, Reason? PlacementFailure = null);
+    AccessorKind Kind, bool HasPlacement, Reason? PlacementFailure = null)
+{
+    /// <summary>结构体值上的单字段纯读取；声明类型实例由接收者给出。</summary>
+    public bool ValueRead { get; init; }
+}
 public sealed record AccessorCandidateFailure(MethodDef Method, Reason? Failure);
 public sealed record AccessorAnswer(MethodRef? Method, Reason? Failure, AccessorNoneReason? NoneReason = null, int Matches = 0)
 {
@@ -51,6 +55,10 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
         var field = access.Field.Field;
         if (access.Field.DeclaringType is not DefinitionRef instance || instance.Definition != field.Owner
             || instance.Arguments.Count != field.Owner.GenericParameters.Count) return None(AccessorNoneReason.FieldInstance);
+        var receiver = access.Receiver is ByRefRef address ? address.Element : access.Receiver;
+        bool valueRead = access.ValueRead && access.Kind == AccessorKind.Getter && !field.IsStatic
+            && field.Owner.IsValueType && instance.Equals(receiver);
+        if (access.ValueRead && !valueRead) return None(AccessorNoneReason.FieldInstance);
         MethodRef OnInstance(MethodDef method) => new(method, instance.Arguments, []);
         var candidates = field.Owner.Methods.Where(m => !m.IsVirtual && m.IsStatic == field.IsStatic
             && (access.Kind == AccessorKind.Getter
@@ -78,7 +86,7 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
         if (matches.Count == 0) return None(reason);
         if (matches.Count > 1) return new(null, new("inline.Accessor.Ambiguous", $"有 {matches.Count} 个访问器模板相同，无法区分原调用"), Matches: matches.Count)
             { IncompleteCandidates = incomplete };
-        if (!access.HasPlacement) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置", access.PlacementFailure), Matches: 1)
+        if (!access.HasPlacement && !valueRead) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置", access.PlacementFailure), Matches: 1)
             { IncompleteCandidates = incomplete };
         return new(matches[0], null, Matches: 1) { IncompleteCandidates = incomplete };
     }
