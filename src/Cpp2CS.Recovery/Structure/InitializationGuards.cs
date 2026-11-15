@@ -279,7 +279,11 @@ public sealed partial class UnobservableEffects
             }
         }
         var uses = new SemanticUses(after, calls, state, names.Binder, names.Entry);
-        return uses.Of(read.Identity).Any() ? new("structure.init-guard.read-used", "删边后守卫读取仍有真实使用。") : null;
+        // 同一次读取可以被几条路径上的守卫各测一次；别的守卫的分支条件不是真实使用，那些守卫各自归位或各自保留。
+        var otherGuards = kept.Blocks.Where(b => b.End is Branch other && InitializationTest.Of(other.Condition) is { } test && test.Read == read.Identity)
+            .Select(b => new Point(b.Identity, b.Statements.Length)).ToHashSet();
+        return uses.Of(read.Identity).Any(use => !use.Condition || !otherGuards.Contains(use.Point))
+            ? new("structure.init-guard.read-used", "删边后守卫读取仍有真实使用。") : null;
     }
 
     private static readonly HashSet<string> InitializationStateFields = Cpp2CS.Runtime.RuntimeOperations.All.Values

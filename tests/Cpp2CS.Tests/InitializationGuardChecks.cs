@@ -104,6 +104,43 @@ internal static class InitializationGuardChecks
             if (!method && folded)
                 checks.True(output.Function.Blocks.Single(b => b.Identity == head).Statements.OfType<Call>().Any(c => c.Identity == call.Identity), "精确类初始化在分支位置无条件执行");
         }
+        {
+            // 一次标志读取在分叉之前，两条路径上的守卫各测一次：两个守卫各自归位，别的守卫的零测试不算这次读取的真实使用。
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(classInit), catalog);
+            var t = new TermTable(); var head = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity();
+            var armL = new BlockIdentity(); var skipL = new BlockIdentity(); var armR = new BlockIdentity(); var skipR = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            Term Add(Term value, int offset) => t.Apply(new CoreOperator(CoreOperation.Add), 64, value, t.Constant(offset, 64));
+            var slot = new AbstractSlot(SlotKind.Integer); var forkSlot = new AbstractSlot(SlotKind.Integer, 1);
+            var builder = new FunctionBuilder(t, head, 64, new(frame)) { ImageBase = image };
+            var fork = t.Atom(new EntryAtom(forkSlot), 64); builder.Inputs.Add(new(forkSlot, fork));
+            var ownerId = new ReadIdentity(); var owner = t.Atom(new ResultAtom(ownerId), 64);
+            var field = spec.Layout.Field("Il2CppClass", "cctor_finished_or_no_cctor"); int width = checked((int)field.Size * 8);
+            var flagId = new ReadIdentity(); var flag = t.Atom(new ResultAtom(flagId), width);
+            var zero = t.Apply(new CoreOperator(CoreOperation.Equal), 1, flag, t.Constant(0, width));
+            var callL = new Call(new(), new ImageFunction(20), [new(slot, owner)], []); var callR = new Call(new(), new ImageFunction(20), [new(slot, owner)], []);
+            builder.Blocks.Add(new(head, [], [new MemoryRead(ownerId, Add(image, 100), 64, owner),
+                new MemoryRead(flagId, Add(owner, checked((int)field.ByteOffset)), width, flag) { Trace = new(1) }],
+                new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, fork, t.Constant(0, 64)), left, right)));
+            builder.Blocks.Add(new(left, [], [], new Branch(zero, armL, skipL)));
+            builder.Blocks.Add(new(armL, [], [callL], new Return([new(slot, t.Constant(7, 64))])));
+            builder.Blocks.Add(new(skipL, [], [], new Return([new(slot, t.Constant(8, 64))])));
+            builder.Blocks.Add(new(right, [], [], new Branch(zero, armR, skipR)));
+            builder.Blocks.Add(new(armR, [], [callR], new Return([new(slot, t.Constant(9, 64))])));
+            builder.Blocks.Add(new(skipR, [], [], new Return([new(slot, t.Constant(10, 64))])));
+            var function = builder.Freeze();
+            checks.True(ExitChecker.Check(function).IsValid, "共用读取的两个守卫 输入契约");
+            var facts = NamingFacts.Empty with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(100, Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(klass, [])))) };
+            var state = new StateQueries(image: new InputMemoryImage());
+            var names = new ValueNamingQuery(state, calls, facts, spec, binder);
+            var output = new UnobservableEffects(state, calls, names, new InputMemoryImage(), new HashSet<AbstractSlot> { slot }).Run(function);
+            checks.True(ExitChecker.Check(output.Function).IsValid, "共用读取的两个守卫 输出契约");
+            checks.True(output.Records.Count(r => r.Kind == "init-guard" && r.Removed) == 2, "一次读取被两条路径上的守卫共用时两个守卫各自归位："
+                + string.Join("；", output.Records.Where(r => r.Reason is not null).Select(r => r.Reason!.Code + " " + r.Reason.Message)));
+            checks.True(output.Function.Blocks.Count(b => b.End is Branch) == 1, "归位后只剩分叉的分支");
+            checks.True(output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Select(c => c.Identity).ToHashSet().SetEquals([callL.Identity, callR.Identity]),
+                "两条路径上各保留自己的初始化调用");
+        }
         var ready = catalog.Functions.First(f => f.Operation.Name == "EnsureClassReady" && f.Signature is not null);
         {
             var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(ready), catalog);
