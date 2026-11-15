@@ -61,8 +61,9 @@ public sealed class RuntimeFunctionMap(Cpp2CS.Recovery.RuntimeFunctions.RuntimeF
 {
     public Cpp2CS.Runtime.RuntimeFunction? Find(Cpp2CS.Native.CallTarget target) => locations.Find(target)?.Function;
 }
-public sealed class NamingCodeMap(Registrations registrations) : IBindingCodeMap
+public sealed class NamingCodeMap(Registrations registrations, Cpp2CS.Recovery.MethodCopies.MethodCopyFacts? copies = null) : Cpp2CS.Recovery.MethodCopies.IMethodCopyCodeMap
 {
+    public Cpp2CS.Native.Terms.Reason? Failure(ulong entryOffset) => copies?.Failure(entryOffset);
     public ImmutableArray<BindingEntry> At(ulong entryOffset) => registrations.ByAddress.TryGetValue(entryOffset, out var entries)
         ? entries.Select(e => new BindingEntry(e.Method, e.Kind switch
         {
@@ -70,5 +71,5 @@ public sealed class NamingCodeMap(Registrations registrations) : IBindingCodeMap
             EntryKind.GenericMethod => BindingEntryKind.SharedGeneric,
             EntryKind.AdjustorThunk or EntryKind.GenericAdjustorThunk => BindingEntryKind.AdjustorThunk,
             EntryKind.Invoker => BindingEntryKind.Invoker, _ => BindingEntryKind.Wrapper
-        }, e.Kind.ToString())).ToImmutableArray() : [];
+        }, e.Kind.ToString())).ToImmutableArray() : copies?.At(entryOffset) ?? [];
 }

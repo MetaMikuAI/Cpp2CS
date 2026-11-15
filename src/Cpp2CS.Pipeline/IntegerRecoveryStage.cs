@@ -41,7 +41,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var layouts = new FieldLayouts(facts.Spec, pointer, pointer);
         var binder = new MethodBinder(new(layouts, pointer * 8), new Aapcs64());
         var spec = facts.Spec.Layout;
-        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap),
+        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap, facts.MethodCopies.Facts),
             new RuntimeFunctionMap(facts.RuntimeFunctions), RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel), InternalCallAssembly.Get(facts).Facts);
         var types = new ManagedTypes(facts.Model, layouts, pointer);
         var templateSource = constructorSource ?? new MethodTemplateSource(facts, templateFrontend, constructors: true);

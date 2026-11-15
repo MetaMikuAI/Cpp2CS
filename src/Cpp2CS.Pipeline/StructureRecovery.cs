@@ -34,7 +34,7 @@ public static class StructureRecovery
         var facts = context.Facts;
         internalCalls ??= InternalCallAssembly.Get(facts).Facts;
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
-        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog, internalCalls);
+        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap, discoverInternalCall is null ? facts.MethodCopies.Facts : null), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog, internalCalls);
         MethodProgress.Mark("结构：异常区域");
         bool hasHandlers = input.Blocks.Any(block => block.Handler is not null);
         if (hasHandlers) input = ExceptionScaffolding.Project(input, calls, splitEntries: true);

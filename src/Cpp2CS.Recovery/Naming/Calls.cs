@@ -54,7 +54,12 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
         ClassifiedCall result;
         if (call.Target is ComputedTarget indirect) result = new(CallKind.Indirect, Target: indirect.Value);
         else if (call.Target is ImageFunction image && code.At(image.EntryOffset).Length > 0)
-            result = new(CallKind.Managed, binder.Call(call, image, code, c.Snapshot.Terms));
+        {
+            var candidates = binder.Call(call, image, code, c.Snapshot.Terms);
+            result = new(CallKind.Managed, candidates, Why: candidates.Candidates.Length > 1
+                && candidates.Candidates.Any(candidate => candidate.Entry.Detail == "method-copy")
+                ? new("naming.method-copy.ambiguous", $"副本的身份不唯一：{candidates.Candidates.Length} 个候选。") : null);
+        }
         else if (call.Target is ImageFunction shared && internalCalls?.AmbiguousEntries.Contains(shared.EntryOffset) == true)
             result = new(CallKind.Unknown, Why: new("naming.icall-ambiguous", "同一内部调用实现被多个不同托管定义转发，身份不唯一。"));
         else if (call.Target is ImageFunction implementation && internalCalls?.Direct.GetValueOrDefault(implementation.EntryOffset) is { } forwarder)
@@ -66,7 +71,10 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
         else
         {
             var function = RuntimeIdentity(call.Target);
-            if (function is null) result = new(CallKind.Unknown, Why: new("naming.call-target", "目标没有托管身份或目录对应。"));
+            if (function is null) result = new(CallKind.Unknown, Why: call.Target is ImageFunction missing
+                && code is Cpp2CS.Recovery.MethodCopies.IMethodCopyCodeMap copies && copies.Failure(missing.EntryOffset) is { } why
+                ? new("naming.call-target", "目标没有托管身份或目录对应；" + why.Message, why)
+                : new("naming.call-target", "目标没有托管身份或目录对应。"));
             else
             {
                 var kind = function.Recognition.Import is not null ? CallKind.System : CallKind.Runtime;

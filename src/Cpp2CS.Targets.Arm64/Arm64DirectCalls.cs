@@ -14,7 +14,11 @@ public static class Arm64DirectCalls
         ? targets.GetValue(image, source => new(source)).Resolve(function.EntryOffset) : new(target, null);
 
     /// <summary>线性扫描范围内的 BL 和向范围外的 B；不依赖可提升性或不返回分析的路径截断。</summary>
-    public static IEnumerable<(ulong Address, ulong Target)> ToCandidates(IImage image, FunctionRange range, IReadOnlySet<ulong> candidates)
+    public static IEnumerable<(ulong Address, ulong Target)> ToCandidates(IImage image, FunctionRange range, IReadOnlySet<ulong> candidates) =>
+        InRange(image, range).Where(site => candidates.Contains(site.Target));
+
+    /// <summary>全部直接映像目标，包含尚无独立函数范围的入口。</summary>
+    public static IEnumerable<(ulong Address, ulong Target)> InRange(IImage image, FunctionRange range)
     {
         for (ulong offset = 0; offset + 4 <= range.Length; offset += 4)
         {
@@ -26,7 +30,7 @@ public static class Arm64DirectCalls
             ulong target = unchecked(address + (ulong)displacement);
             bool linked = (word & 0x80000000) != 0;
             if ((linked || target < range.Start || target - range.Start >= range.Length)
-                && ResolveTarget(image, new ImageFunction(target)).Target is ImageFunction normalized && candidates.Contains(normalized.EntryOffset))
+                && ResolveTarget(image, new ImageFunction(target)).Target is ImageFunction normalized)
                 yield return (address, normalized.EntryOffset);
         }
     }

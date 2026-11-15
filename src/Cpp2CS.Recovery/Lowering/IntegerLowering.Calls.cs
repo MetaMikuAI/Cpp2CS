@@ -28,6 +28,7 @@ public sealed partial class IntegerLowering
     private readonly CallNamingQuery? calls;
     private readonly BoundSourceQuery boundSources;
     private SharedCallQuery? sharedCalls;
+    private DirectCallQuery? directCalls;
     private readonly Dictionary<CallIdentity, CallDefinition> callDefinitions = [];
     private readonly Dictionary<Term, CallDefinition> callResults = [];
     private readonly Dictionary<ManagedCall, CallDefinition> callStatements = new(ReferenceEqualityComparer.Instance);
@@ -150,8 +151,21 @@ public sealed partial class IntegerLowering
                 return;
             }
         }
+        if (candidates.Length > 1 && candidates.All(candidate => candidate.Entry.Kind == BindingEntryKind.Ordinary))
+        {
+            var direct = context.Get(directCalls ??= new(calls, valueNames, boundSources, types), call.Identity);
+            if (direct.IsSuccess) candidates = [direct.Value];
+            else if (c.Why?.Code == "naming.method-copy.ambiguous")
+            {
+                Fail<object>(LoweringFailureKind.AmbiguousCall, c.Why.Message, direct.Why, "lowering.MethodCopy.Ambiguous"); return;
+            }
+        }
         if (candidates.Length != 1)
         {
+            if (c.Why?.Code == "naming.method-copy.ambiguous")
+            {
+                Fail<object>(LoweringFailureKind.AmbiguousCall, c.Why.Message, c.Why, "lowering.MethodCopy.Ambiguous"); return;
+            }
             var methods = candidates.Select(x => x.Entry.Method).ToArray();
             bool same = methods.Length > 1 && methods.All(m => m is not null) && methods.Skip(1).All(m =>
                 m!.Method.IsStatic == methods[0]!.Method.IsStatic &&

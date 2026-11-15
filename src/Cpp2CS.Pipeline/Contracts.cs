@@ -17,6 +17,8 @@ public sealed record GlobalFacts(IImage Image, ProgramModel Model, Registrations
     public ImmutableArray<FunctionSymbol> Symbols { get; init; } = [];
     /// <summary>运行时函数身份；按映像建立一次，导入查询包含 PLT 归一。</summary>
     public Cpp2CS.Recovery.RuntimeFunctions.RuntimeFunctionLocations RuntimeFunctions => RuntimeLocationAssembly.Locations(this);
+    /// <summary>没有注册入口的托管方法副本；一次运行只建立一次。</summary>
+    public MethodCopySurvey MethodCopies => MethodCopyAssembly.Get(this);
     /// <summary>有处理入口的原生异常区域，按地址查询。</summary>
     public TryRegionIndex HandlerRegions { get; } = new(Image.TryRegions);
     /// <summary>映像的函数范围按起点索引。</summary>
