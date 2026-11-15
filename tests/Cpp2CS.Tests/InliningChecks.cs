@@ -70,6 +70,7 @@ internal static partial class InliningChecks
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
         GenericAccessorChecks(checks);
+        GenericStaticAccessorChecks(checks);
         ConstructorChecks(checks);
         StraightConstructorChecks(checks);
         PairingConstructorChecks(checks);
@@ -583,15 +584,15 @@ internal static partial class InliningChecks
         public ManagedTypes Types { get; }
         public MethodBinder Binder { get; }
         public CallNamingQuery Calls { get; }
-        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false)
+        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false, bool externalCaller = false)
         {
-            TypeDef Define(string name, string ns = "", bool value = false, TypeAttributes layout = 0) { var type = new TypeDef { Index = definitions.Count,
-                Assembly = ns == "System" ? "mscorlib.dll" : "InliningChecks.dll", Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
+            TypeDef Define(string name, string ns = "", bool value = false, TypeAttributes layout = 0, string? assembly = null) { var type = new TypeDef { Index = definitions.Count,
+                Assembly = assembly ?? (ns == "System" ? "mscorlib.dll" : "InliningChecks.dll"), Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
                 Attributes = TypeAttributes.Public | layout, IsValueType = value, IsEnum = false, Size = 64, PackingSize = 0, ClassSizeIsDefault = true }; definitions.Add(type); return type; }
             foreach (var name in new[] { "Object", "String", "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Single", "Double", "IntPtr", "UIntPtr", "RuntimeTypeHandle", "RuntimeFieldHandle", "RuntimeMethodHandle", "TypedReference", "Void" })
                 Define(name, "System", name is not ("Object" or "String"));
             Integer = new DefinitionRef(definitions.Single(t => t.Name == "Int32"), []); Void = new DefinitionRef(definitions.Single(t => t.Name == "Void"), []);
-            Owner = Define("Owner", value: valueOwner, layout: explicitOwner ? TypeAttributes.ExplicitLayout : 0); Caller = Define("Caller");
+            Owner = Define("Owner", value: valueOwner, layout: explicitOwner ? TypeAttributes.ExplicitLayout : 0); Caller = Define("Caller", assembly: externalCaller ? "InliningCallerChecks.dll" : null);
             if (generic) Owner.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
             OwnerType = new(Owner, Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
             var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000001 };
@@ -604,10 +605,10 @@ internal static partial class InliningChecks
             var catalog = RuntimeFunctionCatalog.Select(Spec.Layout.UnityVersion, Spec.Layout.Triple, Spec.Layout.DataModel);
             Calls = new(Binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(), catalog);
         }
-        public MethodDef Method(TypeDef owner, string name, bool write, bool statics, TypeRef[]? parameters = null, bool virtualMethod = false, int slot = -1)
+        public MethodDef Method(TypeDef owner, string name, bool write, bool statics, TypeRef[]? parameters = null, bool virtualMethod = false, int slot = -1, bool accessible = true)
         {
             var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name, Token = (uint)(0x06000001 + methods.Count),
-                Attributes = MethodAttributes.Public | (statics ? MethodAttributes.Static : 0) | (virtualMethod ? MethodAttributes.Virtual : 0)
+                Attributes = (accessible ? MethodAttributes.Public : MethodAttributes.Private) | (statics ? MethodAttributes.Static : 0) | (virtualMethod ? MethodAttributes.Virtual : 0)
                     | (name == ".ctor" ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : 0), ImplAttributes = 0, Slot = slot,
                 ReturnType = write ? Void : Integer, Parameters = (parameters ?? (write ? [Integer] : [])).Select(t => new ParameterDef("value", t, 0, null, false)).ToArray() };
             methods.Add(method); owner.Methods = [.. owner.Methods, method]; return method;
@@ -625,7 +626,7 @@ internal static partial class InliningChecks
             {
                 var image = terms.Atom(new RootAtom(AddressRoot.Image), 64); builder.ImageBase = image;
                 var klass = Read(Add(image, 256), 64); root = Read(Add(klass, Spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
-                names = names with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256, Outcome<MetadataEntity>.Success(new ClassEntity(OwnerType))) };
+                names = names with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256, Outcome<MetadataEntity>.Success(new ClassEntity(field.DeclaringType))) };
             }
             var address = Add(root, field.Field.Offset);
             if (write) statements.Add(new MemoryWrite(new(), address, width, terms.Slice(input, 0, width)));

@@ -115,7 +115,7 @@ public static class AccessorTemplates
             var fields = ManagedValues.Walk(expression).Select(FieldAccessor.FieldOf).OfType<FieldRef>().Distinct().ToArray();
             if (fields.Length == 0) return No("NoField", "表达式没有字段锚点");
             bool single = method.Parameters.Count == 0 && expression is FieldValue { Receiver: ArgumentValue { Index: -1 } } or StaticFieldValue
-                && method.ReturnType.Equals(fields[0].Field.Type);
+                && expression.Type.Equals(body.Method.Concrete(method.ReturnType));
             return new(AccessorTemplateStatus.Complete, new(AccessorKind.Getter, fields[0])
             { Expression = expression, Fields = fields, SingleField = single });
         }

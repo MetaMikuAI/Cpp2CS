@@ -29,7 +29,7 @@ public sealed partial class AccessorQuery
     public Outcome<AccessorProgram> Match(QueryContext context, MethodRef caller, StateQueries state,
         ManagedLocationQuery locations, IReadOnlyDictionary<Term, ManagedValue> arguments,
         IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls = null) =>
-        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, observe, Find), 0);
+        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, observe, Find, StaticCandidates), 0);
 
     private sealed record Site(Point Point, StableIdentity Identity, FieldRef Field, Term? Receiver, TypeRef? ReceiverType,
         Term Value, bool Write, ulong Address);
@@ -41,7 +41,7 @@ public sealed partial class AccessorQuery
     /// <summary>发现纯项、转调和无副作用区域；读取版本、支配、路径事实与最终相等均取现有查询。</summary>
     private sealed partial class ProgramQuery(ManagedTypes types, IAccessorTemplateSource templates, StateQueries state,
         ManagedLocationQuery locations, MethodRef caller, IReadOnlyDictionary<Term, ManagedValue> arguments,
-        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy) : Query<int, AccessorProgram>
+        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy, StaticCandidateLookup StaticCandidates) : Query<int, AccessorProgram>
     {
         private readonly FlowQueries flow = new();
         public override Outcome<AccessorProgram> Compute(QueryContext c, int key)
@@ -102,13 +102,17 @@ public sealed partial class AccessorQuery
                     while (readLow > 0 && Quiet(c, block.Statements[readLow - 1], true)) readLow--;
                 var window = sites.Where(s => s.Point.Block == anchor.Point.Block && s.Point.Before >= readLow && s.Point.Before < high).ToArray();
                 var writesInWindow = window.Where(s => s.Write && s.Point.Before >= low && s.Receiver == anchor.Receiver).ToArray();
-                foreach (var candidate in anchor.Field.Field.Owner.Methods.Where(m => m.Name is not (".ctor" or ".cctor")
+                var ordinary = anchor.Field.DeclaringType is DefinitionRef instance
+                    ? anchor.Field.Field.Owner.Methods.Where(m => m.Name is not (".ctor" or ".cctor")
                     && !m.IsOverridable
-                    && m.GenericParameters.Count == 0 && (!anchor.Write || ManagedTypes.IsVoid(m.ReturnType))))
+                    && m.GenericParameters.Count == 0 && (!anchor.Write || ManagedTypes.IsVoid(m.ReturnType)))
+                    .Select(m => new MethodRef(m, instance.Arguments, [])) : [];
+                Reason? inference = null;
+                var indexed = !anchor.Write && anchor.Field.Field.IsStatic ? StaticCandidates(anchor.Field, out inference) : [];
+                foreach (var selected in ordinary.Concat(indexed).Distinct())
                 {
                     if (c.Step() is { } budget) return Outcome<AccessorProgram>.Failure(budget);
-                    if (anchor.Field.DeclaringType is not DefinitionRef instance) continue;
-                    var selected = new MethodRef(candidate, instance.Arguments, []);
+                    var candidate = selected.Method;
                     if (!ManagedAccess.Method(types, caller.Method.Owner, selected, candidate.IsStatic ? null : anchor.ReceiverType)) continue;
                     candidates++;
                     if (types.Kind(selected.Concrete(candidate.ReturnType)) == TypeKind.Struct
@@ -237,7 +241,7 @@ public sealed partial class AccessorQuery
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
                         : shapes.Count != 0 ? string.Join("；", shapes.Order(StringComparer.Ordinal)) : "候选模板与完整项或写入组不匹配",
-                        new("inline.anchor", (anchor.Write ? "写入 " : "读取 ") + anchor.Field.Field.Owner.FullName + "." + anchor.Field.Field.Name));
+                        inference ?? new("inline.anchor", (anchor.Write ? "写入 " : "读取 ") + anchor.Field.Field.Owner.FullName + "." + anchor.Field.Field.Name));
                 var access = new AccessorAccess(caller, anchor.Address, anchor.Field, anchor.ReceiverType,
                     anchor.Write ? AccessorKind.Setter : AccessorKind.Getter, failure is null);
                 if (best.Length == 1 && failure is null)
@@ -258,7 +262,7 @@ public sealed partial class AccessorQuery
                     && templates.Get(single.Replacement.Method.Method).Template?.SingleField == true;
                 if (failure?.Code != "inline.Accessor.Ambiguous" && (best.Length == 0 || singlePlacement)
                     && Legacy(access with { HasPlacement = true }).Method is not null) continue;
-                failures[anchor.Identity] = failure!;
+                failures[anchor.Identity] = WithAnchor(failure!, access);
                 // 失败在实际使用处报告，未使用的读取不额外制造洞。
             }
             return Outcome<AccessorProgram>.Success(new(replacements, failures));

@@ -21,12 +21,14 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
     public AccessorAnswer Resolve(AccessorAccess access)
     {
         var answer = Find(access);
+        if (answer.Failure is { } failure) answer = answer with { Failure = WithAnchor(failure, access) };
         observe?.Invoke(new(access, answer));
         return answer;
     }
 
     public AccessorAnswer Reject(AccessorAccess access, Reason failure)
     {
+        failure = WithAnchor(failure, access);
         var answer = new AccessorAnswer(null, failure, failure.Code == "inline.Accessor.None"
             ? failure.Message == "没有候选" ? AccessorNoneReason.NoCandidates
                 : failure.Message == "候选未能完整恢复" ? AccessorNoneReason.Incomplete : AccessorNoneReason.NotTemplate : null);
@@ -37,14 +39,15 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
     private AccessorAnswer Find(AccessorAccess access)
     {
         var incomplete = new List<AccessorCandidateFailure>();
+        Reason? inference = null;
         AccessorAnswer None(AccessorNoneReason reason) => new(null, new("inline.Accessor.None", reason switch
         {
             AccessorNoneReason.NoCandidates => "没有候选",
             AccessorNoneReason.Incomplete => "候选未能完整恢复",
             AccessorNoneReason.NotTemplate => "候选的方法体不是模板",
-            AccessorNoneReason.GenericMethod => "签名候选只有泛型方法，尚不支持",
+            AccessorNoneReason.GenericMethod => inference is null ? "签名候选只有泛型方法，尚不支持" : "字段所属类型未能唯一确定泛型实参",
             _ => "字段没有完整的声明类型实例",
-        }), reason) { IncompleteCandidates = incomplete };
+        }, inference), reason) { IncompleteCandidates = incomplete };
         var field = access.Field.Field;
         if (access.Field.DeclaringType is not DefinitionRef instance || instance.Definition != field.Owner
             || instance.Arguments.Count != field.Owner.GenericParameters.Count) return None(AccessorNoneReason.FieldInstance);
@@ -55,14 +58,16 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
                 : m.Parameters is [var p] && p.Type.Equals(field.Type) && ManagedTypes.IsVoid(m.ReturnType)))
             .Where(m => ManagedAccess.Method(types, access.Caller.Method.Owner, OnInstance(m), access.Receiver)).ToArray();
         var reason = candidates.Any(m => m.GenericParameters.Count != 0) ? AccessorNoneReason.GenericMethod : AccessorNoneReason.NoCandidates;
-        var matches = new List<MethodDef>();
+        var matches = access.Kind == AccessorKind.Getter && field.IsStatic
+            ? StaticCandidates(access.Field, out inference).Where(m => ManagedAccess.Method(types, access.Caller.Method.Owner, m, null)).ToList()
+            : new List<MethodRef>();
         foreach (var candidate in candidates.Where(m => m.GenericParameters.Count == 0))
         {
             var result = templates.Get(candidate);
             // 定位已给出字段所属实例；模板核对开放字段身份，不比较实例间的布局偏移。
             var openField = new FieldRef(field, MethodRef.Open(candidate).DeclaringType);
             if (result.Template is { } template && result.Status == AccessorTemplateStatus.Complete
-                && template.SingleField && template.Kind == access.Kind && template.Field.Equals(openField)) matches.Add(candidate);
+                && template.SingleField && template.Kind == access.Kind && template.Field.Equals(openField)) { var selected = OnInstance(candidate); if (!matches.Contains(selected)) matches.Add(selected); }
             else if (result.Status == AccessorTemplateStatus.Incomplete)
             {
                 incomplete.Add(new(candidate, result.Failure));
@@ -75,6 +80,6 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             { IncompleteCandidates = incomplete };
         if (!access.HasPlacement) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置", access.PlacementFailure), Matches: 1)
             { IncompleteCandidates = incomplete };
-        return new(OnInstance(matches[0]), null, Matches: 1) { IncompleteCandidates = incomplete };
+        return new(matches[0], null, Matches: 1) { IncompleteCandidates = incomplete };
     }
 }
