@@ -132,6 +132,8 @@ internal static partial class LoweringChecks
             new ManagedReturn(0, new ConversionValue(ConversionKind.Bitcast, integer, types.Double, 64)),
             new ManagedReturn(0, new ArgumentValue(0, types.Single, 32)),
             new ManagedReturn(0, new ConversionValue(ConversionKind.Bitcast, target with { Type = types.Int32 }, types.Single, 32)),
+            // 整数扩展的结果声明成浮点类型：类型字段相符，栈上却是整数。
+            new ManagedCall(0, new(MethodRef.Open(methods["Take"]), null, [new ConversionValue(ConversionKind.ZeroExtend, integer, types.Single, 32)], false), null),
             new ManagedBranch(0, new ConstantValue(1, types.Boolean, 1), new(1, [new(floatLocal, number)]),
                 new(1, [new(floatLocal with { Type = types.Int32 }, integer)]))];
         foreach (var statement in malformed)

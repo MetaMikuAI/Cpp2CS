@@ -288,9 +288,11 @@ public sealed partial class IntegerLowering
             var args = new List<ManagedValue>();
             for (int i = 0; i < replacement.Arguments.Count; i++)
             {
-                var value = Value(replacement.Arguments[i]); if (value is null) return;
                 var type = replacement.Method.Concrete(replacement.Method.Method.Parameters[i].Type);
-                value = ReferenceType(type) || Opaque(type) ? Coerce(value, type)
+                var value = Value(replacement.Arguments[i], IsFloat(type)); if (value is null) return;
+                // 与字段写入的取值相同：浮点形参按位重解释，不做整数扩展。
+                value = ReferenceType(type) || Opaque(type) || ManagedTypes.IsNativePointer(type) ? Coerce(value, type)
+                    : IsFloat(type) ? FloatBits(value, ValueWidth(type))
                     : new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                         IntegerBits(value), type, ValueWidth(type));
                 args.Add(value);

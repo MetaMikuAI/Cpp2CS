@@ -89,6 +89,8 @@ public static class FloatingTypeContract
                     BinaryValue binary when Float(binary.Type) => Use(binary.Left, binary.Type, "浮点左操作数") ?? Use(binary.Right, binary.Type, "浮点右操作数"),
                     ConversionValue { Kind: ConversionKind.FloatToFloat or ConversionKind.FloatToSignedInteger or ConversionKind.FloatToUnsignedInteger } conversion
                         when !Float(conversion.Operand.Type) => new Reason("lowering.Float.Type", "浮点转换的输入不是浮点值"),
+                    ConversionValue { Kind: ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate } conversion
+                        when Float(conversion.Type) || Float(conversion.Operand.Type) => new Reason("lowering.Float.Type", "整数扩展或截断的输入输出含浮点类型"),
                     ConversionValue { Kind: ConversionKind.Bitcast } conversion when (Float(conversion.Type) || Float(conversion.Operand.Type))
                         && (conversion.Width != conversion.Operand.Width || Float(conversion.Type) && conversion.Width != types.StorageBits(conversion.Type))
                         => new Reason("lowering.Float.Type", "浮点位重解释的输入输出位宽不相同"),
