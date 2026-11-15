@@ -7,6 +7,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Pipeline;
+using Cpp2CS.Recovery.Binding;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using R = System.Reflection;
@@ -85,7 +86,76 @@ internal static class PipelineChecks
                 : result is Missing<ManagedBody> { Hole.Reason.Code: "lowering.Synchronization" },
                 "生产门控拒绝未证明私有的清理与未定义的同步访问");
         }
+        ReturnBitsChecks(checks, facts);
         return checks.Finish("Pipeline 快速检查");
+    }
+    private static void ReturnBitsChecks(Assertions checks, GlobalFacts basis)
+    {
+        var owner = new TypeDef { Index = basis.Model.Types.Count, Assembly = "ReturnFacts.dll", Namespace = "", Name = "Facts",
+            Token = 0x02000001, Attributes = R.TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        var boolean = new DefinitionRef(basis.Model.Types.Single(t => t.Name == "Boolean"), []);
+        string[] names = ["Leaf", "Tail", "BadLeaf", "BadTail", "CycleA", "CycleB", "Masked", "OtherSlot", "Indirect", "Inverted", "LiftFailure"];
+        var methods = names.Select((name, i) => new MethodDef { Index = i, Owner = owner, Name = name,
+            Token = (uint)(0x06000001 + i), Attributes = R.MethodAttributes.Public | R.MethodAttributes.Static,
+            ImplAttributes = 0, Slot = -1, ReturnType = boolean }).ToArray();
+        owner.Methods = methods;
+        var model = new ProgramModel { MetadataVersion = 31, Types = basis.Model.Types.Append(owner).ToArray(), Methods = methods,
+            Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = basis.Model.Assemblies.Append(new AssemblyDef { Name = "ReturnFacts.dll", AssemblyName = "ReturnFacts", Version = new(1, 0), Culture = "", PublicKey = [], Types = [owner] }).ToArray() };
+        var entries = methods.Select((method, i) => new CodeEntry((ulong)(16 + i * 4), EntryKind.Method, MethodRef.Open(method), i, null)).ToArray();
+        var map = new Registrations { CodeRegistration = 0, MetadataRegistration = 0, Entries = entries,
+            ByAddress = entries.ToDictionary(e => e.Address, e => ImmutableArray.Create(e)), Rgctx = new Dictionary<(string, uint), ImmutableArray<RgctxEntry>>(),
+            MetadataUsageSlots = [], TypePointers = new Dictionary<ulong, int>(), InvokerOf = new Dictionary<MethodDef, int>(), UsageEntities = new Dictionary<ulong, Usage>() };
+        var functions = new Dictionary<ulong, NativeFunction>();
+        for (int i = 0; i < names.Length; i++)
+        {
+            var t = new TermTable(); var block = new BlockIdentity();
+            var f = new FunctionBuilder(t, block, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64)));
+            var statements = new List<Statement>(); Term returned;
+            if (names[i] is "Leaf" or "BadLeaf" or "LiftFailure") returned = t.Constant(names[i] == "BadLeaf" ? 256 : 1, 64);
+            else
+            {
+                int target = names[i] switch { "Tail" or "OtherSlot" or "Indirect" or "Inverted" => 0, "BadTail" => 2, "CycleA" => 5, _ => 4 };
+                var id = new CallIdentity(); returned = t.Atom(new ResultAtom(id), 64); var other = t.Atom(new ResultAtom(id, 1), 64);
+                statements.Add(new Call(id, names[i] == "Indirect" ? new ComputedTarget(t.Constant(entries[target].Address, 64)) : new ImageFunction(entries[target].Address),
+                    [new(new(SlotKind.Integer), t.Constant(0, 64))], [new(new(SlotKind.Integer), returned), new(new(SlotKind.Integer, 1), other)]));
+                if (names[i] == "OtherSlot") returned = other;
+                if (names[i] == "Masked") returned = t.Concat(t.Slice(returned, 0, 1), t.Constant(0, 63));
+                if (names[i] == "Inverted") returned = t.Concat(t.Apply(new CoreOperator(CoreOperation.Xor), 32,
+                    t.Slice(returned, 0, 32), t.Constant(1, 32)), t.Undefined(32));
+            }
+            f.Blocks.Add(new(block, [], [.. statements], new Return([new(new(SlotKind.Integer), returned)])));
+            functions.Add(entries[i].Address, f.Freeze());
+        }
+        bool[] expected = [true, true, false, false, false, false, true, false, false, true, false];
+        foreach (bool reverse in new[] { false, true })
+        {
+            var facts = new GlobalFacts(new EmptyImage(), model, map, basis.Spec, "arm64");
+            var frontend = new ReturnFactsFrontend(functions, entries[^1].Address);
+            var source = ReturnValueBitsAssembly.Get(facts, frontend);
+            foreach (int i in reverse ? Enumerable.Range(0, names.Length).Reverse() : Enumerable.Range(0, names.Length))
+            {
+                var result = source.Get(entries[i].Address, MethodRef.Open(methods[i]));
+                checks.True(result.IsSuccess == expected[i], names[i] + " 跨方法返回事实与请求次序 " + reverse + "：" + result.Why);
+            }
+            Parallel.For(0, 16, _ => source.Get(entries[1].Address, MethodRef.Open(methods[1])));
+            foreach (int i in Enumerable.Range(0, names.Length))
+            {
+                source.Get(entries[i].Address, MethodRef.Open(methods[i]));
+                checks.True(frontend.Lifts.GetValueOrDefault(entries[i].Address) == 1, names[i] + " 成功、失败、循环均复用原生见证");
+            }
+        }
+    }
+    private sealed class ReturnFactsFrontend(IReadOnlyDictionary<ulong, NativeFunction> functions, ulong missing) : IMethodStage<CodeEntry, NativeFunction>
+    {
+        public Dictionary<ulong, int> Lifts { get; } = [];
+        public string Name => "前端";
+        public StageResult<NativeFunction> Run(CodeEntry input, MethodContext context)
+        {
+            Lifts[input.Address] = Lifts.GetValueOrDefault(input.Address) + 1;
+            return input.Address == missing ? new Missing<NativeFunction>(new(Name, input.Address, "提升", new("test.return-bits", "提升失败")))
+                : new Completed<NativeFunction>(functions[input.Address]);
+        }
     }
     private sealed class FakeFrontend : IMethodStage<CodeEntry, NativeFunction>
     {

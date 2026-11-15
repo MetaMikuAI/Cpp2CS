@@ -36,6 +36,7 @@ public sealed partial class IntegerLowering
     private readonly IRgctxDecoder? rgctx;
     private readonly bool nestedExceptions;
     private readonly Func<ulong, Outcome<bool>>? runtimeThrowStub;
+    private readonly IReturnValueBitsSource? returnValueBits;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -65,10 +66,12 @@ public sealed partial class IntegerLowering
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
         AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null,
-        bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null, StructConstructorTemplates? structConstructors = null)
+        bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null, StructConstructorTemplates? structConstructors = null,
+        IReturnValueBitsSource? returnValueBits = null)
     {
         this.nestedExceptions = nestedExceptions;
         this.runtimeThrowStub = runtimeThrowStub;
+        this.returnValueBits = returnValueBits;
         this.function = function; this.method = method; this.witness = witness; this.rgctx = rgctx; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
@@ -105,7 +108,7 @@ public sealed partial class IntegerLowering
         { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
         if (spec is not null && calls is not null)
         {
-            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness, types.Object, stringType: types.String);
+            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness, types.Object, stringType: types.String, managedTypes: types);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec);
             dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as GenericWitness);
@@ -396,6 +399,11 @@ public sealed partial class IntegerLowering
                 }
                 if (bound.Value?.Source is not TermSource source)
                     return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "返回值不是标量项");
+                if (ManagedTypes.IsReferenceType(returnType))
+                {
+                    var referenceValue = ReferenceAt(source.Term, returnType, new(b.Identity, b.Statements.Length));
+                    return referenceValue is null ? null : new ManagedReturn(position, referenceValue);
+                }
                 var reference = !ReferenceType(returnType) && !Opaque(returnType) ? ReferenceSliceSource(source.Term) : null;
                 var value = reference is not null && NullAt(reference, new(b.Identity, b.Statements.Length), null, out _)
                     ? Constant(0, source.Term.Width) : Value(source.Term, IsFloat(method.Concrete(method.Method.ReturnType)));

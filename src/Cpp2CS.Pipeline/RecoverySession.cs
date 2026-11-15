@@ -291,6 +291,7 @@ public sealed class RecoverySession
         RuntimeLocationAssembly.Write(facts, Path.Combine(request.Output, "runtime-functions.json"));
         InternalCallAssembly.Write(facts, Path.Combine(request.Output, "internal-calls.json"));
         RuntimeThrowStubAssembly.Write(facts, Path.Combine(request.Output, "runtime-throw-stubs.json"));
+        ReturnValueBitsAssembly.Write(facts, Path.Combine(request.Output, "return-value-bits.json"));
         SourceReport? source = null;
         using var process = Process.GetCurrentProcess();
         RecoveryReport Build()
@@ -302,7 +303,7 @@ public sealed class RecoverySession
                     [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
                     ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0,
                     ["运行时定位"] = RuntimeLocationAssembly.Seconds(facts), ["内部调用事实"] = InternalCallAssembly.Seconds(facts),
-                    ["替换桩事实"] = RuntimeThrowStubAssembly.Seconds(facts) },
+                    ["替换桩事实"] = RuntimeThrowStubAssembly.Seconds(facts), ["返回高位事实"] = ReturnValueBitsAssembly.Seconds(facts) },
                 inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), ContractFailures = [.. contractFailures], ProgramErrors = [.. programErrors.Order(StringComparer.Ordinal)], RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
         }
         void Save(RecoveryReport value)

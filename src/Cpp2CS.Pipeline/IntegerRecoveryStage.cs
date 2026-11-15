@@ -80,7 +80,8 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
             witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts),
-            runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check, structConstructors: parts.StructConstructors).Run(kind);
+            runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check, structConstructors: parts.StructConstructors,
+            returnValueBits: ReturnValueBitsAssembly.Get(context.Facts, templateFrontend)).Run(kind);
         if (result.Failure is { } failure && transformed.Records.FirstOrDefault(r =>
             !r.Removed && r.Address == failure.Position && r.Why is not null) is { Why: { } why })
             return new Missing<ManagedBody>(new("结构", failure.Position, "类型判断", why with { Cause = failure.Reason }));

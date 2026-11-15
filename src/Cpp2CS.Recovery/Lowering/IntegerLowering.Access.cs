@@ -85,6 +85,25 @@ public sealed partial class IntegerLowering
         var result = context.Get(locations.Types, term);
         return result.IsSuccess ? result.Value?.Type : null;
     }
+    private ManagedValue? ReferenceAt(Term source, TypeRef expected, Point point)
+    {
+        var value = Value(source);
+        if (value is null) return null;
+        if (value.Type is DefinitionRef declared && ManagedTypes.IsReferenceType(declared)
+            && ManagedTypes.IsReferenceType(expected) && !types.IsAssignable(declared, expected) && valueNames is not null)
+        {
+            var refined = valueNames.RefinedReference(context, source, declared, point);
+            if (!refined.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType,
+                "使用点的引用细化查询失败", refined.Why, "lowering.Reference.Refinement");
+            if (refined.Value is { } proved && types.IsAssignable(proved.Type, expected))
+            {
+                // 只在这个使用点换成已有转换的结果；原值与其他使用点的类型保持各自的视图。
+                value = Value(proved.Value);
+                if (value is null) return null;
+            }
+        }
+        return Coerce(value, expected);
+    }
     private ManagedValue Coerce(ManagedValue value, TypeRef type)
     {
         if (ReferenceType(value.Type) && ManagedTypes.IsNativePointer(type)
@@ -340,6 +359,7 @@ public sealed partial class IntegerLowering
         if (target is ArrayLengthValue) return Fail<ManagedStatement>(LoweringFailureKind.NonFrameWrite, "数组长度不可写");
         var value = types.Kind(target.Type) == TypeKind.Struct
             ? StructValue(new TermSource(write.Value), target.Type, point)
+            : ManagedTypes.IsReferenceType(target.Type) ? ReferenceAt(write.Value, target.Type, point)
             : Value(write.Value, IsFloat(target.Type));
         if (value is null) return null;
         value = types.Kind(target.Type) == TypeKind.Struct ? value : Opaque(target.Type) || Opaque(value.Type) || ReferenceType(target.Type) || ManagedTypes.IsNativePointer(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)

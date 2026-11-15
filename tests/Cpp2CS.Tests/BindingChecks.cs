@@ -89,7 +89,47 @@ internal static class BindingChecks
         a.True(binder.Entry(method, BindingEntryKind.AdjustorThunk).Failure is { Kind: BindingFailureKind.SignatureUnavailable, Detail.Length: > 0 }
             && binder.Classify(new([], new CInteger(24))).Failure is { Kind: BindingFailureKind.ClassificationFailed, Detail.Length: > 0 }
             && binder.Call(call, target, new Map([]), terms).Failure is { Kind: BindingFailureKind.EntryNotMapped, Detail.Length: > 0 }, "失败种类有限且不猜签名");
+        ReturnBits(a, binder);
         return a.Finish("形参与调用绑定");
+    }
+
+    private static void ReturnBits(Assertions checks, MethodBinder binder)
+    {
+        foreach (var (name, width, signed) in new[] { ("Boolean", 8, false), ("Byte", 8, false), ("SByte", 8, true),
+            ("Char", 16, false), ("UInt16", 16, false), ("Int16", 16, true) })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 0, Assembly = "mscorlib.dll", Namespace = "System", Name = name,
+                Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+            var signature = binder.Classify(new([], new CInteger(width))).Value!;
+            foreach (var mode in new[] { "All", "OneBad", "Merge", "Unknown" })
+            {
+                var t = new TermTable(); var head = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity(); var join = new BlockIdentity();
+                var input = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64);
+                var f = new FunctionBuilder(t, head, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64)));
+                f.Inputs.Add(new(new(SlotKind.Integer), input));
+                var low = t.Slice(input, 0, width);
+                var extended = t.Apply(new CoreOperator(signed ? CoreOperation.SignExtend : CoreOperation.ZeroExtend), 32, low);
+                var good = t.Concat(extended, t.Undefined(32));
+                var bad = mode == "Unknown" ? input : t.Constant(1UL << width, 64);
+                Return Ret(Term value) => new([new(new(SlotKind.Integer), value)]);
+                var condition = t.Slice(input, 0, 1);
+                f.Blocks.Add(new(head, [], [], new Branch(condition, left, right)));
+                if (mode == "Merge")
+                {
+                    var id = new MergeIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+                    f.Blocks.Add(new(left, [], [], new Jump(join))); f.Blocks.Add(new(right, [], [], new Jump(join)));
+                    f.Blocks.Add(new(join, [new(id, result, [new(left, good), new(right, t.Constant(0, 64))])], [], Ret(result)));
+                }
+                else
+                {
+                    f.Blocks.Add(new(left, [], [], Ret(good)));
+                    f.Blocks.Add(new(right, [], [], Ret(mode == "All" ? good : bad)));
+                }
+                var resultBits = ReturnValueBits.Prove(f.Freeze(), signature, type);
+                checks.True(resultBits.IsSuccess == (mode is "All" or "Merge"), name + " 全部返回点的扩展事实 " + mode);
+                if (resultBits.IsSuccess) checks.True(resultBits.Value == new ReturnValueBits(width, signed, 32), name + " 只保证低 32 位");
+            }
+        }
     }
 
     private sealed class Map(ImmutableArray<BindingEntry> entries) : IBindingCodeMap

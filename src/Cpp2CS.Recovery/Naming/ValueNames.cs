@@ -24,6 +24,8 @@ public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, stri
 public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
 /// <summary>引用合流或选择的定义身份；静态类型不作为不同定义同值的依据。</summary>
 public sealed record ReferenceValueName(Term Value) : ValueName;
+/// <summary>结构体定义的完整引用叶子；位片身份保留入口或调用结果的定义。</summary>
+public sealed record StructReferenceName(Term Value, TypeRef StaticType) : ValueName;
 /// <summary>原生异常头、载荷与托管异常分别命名，不把头指针当作托管引用。</summary>
 public sealed record ExceptionPointerName(BlockIdentity Handler) : ValueName;
 public sealed record ExceptionPayloadName(BlockIdentity Handler) : ValueName;
@@ -43,17 +45,18 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
     /// <summary>可读取的同值视图；优先保留实体常量，不改变合流自身的定义身份。</summary>
     public ValueName? EquivalentName => EquivalentNames.FirstOrDefault(n => n is EntityName) ?? EquivalentNames.FirstOrDefault();
     public TypeRef? StaticType => ReferenceType ?? (Name switch
-    { ParameterName p => p.StaticType, IndirectParameterName p => new ByRefRef(p.ElementType), CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
+    { ParameterName p => p.StaticType, IndirectParameterName p => new ByRefRef(p.ElementType), CallResultName r => r.StaticType, LoadedName r => r.StaticType, StructReferenceName p => p.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
 public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
     MethodBinder binder, SignatureBinding? entry = null, IRgctxDecoder? rgctx = null, GenericWitness? witness = null,
-    TypeRef? exceptionType = null, IReadOnlyDictionary<BlockIdentity, TypeRef>? caughtTypes = null, TypeRef? stringType = null) : Query<Term, NamedValue>
+    TypeRef? exceptionType = null, IReadOnlyDictionary<BlockIdentity, TypeRef>? caughtTypes = null, TypeRef? stringType = null,
+    ManagedTypes? managedTypes = null) : Query<Term, NamedValue>
 {
     /// <summary>区域查询已证明的 catch 类型作为查询视图；不改写异常对象身份。</summary>
     public ValueNamingQuery WithCaughtTypes(IReadOnlyDictionary<BlockIdentity, TypeRef> types) =>
-        new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary(), stringType);
+        new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary(), stringType, managedTypes);
     internal RuntimeSpec Spec => spec;
     internal SignatureBinding? Entry => entry;
     internal ImmutableDictionary<ulong, FlagEvidence> Flags => facts.Flags;
@@ -64,6 +67,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     private readonly FlowQueries referenceFlow = new();
     private readonly PathFactQuery referencePaths = new(state);
     private readonly BoundSourceQuery entrySources = new(state);
+    private readonly ParameterPartsQuery? parameterParts = entry is null || managedTypes is null ? null : new(state, binder, entry, managedTypes);
     private ManagedLocationQuery? locations;
     internal SpecificationReadQuery SpecificationReads { get; } = new();
     internal void UseLocations(ManagedLocationQuery query)
@@ -128,9 +132,13 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     return Outcome<(Term, DefinitionRef)?>.Failure(NameLattice.Pending.Why!);
                 continue;
             }
-            var dominates = c.Get(referenceFlow.PointDominates, new(new(block.Identity, i + 1), point));
-            if (!dominates.IsSuccess) return dominates.Propagate<(Term, DefinitionRef)?>();
-            if (!dominates.Value) continue;
+            var available = new Point(block.Identity, i + 1);
+            if (available != point)
+            {
+                var dominates = c.Get(referenceFlow.PointDominates, new(available, point));
+                if (!dominates.IsSuccess) return dominates.Propagate<(Term, DefinitionRef)?>();
+                if (!dominates.Value) continue;
+            }
             if (result.Relation.Kind == RuntimeResultRelationKind.InputOrNull)
             {
                 var nonnull = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.NotEqual), 1, output.Term,
@@ -153,6 +161,11 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
 
     private Outcome<NamedValue> Definition(QueryContext c, Term key)
     {
+        if (parameterParts is not null && key.Width == c.Snapshot.AddressWidth && key.Identity is EntryAtom or MemoryAtom)
+        {
+            var parts = c.Get(parameterParts, 0);
+            if (parts.IsSuccess && parts.Value is { } query && ReferencePart(c, query, key) is { } reference) return Yes(reference);
+        }
         // 先处理签名绑定出的完整值（窄参数可以是入口槽的切片）。
         if (entry is not null)
             for (int i = 0; i < entry.Signature.Parameters.Length; i++)
@@ -261,17 +274,13 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     {
                         var bound = target.Value.Binding;
                         var method = target.Value.Method;
-                        var type = method.Concrete(method.Method.ReturnType);
-                        return Yes(bound.Result.Source is TermSource output && output.Term == key
-                            ? Typed(bound.Result.Type, type, new CallResultName(id, type, null))
-                            : NamedValue.Unknown("naming.result-binding", "共享调用结果未完整绑定。"));
+                        return Yes(BoundResultName(c, key, id, method, bound.Result, "共享调用结果未完整绑定。"));
                     }
                     // 泛型上下文里实例只能由方法信息给出。封闭的调用方解析不出实例时退回候选的规范实例：类型只是上界，不会定位出错的字段。
                     if (witness is not null) return Yes(new(ValueKind.Unnamed, null, Why: target.Why));
                 }
-                var names = candidates.Candidates.Select(candidate => candidate.Binding.Value is { } bound &&
-                    bound.Result.Source is TermSource source && source.Term == key && candidate.Entry.Method is { } method
-                    ? Typed(bound.Result.Type, method.Concrete(method.Method.ReturnType), new CallResultName(id, method.Concrete(method.Method.ReturnType), null))
+                var names = candidates.Candidates.Select(candidate => candidate.Binding.Value is { } bound && candidate.Entry.Method is { } method
+                    ? BoundResultName(c, key, id, method, bound.Result)
                     : NamedValue.Unknown("naming.result-binding", "候选结果未完整绑定。")).Distinct().ToArray();
                 if (names.Length == 1) return Yes(names[0]);
                 return Yes(NamedValue.Unknown("naming.result-ambiguity", "候选方法的结果名字不一致。"));
@@ -281,11 +290,9 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                 var target = c.Get(dispatch, id);
                 if (!target.IsSuccess) return target.Propagate<NamedValue>();
                 if (target.Value == DispatchQuery.Pending) return Yes(NameLattice.Pending);
-                if (target.Value is { Method: { } method, Binding.Result: { Source: TermSource output } returned }
-                    && output.Term == key)
+                if (target.Value is { Method: { } method, Binding.Result: { } returned })
                 {
-                    var type = method.Concrete(method.Method.ReturnType);
-                    return Yes(Typed(returned.Type, type, new CallResultName(id, type, null)));
+                    return Yes(BoundResultName(c, key, id, method, returned, "间接调用没有唯一完整的托管返回绑定。", "naming.call-result"));
                 }
                 return Yes(NamedValue.Unknown("naming.call-result", "间接调用没有唯一完整的托管返回绑定。", target.Value.Why));
             }
@@ -299,6 +306,47 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         // 消息里写明项的种类，报告才能按种类归并（原子取类型名，不带地址与编号）。
         var shape = key.Identity is { } atom ? atom.GetType().Name : key.Operator is { } op ? op.Name : key.Kind.ToString();
         return Yes(NamedValue.Unknown("naming.definition", "定义没有可用的签名或运行时规格名字：" + shape + "/" + key.Width));
+    }
+    private NamedValue BoundResultName(QueryContext c, Term key, CallIdentity id, MethodRef method, BoundValue returned,
+        string missing = "候选结果未完整绑定。", string code = "naming.result-binding")
+    {
+        var type = method.Concrete(method.Method.ReturnType);
+        if (returned.Source is TermSource output && output.Term == key)
+            return Typed(returned.Type, type, new CallResultName(id, type, null));
+        if (managedTypes?.Kind(type) == TypeKind.Struct && returned.Source is { } source && key.Width == c.Snapshot.AddressWidth)
+        {
+            var point = c.Snapshot.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Point: new Point(b.Identity, i + 1))))
+                .Single(p => p.Statement is Call call && call.Identity == id).Point;
+            var parts = new StructValueQuery(managedTypes, state, null, [new(type, source, point, Call: id)]).Parts;
+            if (ReferencePart(c, parts, key) is { } reference) return reference;
+        }
+        return NamedValue.Unknown(code, missing);
+    }
+    private static NamedValue? ReferencePart(QueryContext c, StructValueQuery.StructPartQuery parts, Term key)
+    {
+        var projected = c.Get(parts, new(key, 0, key.Width));
+        return projected.IsSuccess && projected.Value is { Low: 0 } part && part.Width == part.Projection.Width
+            && ManagedTypes.IsReferenceType(part.Projection.Type)
+            ? Typed(null, part.Projection.Type, new StructReferenceName(key, part.Projection.Type)) : null;
+    }
+    private sealed class ParameterPartsQuery(StateQueries state, MethodBinder binder, SignatureBinding entry, ManagedTypes types)
+        : Query<int, StructValueQuery.StructPartQuery?>
+    {
+        public override Outcome<StructValueQuery.StructPartQuery?> Compute(QueryContext c, int key)
+        {
+            var origins = new List<StructOrigin>();
+            if (entry is { Managed: { } managed, Entry.Method: { } method })
+                for (int i = 0; i < managed.ParameterIndices.Length; i++)
+                {
+                    var type = method.Concrete(method.Method.Parameters[i].Type);
+                    if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct
+                        || !types.Projections(structure).Any(p => ManagedTypes.IsReferenceType(p.Type))) continue;
+                    var bound = binder.Parameter(entry, managed.ParameterIndices[i], c.Snapshot.Terms, c.Snapshot.Inputs, c.Snapshot.IncomingArgumentArea);
+                    if (bound.Value?.Source is { } source and not IndirectSource)
+                        origins.Add(new(type, source, new(c.Snapshot.Entry, 0), Parameter: i));
+                }
+            return Outcome<StructValueQuery.StructPartQuery?>.Success(origins.Count == 0 ? null : new StructValueQuery(types, state, null, origins).Parts);
+        }
     }
     private static NamedValue RuntimeValue(RuntimeValueKind kind, ValueName name) => kind switch
     {
@@ -493,6 +541,7 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
     {
         (CallResultName x, CallResultName y) => x.Call == y.Call && x.Operation == y.Operation,
         (LoadedName x, LoadedName y) => x.Read == y.Read,
+        (StructReferenceName x, StructReferenceName y) => x.Value == y.Value,
         _ => false,
     });
     internal static ImmutableArray<ValueName> CommonNames(IEnumerable<ImmutableArray<ValueName>> sources)
@@ -522,6 +571,7 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
         {
             CallResultName result => result with { StaticType = type },
             LoadedName read => read with { StaticType = type },
+            StructReferenceName part => part with { StaticType = type },
             _ => a.Name,
         };
         return new(ValueKind.ManagedReference, name, "Il2CppObject") { ReferenceType = type,

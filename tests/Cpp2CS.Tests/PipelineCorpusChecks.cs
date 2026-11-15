@@ -187,6 +187,7 @@ internal static class PipelineCorpusChecks
         Console.Write(table);
         Console.WriteLine("layer_seconds=" + JsonSerializer.Serialize(report.Summary.LayerSeconds));
         Console.WriteLine($"no_return_seconds={report.Summary.LayerSeconds.GetValueOrDefault("不返回分析"):F3}");
+        Console.WriteLine($"return_value_bits_seconds={report.Summary.LayerSeconds.GetValueOrDefault("返回高位事实"):F3}");
         checks.True(comparison.Methods.All(m => m.Status != MetricStatus.Mismatch), "没有 IL 对照不一致");
         return checks.Finish("Pipeline 定向检查");
     }

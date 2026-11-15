@@ -217,7 +217,8 @@ public sealed partial class IntegerLowering
         if (created is not null) return new ManagedAssignment(position, created.Local!, new NewObjectValue(d.Method, args, types.PointerSize * 8));
         TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
         var receiver = d.Receiver is { } target
-            ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element) : Value(target)
+            ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element)
+                : d.Constraint is not null || Opaque(receiverType) ? Value(target) : ReferenceAt(target, receiverType, point)
             : d.Binding.This is { } self ? CallArgument(self, receiverType, point, true) : null;
         if (d.Constraint is { } constraint)
         {
@@ -282,8 +283,7 @@ public sealed partial class IntegerLowering
         }
         if (ReferenceType(type))
         {
-            var reference = Value(resolved.Value);
-            return reference is null ? null : Coerce(reference, type);
+            return ReferenceAt(resolved.Value, type, point);
         }
         if (IsFloat(type))
         {

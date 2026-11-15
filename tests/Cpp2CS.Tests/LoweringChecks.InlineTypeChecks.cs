@@ -22,6 +22,150 @@ namespace Cpp2CS.Tests;
 
 internal static partial class LoweringChecks
 {
+    private static void ReferenceUseChecks(Assertions checks, ProgramModel primitives)
+    {
+        using var source = new CompiledSource("""
+            public class Parent { }
+            public sealed class Child : Parent { }
+            public sealed class Other { }
+            public struct Carrier { public Child Value; public long Other; }
+            public static class ReferenceCases {
+                public static int Take(Child value) => value == null ? 0 : 1;
+                public static Carrier MakeCarrier(Child value) => new Carrier { Value = value };
+                public static Child ReturnCast(object value) => (Child)value;
+                public static int ArgumentCast(object value) => Take((Child)value);
+                public static Parent Up(Child value) => value;
+                public static Child MergeCast(bool choose, Parent a, Parent b) => (Child)(choose ? a : b);
+                public static Child NullMerge(bool choose, Child value) => choose ? value : null;
+                public static Child StoreCast(ref Child target, object value) { target = (Child)value; return target; }
+                public static Child ParameterLeaf(bool choose, Carrier value) => choose ? value.Value : null;
+                public static Child ResultLeaf(bool choose, Child value) => choose ? MakeCarrier(value).Value : null;
+                public static Child ReturnCastOut(object value) => null;
+                public static int ArgumentCastOut(object value) => 0;
+                public static Parent UpOut(Child value) => null;
+                public static Child MergeCastOut(bool choose, Parent a, Parent b) => null;
+                public static Child NullMergeOut(bool choose, Child value) => null;
+                public static Child StoreCastOut(ref Child target, object value) => null;
+                public static Child ParameterLeafOut(bool choose, Carrier value) => null;
+                public static Child ResultLeafOut(bool choose, Child value) => null;
+            }
+            """);
+        var spec = InputCorpusChecks.Spec("arm64-v8a"); var layouts = new FieldLayouts(spec, 8, 8);
+        var definitions = primitives.Types.Where(d => d.Assembly == "mscorlib.dll" && d.Name != "BitConverter").ToList();
+        TypeRef Type(string name) => new DefinitionRef(definitions.Single(d => d.Name == name), []);
+        TypeDef Define(string name, TypeRef? parent = null)
+        {
+            var type = new TypeDef { Index = definitions.Count, Assembly = "ReferenceUseChecks.dll", Namespace = "", Name = name,
+                Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
+                BaseType = parent ?? Type("Object") };
+            definitions.Add(type); return type;
+        }
+        Define("Parent"); Define("Child", Type("Parent")); Define("Other"); var owner = Define("ReferenceCases");
+        var carrier = new TypeDef { Index = definitions.Count, Assembly = "ReferenceUseChecks.dll", Namespace = "", Name = "Carrier",
+            Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public | TypeAttributes.SequentialLayout,
+            IsValueType = true, IsEnum = false, Size = 16, PackingSize = 0, ClassSizeIsDefault = true };
+        carrier.Fields = [new FieldDef { Index = 0, Owner = carrier, Name = "Value", Type = Type("Child"), Offset = 0, Attributes = FieldAttributes.Public },
+            new FieldDef { Index = 1, Owner = carrier, Name = "Other", Type = Type("Int64"), Offset = 8, Attributes = FieldAttributes.Public }];
+        definitions.Add(carrier);
+        var methods = new List<MethodDef>();
+        MethodDef Method(string name, TypeRef result, params TypeRef[] parameters)
+        {
+            var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name, Token = (uint)(0x06000001 + methods.Count),
+                Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = result,
+                Parameters = parameters.Select((p, i) => new ParameterDef("p" + i, p, 0, null, false)).ToArray() };
+            methods.Add(method); return method;
+        }
+        var take = Method("Take", Type("Int32"), Type("Child"));
+        var makeCarrier = Method("MakeCarrier", Type("Carrier"), Type("Child"));
+        string[] modes = ["ReturnCast", "ArgumentCast", "Up", "MergeCast", "NullMerge", "StoreCast", "ParameterLeaf", "ResultLeaf", "MissingCast", "BranchCast", "WrongValue", "Unrelated", "IntegerMerge", "PointerReference", "NumericLeaf"];
+        var entries = modes.ToDictionary(mode => mode, mode => Method(mode, Type(mode == "ArgumentCast" ? "Int32" : mode == "Up" ? "Parent" : mode == "Unrelated" ? "Other" : "Child"),
+            mode == "MergeCast" ? [Type("Boolean"), Type("Parent"), Type("Parent")]
+                : mode is "NullMerge" or "IntegerMerge" or "ResultLeaf" ? [Type("Boolean"), Type("Child")]
+                : mode is "ParameterLeaf" or "NumericLeaf" ? [Type("Boolean"), Type("Carrier")]
+                : mode == "WrongValue" ? [Type("Object"), Type("Object")]
+                : mode == "StoreCast" ? [new ByRefRef(Type("Child")), Type("Object")]
+                : [Type(mode is "Up" or "Unrelated" ? "Child" : mode == "PointerReference" ? "IntPtr" : "Object")]));
+        owner.Methods = methods;
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = carrier.Fields, RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(d => d.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8); var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var cast = catalog.Functions.First(f => f.Operation.Il.Name == "CastClass" && f.Signature is not null);
+        foreach (var mode in modes)
+        {
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(mode == "ResultLeaf" ? makeCarrier : take), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
+            var method = entries[mode]; var t = new TermTable(); var head = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity(); var join = new BlockIdentity();
+            var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            var f = new FunctionBuilder(t, head, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64))) { ImageBase = image };
+            var args = Enumerable.Range(0, mode is "ParameterLeaf" or "NumericLeaf" ? 3 : method.Parameters.Count).Select(i => t.Atom(new EntryAtom(new(SlotKind.Integer, i)), 64)).ToArray();
+            for (int i = 0; i < args.Length; i++) f.Inputs.Add(new(new(SlotKind.Integer, i), args[i]));
+            Return Ret(Term value) => new([new(new(SlotKind.Integer), value)]);
+            Statement[] Cast(Term value)
+            {
+                var read = new ReadIdentity(); var klass = t.Atom(new ResultAtom(read), 64);
+                var id = new CallIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+                return [new MemoryRead(read, t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(128, 64)), 64, klass),
+                    new Call(id, new NamedFunction(cast.MangledName!), [new(new(SlotKind.Integer), value), new(new(SlotKind.Integer, 1), klass)], [new(new(SlotKind.Integer), result)])];
+            }
+            if (mode is "MergeCast" or "NullMerge" or "IntegerMerge" or "ParameterLeaf" or "NumericLeaf" or "ResultLeaf")
+            {
+                var id = new MergeIdentity(); var merged = t.Atom(new ResultAtom(id), 64);
+                Term leaf = args[mode == "NumericLeaf" ? 2 : 1];
+                Statement[] prefix = [];
+                if (mode == "ResultLeaf")
+                {
+                    var call = new CallIdentity(); leaf = t.Atom(new ResultAtom(call), 64); var other = t.Atom(new ResultAtom(call, 1), 64);
+                    prefix = [new Call(call, new ImageFunction(10), [new(new(SlotKind.Integer), args[1]), new(new(SlotKind.Integer, 1), t.Constant(0, 64))],
+                        [new(new(SlotKind.Integer), leaf), new(new(SlotKind.Integer, 1), other)])];
+                }
+                f.Blocks.Add(new(head, [], [], new Branch(t.Slice(args[0], 0, 1), left, right)));
+                f.Blocks.Add(new(left, [], [.. prefix], new Jump(join))); f.Blocks.Add(new(right, [], [], new Jump(join)));
+                f.Blocks.Add(new(join, [new(id, merged, [new(left, leaf), new(right, mode == "MergeCast" ? args[2] : t.Constant(mode == "IntegerMerge" ? 1UL : 0, 64))])],
+                    mode == "MergeCast" ? [.. Cast(merged)] : [], Ret(merged)));
+            }
+            else if (mode == "BranchCast")
+            {
+                f.Blocks.Add(new(head, [], [], new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, args[0], t.Constant(0, 64)), left, right)));
+                f.Blocks.Add(new(left, [], [.. Cast(args[0])], new Jump(join))); f.Blocks.Add(new(right, [], [], new Jump(join)));
+                f.Blocks.Add(new(join, [], [], Ret(args[0])));
+            }
+            else
+            {
+                var statements = mode is "ReturnCast" or "ArgumentCast" or "WrongValue" or "StoreCast" ? Cast(args[mode is "WrongValue" or "StoreCast" ? 1 : 0]).ToList() : [];
+                Term returned = args[mode == "StoreCast" ? 1 : 0];
+                if (mode == "StoreCast") statements.Add(new MemoryWrite(new(), args[0], 64, args[1]));
+                if (mode == "ArgumentCast")
+                {
+                    var id = new CallIdentity(); returned = t.Atom(new ResultAtom(id), 64);
+                    statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), args[0]), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], [new(new(SlotKind.Integer), returned)]));
+                }
+                f.Blocks.Add(new(head, [], [.. statements], Ret(returned)));
+            }
+            var facts = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128, Outcome<MetadataEntity>.Success(new ClassEntity(Type("Child")))) };
+            var result = new IntegerLowering(f.Freeze(), MethodRef.Open(method), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            bool accepted = modes.Take(8).Contains(mode);
+            checks.True((result.Body is not null) == accepted, mode + " 使用点的引用证明：" + result.Failure);
+            if (result.Body is not { } body) continue;
+            checks.True(emitter.Emit([body]).Count == 0, mode + " 不放宽输出校验");
+            var tested = source.Method("ReferenceCases", mode + "Out"); tested.Body = skeleton.Method(method).Body;
+            var core = source.Module.TypeSystem.Object.Resolve().Module;
+            Mono.Cecil.TypeReference Map(Mono.Cecil.TypeReference type) => source.Module.ImportReference(source.Module.GetType(type.FullName) ?? core.GetType(type.FullName));
+            foreach (var local in tested.Body.Variables) local.VariableType = Map(local.VariableType);
+            foreach (var instruction in tested.Body.Instructions) instruction.Operand = instruction.Operand switch
+            {
+                Mono.Cecil.TypeReference type => Map(type),
+                Mono.Cecil.MethodReference target when target.DeclaringType.FullName == "ReferenceCases" => source.Method("ReferenceCases", target.Name),
+                Mono.Cecil.FieldReference field => source.Module.GetType(field.DeclaringType.FullName).Fields.Single(f => f.Name == field.Name),
+                Mono.Cecil.ParameterDefinition parameter => tested.Parameters[parameter.Index],
+                _ => instruction.Operand,
+            };
+            var comparison = CilComparison.Compare(source.Method("ReferenceCases", mode), tested);
+            checks.True(comparison.Status == CilComparisonStatus.Match, mode + " 执行对照：" + comparison.Reason);
+        }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
+    }
+
     private static void InlineTypeChecks(Assertions checks, ProgramModel primitives)
     {
         using var source = new CompiledSource("""

@@ -4,6 +4,7 @@ using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -151,11 +152,20 @@ public sealed partial class IntegerLowering
         {
             var root = pair.Key.Kind == TermKind.Slice ? pair.Key.Operands[0] : pair.Key;
             int start = pair.Key.SliceLow ?? 0;
-            if (term == root && low >= start && low + width <= start + pair.Key.Width)
+            if (term == root && low >= start)
             {
                 var type = pair.Value.Method.Concrete(pair.Value.Method.Method.ReturnType);
+                ReturnValueBits? extension = null;
+                if (low + width > start + pair.Key.Width)
+                {
+                    extension = ExtendedCallResult(term, pair.Value, start, low + width);
+                    if (failure is not null) return null;
+                    if (extension is null) continue;
+                }
                 if (types.Kind(type) == TypeKind.Struct) return StructScalarFailure(type);
                 var result = CallResult(pair.Value);
+                if (result is not null && extension is not null)
+                    result = extension.Signed ? Signed(result, extension.ValueWidth) : Mask(result, extension.ValueWidth);
                 return result is null ? null : Slice(result, low - start, width);
             }
         }
@@ -203,6 +213,25 @@ public sealed partial class IntegerLowering
             return WideLayout<ManagedValue>(false, low, width, "来源宽读取没有完整的托管字段视图");
         var whole = Value(term);
         return whole is null ? null : Slice(whole, low, width);
+    }
+
+    private ReturnValueBits? ExtendedCallResult(Term term, CallDefinition definition, int start, int end)
+    {
+        if (returnValueBits is null || start != 0 || end > 32 || definition.Virtual || definition.Registration is not null
+            || term.Identity is not ResultAtom { Definition: CallIdentity id }) return null;
+        var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
+        if (!IntegerType(type) || definition.Binding.Result.Type.Size is not (1 or 2)) return null;
+        var call = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Single(c => c.Identity == id);
+        if (call.Target is not ImageFunction target || calls is null
+            || context.Get(calls, id) is not { IsSuccess: true, Value.Kind: CallKind.Managed,
+                Value.Candidates.Candidates.Length: 1 }) return null;
+        var fact = returnValueBits.Get(target.EntryOffset, definition.Method);
+        if (!fact.IsSuccess) return Fail<ReturnValueBits>(LoweringFailureKind.Binding,
+            "使用了调用结果绑定之外的位，ABI 未定义这些高位：Managed，宽 " + term.Width, fact.Why);
+        if (fact.Value.ValueWidth != definition.Binding.Result.Type.Size * 8 || fact.Value.DefinedWidth < end
+            || fact.Value.Signed != ManagedTypes.IsSigned(type))
+            return Fail<ReturnValueBits>(LoweringFailureKind.Binding, "被调方返回高位事实与声明绑定不一致");
+        return fact.Value;
     }
     private ManagedValue Slice(ManagedValue value, int low, int width)
     {

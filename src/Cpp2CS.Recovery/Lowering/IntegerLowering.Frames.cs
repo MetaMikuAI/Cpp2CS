@@ -97,7 +97,7 @@ public sealed partial class IntegerLowering
         {
             // 新查询实例消费固定的帧认定结果；不改变旧上下文里已缓存的位置或类型。
             var naming = new Cpp2CS.Recovery.Naming.ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx,
-                types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness, types.Object, stringType: types.String);
+                types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness, types.Object, stringType: types.String, managedTypes: types);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec, frameObjects);
             dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness);
