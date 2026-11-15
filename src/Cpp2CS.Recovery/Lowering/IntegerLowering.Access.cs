@@ -246,7 +246,8 @@ public sealed partial class IntegerLowering
                 { group.Key.Read = index.Value.Reads[identity].Read; break; }
         }
         var answer = accessors.Match(context, method, state, locations, arguments, callDefinitions.ToDictionary(p => p.Key,
-            p => new AccessorCallSite(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)));
+            p => new AccessorCallSite(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)),
+            calls is null ? null : new Cpp2CS.Recovery.Checks.CheckQueries(state, calls, locations));
         if (!answer.IsSuccess) { accessorProgramFailure = new("inline.Accessor.None", "模板项匹配查询未完成", answer.Why); return; }
         accessorProgram = answer.Value;
         foreach (var replacement in accessorProgram.Replacements)
@@ -301,8 +302,24 @@ public sealed partial class IntegerLowering
                 receiver is not null && !replacement.Method.Method.Owner.IsValueType && receiver is not ArgumentValue { Index: -1 }), accessorResults[replacement]) { Inlined = true };
             if (replacement.Region is not null)
             {
-                if (!accessorEndCalls.TryGetValue(labels[replacement.Point.Block], out var callsAtEnd)) accessorEndCalls.Add(labels[replacement.Point.Block], callsAtEnd = []);
-                callsAtEnd.Add(call);
+                foreach (var write in replacement.Writes.Where(w => block.Statements.OfType<MemoryWrite>().Any(s => s.Identity == w)))
+                    accessorWriteCalls.Add(write, null);
+                if (replacement.Point.Before == block.Statements.Length)
+                {
+                    if (!accessorEndCalls.TryGetValue(labels[replacement.Point.Block], out var callsAtEnd)) accessorEndCalls.Add(labels[replacement.Point.Block], callsAtEnd = []);
+                    callsAtEnd.Add(call);
+                }
+                else if (block.Statements[replacement.Point.Before] is MemoryRead read)
+                {
+                    if (!accessorReadCalls.TryGetValue(read.Identity, out var list)) accessorReadCalls.Add(read.Identity, list = []);
+                    list.Add(call);
+                }
+                else if (block.Statements[replacement.Point.Before] is MemoryWrite write) accessorWriteCalls[write.Identity] = call;
+                else
+                {
+                    Fail<object>(LoweringFailureKind.UnsupportedType, "区域入口不是读取、写入或块末尾，调用没有插入点", code: "inline.Accessor.Placement.Entry");
+                    return;
+                }
             }
             else if (replacement.Call is { } consumedCall) accessorCallCalls.Add(consumedCall, call);
             else if (replacement.Writes.Count != 0)

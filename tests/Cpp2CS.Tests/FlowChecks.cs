@@ -7,6 +7,10 @@ namespace Cpp2CS.Tests;
 internal static class FlowChecks
 {
     public const string Command = "flow";
+    private sealed class Exits(params FlowEdge[] exits) : Query<FlowEdge, bool>
+    {
+        public override Outcome<bool> Compute(QueryContext context, FlowEdge key) => Outcome<bool>.Success(exits.Contains(key));
+    }
     public static int Run()
     {
         var a = new Assertions(); var q = new FlowQueries(); var t = new TermTable();
@@ -38,6 +42,25 @@ internal static class FlowChecks
         var escaping = Context(new(x,[],[call with { Unwind = null }],new Jump(y)),new(y,[],[],new Return([])));
         a.True(escaping.Get(normal.PostDominates,new(y,x)).Value && !escaping.Get(q.PostDominates,new(y,x)).Value,
             "正常控制流视图不把调用的异常离开计作正常出口");
+        var sharedCold = new BlockIdentity(); var outside = new BlockIdentity();
+        var firstRead = new MemoryRead(new(), t.Constant(16, 64), 32, t.Constant(0, 32));
+        var regionContext = Context(new(x, [], [firstRead], new Branch(t.Constant(1, 1), y, sharedCold)),
+            new(y, [], [], new Branch(t.Constant(1, 1), z, end)), new(z, [], [], new Jump(end)),
+            new(outside, [], [], new Jump(sharedCold)), new(sharedCold, [], [], new Unreachable()), new(end, [], [], new Return([])));
+        var excluded = new Exits(new FlowEdge(x, sharedCold));
+        a.True(!regionContext.Get(new SnapshotRegionQuery(normal), new(x, end)).IsSuccess,
+            "没有出口凭据时共享冷块不属于单续点区域");
+        var proved = regionContext.Get(new SnapshotRegionQuery(normal, excluded), new(x, end));
+        a.True(proved.IsSuccess && proved.Value.Order.ToHashSet().SetEquals([y, z]), "已认定的失败出口不纳入区域，不要求冷块独占");
+        var regionPaths = regionContext.Get(new SnapshotPathsQuery(normal, excluded), new(new(x, 0), end));
+        a.True(regionPaths.IsSuccess && regionPaths.Value.Length == 2 && regionPaths.Value.All(p => p.Points.SequenceEqual([new Point(x, 0)])),
+            "路径展开保留入口程序点和两条正常路径");
+        a.True(!regionContext.Get(new SnapshotPathsQuery(normal, excluded, pathBudget: 1), new(new(x, 0), end)).IsSuccess,
+            "路径数超过预算时报洞");
+        a.True(!loop.Get(new SnapshotRegionQuery(normal), new(x, end)).IsSuccess, "无环区域拒绝循环");
+        var secondEntry = Context(new(x, [], [], new Branch(t.Constant(1, 1), y, z)), new(y, [], [], new Jump(end)),
+            new(z, [], [], new Jump(end)), new(outside, [], [], new Jump(y)), new(end, [], [], new Return([])));
+        a.True(!secondEntry.Get(new SnapshotRegionQuery(normal, new Exits()), new(x, end)).IsSuccess, "带失败出口的区域仍拒绝第二入口");
         return a.Finish("控制流查询");
     }
 }

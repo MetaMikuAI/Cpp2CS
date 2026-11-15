@@ -8,6 +8,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Checks;
 
 namespace Cpp2CS.Recovery.Inlining;
 
@@ -28,8 +29,8 @@ public sealed partial class AccessorQuery
 {
     public Outcome<AccessorProgram> Match(QueryContext context, MethodRef caller, StateQueries state,
         ManagedLocationQuery locations, IReadOnlyDictionary<Term, ManagedValue> arguments,
-        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls = null) =>
-        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, observe, Find, StaticCandidates), 0);
+        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls = null, CheckQueries? checks = null) =>
+        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, checks, observe, Find, StaticCandidates), 0);
 
     private sealed record Site(Point Point, StableIdentity Identity, FieldRef Field, Term? Receiver, TypeRef? ReceiverType,
         Term Value, bool Write, ulong Address);
@@ -41,7 +42,7 @@ public sealed partial class AccessorQuery
     /// <summary>发现纯项、转调和无副作用区域；读取版本、支配、路径事实与最终相等均取现有查询。</summary>
     private sealed partial class ProgramQuery(ManagedTypes types, IAccessorTemplateSource templates, StateQueries state,
         ManagedLocationQuery locations, MethodRef caller, IReadOnlyDictionary<Term, ManagedValue> arguments,
-        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy, StaticCandidateLookup StaticCandidates) : Query<int, AccessorProgram>
+        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, CheckQueries? checks, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy, StaticCandidateLookup StaticCandidates) : Query<int, AccessorProgram>
     {
         private readonly FlowQueries flow = new();
         public override Outcome<AccessorProgram> Compute(QueryContext c, int key)
@@ -92,6 +93,7 @@ public sealed partial class AccessorQuery
                 if (consumed.Contains(anchor.Identity)) continue;
                 var matches = new List<CandidateMatch>(); var incomplete = new List<AccessorCandidateFailure>();
                 var shapes = new HashSet<string>(); int candidates = 0;
+                var diagnostics = new List<(MethodDef Method, bool Anchor, int Calls, int Fields, int Extra, HashSet<string> Reasons)>();
                 var block = blocks[anchor.Point.Block];
                 // 事件与写入截断取值范围；赋值组另按全部连续字段写入复核。
                 int low = anchor.Point.Before, high = low + 1;
@@ -115,16 +117,32 @@ public sealed partial class AccessorQuery
                     var candidate = selected.Method;
                     if (!ManagedAccess.Method(types, caller.Method.Owner, selected, candidate.IsStatic ? null : anchor.ReceiverType)) continue;
                     candidates++;
-                    if (types.Kind(selected.Concrete(candidate.ReturnType)) == TypeKind.Struct
-                        || candidate.Parameters.Any(p => types.Kind(selected.Concrete(p.Type)) == TypeKind.Struct))
+                    shapes = [];
+                    var diagnosticIndex = diagnostics.Count;
+                    diagnostics.Add((candidate, false, 0, 0, 0, shapes));
+                    bool compositeSignature = types.Kind(selected.Concrete(candidate.ReturnType)) == TypeKind.Struct
+                        || candidate.Parameters.Any(p => types.Kind(selected.Concrete(p.Type)) == TypeKind.Struct);
+                    // 直接取值签名仍提供诊断证据；复合签名不进入采纳。
+                    if (compositeSignature && (anchor.Write || candidate.Parameters.Count != 0 || !candidate.ReturnType.Equals(anchor.Field.Field.Type)))
                     { shapes.Add("候选的方法体不是模板：CompositeSignature；复合参数或返回值需要整体模板"); continue; }
                     var result = templates.Get(candidate);
+                    if (result.Evidence is { } evidence)
+                    {
+                        var present = sites.Where(s => s.Point.Block == anchor.Point.Block).Select(s => s.Field.Field).ToHashSet();
+                        var callTargets = calls?.Values.Select(call => call.Method.Method).ToHashSet() ?? [];
+                        diagnostics[diagnosticIndex] = (candidate, evidence.Fields.Contains(anchor.Field.Field),
+                            evidence.Calls.Count(callTargets.Contains), evidence.Fields.Count(present.Contains), evidence.Fields.Count(f => !present.Contains(f)), shapes);
+                    }
+                    if (compositeSignature)
+                    { shapes.Add("候选的方法体不是模板：CompositeSignature；复合参数或返回值需要整体模板"); continue; }
                     if (result.Status == AccessorTemplateStatus.Incomplete) { incomplete.Add(new(candidate, result.Failure)); continue; }
                     if (result.Template is not { } template) { if (result.Failure is { } why) shapes.Add(why.Message); continue; }
-                    if (template.Kind != (anchor.Write ? AccessorKind.Setter : AccessorKind.Getter)) continue;
+                    if (template.Events is null && template.Kind != (anchor.Write ? AccessorKind.Setter : AccessorKind.Getter))
+                    { shapes.Add("模板的取值/写入种类与锚点不匹配"); continue; }
                     var templateFields = template.Fields.Select(f => f with { DeclaringType = selected.Concrete(f.DeclaringType) }).ToHashSet();
                     var group = writesInWindow.Where(s => templateFields.Contains(s.Field)).ToArray();
-                    var values = template.Conditional is { } conditional ? conditional.Anchors.ToArray()
+                    var values = template.Events is { } eventTemplate ? eventTemplate.Anchors.ToArray()
+                        : template.Conditional is { } conditional ? conditional.Anchors.ToArray()
                         : template.Call is { } invocation ? invocation.Arguments.Concat(invocation.Receiver is { } self ? [self] : []).ToArray()
                         : template.Expression is { } expression ? new[] { expression }
                         : template.Stores.SelectMany(s => new[] { s.Target, s.Value }).ToArray();
@@ -136,6 +154,11 @@ public sealed partial class AccessorQuery
                         { if (anchor.Receiver is null) continue; fixedArgs[p.Index] = anchor.Receiver; }
                         else if (fieldNode is not StaticFieldValue) continue;
                         if (!candidate.IsStatic && !fixedArgs.ContainsKey(-1)) continue;
+                        if (template.Events is { } events)
+                        {
+                            EventConditional(c, anchor, selected, events, fixedArgs, sites, blocks, matches, shapes);
+                            continue;
+                        }
                         if (template.Conditional is { } paths)
                         {
                             Conditional(c, anchor, selected, paths, fixedArgs, window, sites, allTerms, blocks, matches, shapes);
@@ -237,10 +260,14 @@ public sealed partial class AccessorQuery
                 // 覆盖按项的包含关系取极大值；不可比较的解释也保留歧义。
                 var best = matches.Where(m => !matches.Any(other => other.Coverage.IsSupersetOf(m.Coverage) && other.Accesses.IsSupersetOf(m.Accesses)
                     && (other.Coverage.IsProperSupersetOf(m.Coverage) || other.Accesses.IsProperSupersetOf(m.Accesses)))).ToArray();
+                var closest = diagnostics.OrderByDescending(d => d.Anchor).ThenByDescending(d => d.Calls).ThenByDescending(d => d.Fields)
+                    .ThenBy(d => d.Extra).ThenBy(d => d.Method.Token).FirstOrDefault();
+                var closestReason = closest.Method is null ? "候选模板与完整项或写入组不匹配"
+                    : "最接近的候选 " + closest.Method + "：" + (closest.Reasons.Count == 0 ? "模板与完整项或区域不匹配" : string.Join("；", closest.Reasons.Order(StringComparer.Ordinal)));
                 Reason? failure = best.Length > 1 ? new("inline.Accessor.Ambiguous", $"有 {best.Length} 个最大覆盖或不同实参代入，无法区分原调用")
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
-                        : shapes.Count != 0 ? string.Join("；", shapes.Order(StringComparer.Ordinal)) : "候选模板与完整项或写入组不匹配",
+                        : closestReason,
                         inference ?? new("inline.anchor", (anchor.Write ? "写入 " : "读取 ") + anchor.Field.Field.Owner.FullName + "." + anchor.Field.Field.Name));
                 var access = new AccessorAccess(caller, anchor.Address, anchor.Field, anchor.ReceiverType,
                     anchor.Write ? AccessorKind.Setter : AccessorKind.Getter, failure is null);

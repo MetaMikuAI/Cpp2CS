@@ -26,7 +26,7 @@ internal static class AccessorConditionals
         if (body.Regions.Count != 0 || body.Blocks.Count == 0) return No("含异常区域或没有入口");
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
         if (statements.Any(s => s is not (ManagedAssignment or ManagedJump or ManagedBranch or ManagedReturn)))
-            return No("含调用、写入或其他事件");
+            return AccessorEventTemplates.Read(body);
         if (statements.SelectMany(ManagedValues.Of).Any(v => !AccessorTemplates.IsPure(body.Method, v, true)))
             return No("含未支持的条件或结果表达式");
         var assigned = statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Id).ToArray();

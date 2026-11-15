@@ -11,12 +11,17 @@ public sealed record AccessorTemplate(AccessorKind Kind, FieldRef Field)
     public ManagedValue? Expression { get; init; }
     public ManagedInvocation? Call { get; init; }
     public AccessorConditional? Conditional { get; init; }
+    public AccessorEventTemplate? Events { get; init; }
     public IReadOnlyList<ManagedStore> Stores { get; init; } = [];
     public IReadOnlyList<FieldRef> Fields { get; init; } = [];
     public bool SingleField { get; init; }
 }
 public enum AccessorTemplateStatus { Complete, Incomplete, NotTemplate }
-public sealed record AccessorTemplateResult(AccessorTemplateStatus Status, AccessorTemplate? Template = null, Reason? Failure = null);
+public sealed record AccessorEvidence(IReadOnlySet<FieldDef> Fields, IReadOnlySet<MethodDef> Calls);
+public sealed record AccessorTemplateResult(AccessorTemplateStatus Status, AccessorTemplate? Template = null, Reason? Failure = null)
+{
+    public AccessorEvidence? Evidence { get; init; }
+}
 
 /// <summary>只提供关闭内联逆后完整恢复的方法体摘要；实现须按方法缓存并可并发取用。</summary>
 public interface IAccessorTemplateSource
@@ -30,6 +35,12 @@ public static class AccessorTemplates
     private static AccessorTemplateResult No(string shape, string message) =>
         new(AccessorTemplateStatus.NotTemplate, Failure: new("inline.Accessor.None", "候选的方法体不是模板：" + shape + "；" + message));
     public static AccessorTemplateResult Read(ManagedBody body)
+    {
+        var values = body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk);
+        return ReadCore(body) with { Evidence = new(values.Select(FieldAccessor.FieldOf).OfType<FieldRef>().Select(f => f.Field).ToHashSet(),
+            body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Select(c => c.Invocation.Method.Method).ToHashSet()) };
+    }
+    private static AccessorTemplateResult ReadCore(ManagedBody body)
     {
         var all = body.Blocks.SelectMany(b => b.Statements).ToArray();
         if (all.Any(s => s is ManagedBranch) || all.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is ChoiceValue))

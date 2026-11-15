@@ -67,6 +67,7 @@ internal static partial class InliningChecks
         ExpressionAccessorChecks(checks);
         ForwardingChecks(checks);
         ConditionalAccessorChecks(checks);
+        EventAccessorChecks(checks);
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
         ValueAccessorChecks(checks);
@@ -571,6 +572,7 @@ internal static partial class InliningChecks
     {
         private readonly Skeleton skeleton;
         public BodyEmitter Emitter { get; }
+        public Mono.Cecil.MethodDefinition Method(MethodDef method) => skeleton.Method(method);
         public EmissionFixture(Fixture f) { skeleton = new(f.Program, 16); Emitter = new(skeleton, f.Types); }
         public void Dispose() { foreach (var assembly in skeleton.Assemblies) assembly.Dispose(); }
     }
