@@ -44,6 +44,8 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
     {
         var incomplete = new List<AccessorCandidateFailure>();
         Reason? inference = null;
+        // 方法体里读写了这个字段、却不是单字段模板的第一个候选；只用于诊断。
+        Reason? rejected = null;
         AccessorAnswer None(AccessorNoneReason reason) => new(null, new("inline.Accessor.None", reason switch
         {
             AccessorNoneReason.NoCandidates => "没有候选",
@@ -51,7 +53,9 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             AccessorNoneReason.NotTemplate => "候选的方法体不是模板",
             AccessorNoneReason.GenericMethod => inference is null ? "签名候选只有泛型方法，尚不支持" : "字段所属类型未能唯一确定泛型实参",
             _ => "字段没有完整的声明类型实例",
-        }, inference), reason) { IncompleteCandidates = incomplete };
+        }, inference ?? (reason == AccessorNoneReason.Incomplete ? Anchor(access.Kind == AccessorKind.Setter, access.Field, CandidateCause(incomplete))
+            : reason == AccessorNoneReason.NotTemplate && rejected is not null ? Anchor(access.Kind == AccessorKind.Setter, access.Field, rejected) : null)),
+            reason) { IncompleteCandidates = incomplete };
         var field = access.Field.Field;
         if (access.Field.DeclaringType is not DefinitionRef instance || instance.Definition != field.Owner
             || instance.Arguments.Count != field.Owner.GenericParameters.Count) return None(AccessorNoneReason.FieldInstance);
@@ -60,7 +64,8 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             && field.Owner.IsValueType && instance.Equals(receiver);
         if (access.ValueRead && !valueRead) return None(AccessorNoneReason.FieldInstance);
         MethodRef OnInstance(MethodDef method) => new(method, instance.Arguments, []);
-        var candidates = field.Owner.Methods.Where(m => !m.IsVirtual && m.IsStatic == field.IsStatic
+        // 不可重写的虚方法（值类型或密封类上的接口实现）目标唯一，与非虚方法一样能被内联，也一样能写回成调用。
+        var candidates = field.Owner.Methods.Where(m => !m.IsOverridable && m.IsStatic == field.IsStatic
             && (access.Kind == AccessorKind.Getter
                 ? m.Parameters.Count == 0 && m.ReturnType.Equals(field.Type)
                 : m.Parameters is [var p] && p.Type.Equals(field.Type) && ManagedTypes.IsVoid(m.ReturnType)))
@@ -81,7 +86,13 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
                 incomplete.Add(new(candidate, result.Failure));
                 if (reason != AccessorNoneReason.NotTemplate) reason = AccessorNoneReason.Incomplete;
             }
-            else reason = AccessorNoneReason.NotTemplate;
+            else
+            {
+                reason = AccessorNoneReason.NotTemplate;
+                if (rejected is null && result.Evidence?.Fields.Contains(field) == true)
+                    rejected = new("inline.candidate", "候选 " + candidate.Owner.FullName + "." + candidate.Name,
+                        result.Failure ?? new("inline.Accessor.None", "候选的模板不是这个字段的单字段读写"));
+            }
         }
         if (matches.Count == 0) return None(reason);
         if (matches.Count > 1) return new(null, new("inline.Accessor.Ambiguous", $"有 {matches.Count} 个访问器模板相同，无法区分原调用"), Matches: matches.Count)

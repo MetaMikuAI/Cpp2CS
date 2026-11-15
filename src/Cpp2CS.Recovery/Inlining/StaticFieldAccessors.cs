@@ -88,6 +88,13 @@ public sealed partial class AccessorQuery
     };
 
     private static Reason WithAnchor(Reason reason, AccessorAccess access) => reason.Code == "inline.anchor" ? reason
-        : reason with { Cause = reason.Cause is { } cause ? WithAnchor(cause, access)
-            : new("inline.anchor", (access.Kind == AccessorKind.Setter ? "写入 " : "读取 ") + access.Field.Field.Owner.FullName + "." + access.Field.Field.Name) };
+        : reason with { Cause = reason.Cause is { } cause ? WithAnchor(cause, access) : Anchor(access.Kind == AccessorKind.Setter, access.Field) };
+
+    private static Reason Anchor(bool write, FieldRef field, Reason? cause = null) =>
+        new("inline.anchor", (write ? "写入 " : "读取 ") + field.Field.Owner.FullName + "." + field.Field.Name, cause);
+
+    /// <summary>候选全部未能完整恢复时，取名字最小的一个候选自己的失败原因，接在锚点之后。</summary>
+    private static Reason? CandidateCause(IReadOnlyList<AccessorCandidateFailure> incomplete) =>
+        incomplete.Where(f => f.Failure is not null).OrderBy(f => f.Method.Owner.FullName + "." + f.Method.Name, StringComparer.Ordinal).FirstOrDefault() is { } first
+            ? new("inline.candidate", "候选 " + first.Method.Owner.FullName + "." + first.Method.Name, first.Failure) : null;
 }

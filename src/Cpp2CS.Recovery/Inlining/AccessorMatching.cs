@@ -268,7 +268,7 @@ public sealed partial class AccessorQuery
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
                         : closestReason,
-                        inference ?? new("inline.anchor", (anchor.Write ? "写入 " : "读取 ") + anchor.Field.Field.Owner.FullName + "." + anchor.Field.Field.Name));
+                        inference ?? Anchor(anchor.Write, anchor.Field, candidates != 0 && incomplete.Count == candidates ? CandidateCause(incomplete) : null));
                 var access = new AccessorAccess(caller, anchor.Address, anchor.Field, anchor.ReceiverType,
                     anchor.Write ? AccessorKind.Setter : AccessorKind.Getter, failure is null);
                 if (best.Length == 1 && failure is null)
