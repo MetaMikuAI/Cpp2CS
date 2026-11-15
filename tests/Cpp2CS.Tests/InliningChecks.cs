@@ -65,6 +65,7 @@ internal static partial class InliningChecks
         checks.True(Ask(f.Shared, AccessorKind.Getter).Method?.Method == staticGetter, "静态读模板采用");
         checks.True(Ask(f.Field, AccessorKind.Getter, false).Failure?.Code == "inline.Accessor.Placement", "无法保持位置时报洞");
         ExpressionAccessorChecks(checks);
+        WholeFieldTemplateChecks(checks);
         ForwardingChecks(checks);
         ConditionalAccessorChecks(checks);
         EventAccessorChecks(checks);

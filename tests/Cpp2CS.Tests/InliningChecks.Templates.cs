@@ -15,6 +15,47 @@ namespace Cpp2CS.Tests;
 
 internal static partial class InliningChecks
 {
+    /// <summary>结构体类型的字段：整字段读取与整形参写入是单字段模板，位宽超过 64 位也一样；字段的一部分、夹着运算的不是。</summary>
+    private static void WholeFieldTemplateChecks(Assertions checks)
+    {
+        var f = new Fixture(valueOwner: true);
+        var holderType = new DefinitionRef(f.Caller, []);
+        var wideDef = new FieldDef { Index = 2, Owner = f.Caller, Name = "Wide", Type = f.OwnerType,
+            Attributes = FieldAttributes.Private | FieldAttributes.Static, Offset = 0, Token = 0x04000003 };
+        var partDef = new FieldDef { Index = 3, Owner = f.Caller, Name = "Part", Type = f.OwnerType,
+            Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000004 };
+        f.Caller.Fields = [wideDef, partDef];
+        ((List<FieldDef>)f.Program.Fields).AddRange([wideDef, partDef]);
+        var wide = new FieldRef(wideDef, holderType); var part = new FieldRef(partDef, holderType);
+        var self = new ArgumentValue(-1, holderType, 64);
+        var local = new LocalValue(new LocalId(0), f.OwnerType, 96);
+        var staticGetter = f.Method(f.Caller, "get_Wide", false, true, []); staticGetter.ReturnType = f.OwnerType;
+        var viaLocal = AccessorTemplates.Read(new ManagedBody(MethodRef.Open(staticGetter), [new(0,
+            [new ManagedAssignment(0, local, new StaticFieldValue(wide, f.OwnerType, 96)), new ManagedReturn(4, local)])]));
+        checks.True(viaLocal is { Status: AccessorTemplateStatus.Complete, Template: { SingleField: true, Kind: AccessorKind.Getter } a } && a.Field.Equals(wide),
+            "静态结构体字段经局部返回是单字段读取模板：" + viaLocal.Failure?.Message);
+        var getter = f.Method(f.Caller, "get_Part", false, false, []); getter.ReturnType = f.OwnerType;
+        var direct = AccessorTemplates.Read(new ManagedBody(MethodRef.Open(getter), [new(0,
+            [new ManagedReturn(0, new FieldValue(self, part, f.OwnerType, 96))])]));
+        checks.True(direct is { Status: AccessorTemplateStatus.Complete, Template: { SingleField: true, Kind: AccessorKind.Getter } b } && b.Field.Equals(part),
+            "实例结构体字段直接返回是单字段读取模板：" + direct.Failure?.Message);
+        var setter = f.Method(f.Caller, "set_Part", true, false, [f.OwnerType]);
+        var stored = AccessorTemplates.Read(new ManagedBody(MethodRef.Open(setter), [new(0,
+            [new ManagedStore(0, new FieldValue(self, part, f.OwnerType, 96), new ArgumentValue(0, f.OwnerType, 96)), new ManagedReturn(4, null)])]));
+        checks.True(stored is { Status: AccessorTemplateStatus.Complete, Template: { SingleField: true, Kind: AccessorKind.Setter } c } && c.Field.Equals(part),
+            "整形参写进结构体字段是单字段写入模板：" + stored.Failure?.Message);
+        // 字段的一部分不是整字段：结构体字段里的成员仍按原规则（这里宽度合规，是纯表达式但不是单字段模板）。
+        var inner = AccessorTemplates.Read(new ManagedBody(MethodRef.Open(f.Method(f.Caller, "get_Inner", false, false, [])), [new(0,
+            [new ManagedReturn(0, new FieldValue(new FieldValue(self, part, f.OwnerType, 96), f.Field, f.Integer, 32))])]));
+        checks.True(inner.Template?.SingleField != true, "结构体字段里的成员不是这个字段的单字段模板");
+        // 宽值参与运算不是纯值。
+        var wideLocal = new LocalValue(new LocalId(1), f.OwnerType, 96);
+        var mixed = AccessorTemplates.Read(new ManagedBody(MethodRef.Open(staticGetter), [new(0,
+            [new ManagedAssignment(0, wideLocal, new ChoiceValue(new ConstantValue(1, f.Integer, 32), new StaticFieldValue(wide, f.OwnerType, 96),
+                new FieldValue(self, part, f.OwnerType, 96), f.OwnerType, 96)), new ManagedReturn(4, wideLocal)])]));
+        checks.True(mixed.Status != AccessorTemplateStatus.Complete || mixed.Template?.SingleField != true, "宽值经选择不是单字段模板");
+    }
+
     private static void ExpressionAccessorChecks(Assertions checks)
     {
         foreach (string mode in new[] { "Difference", "Comparison", "NegatedComparison", "BooleanReturn", "Nested", "Slice", "MemoryMerge", "Writes", "BooleanWrites", "FieldValueWrites", "MaskedParameter", "Constants", "Partial", "Ambiguous", "CallBetween", "ReadBetween", "Largest", "UnplacedLargest" })

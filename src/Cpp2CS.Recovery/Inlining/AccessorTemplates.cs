@@ -59,7 +59,9 @@ public static class AccessorTemplates
             return result is ConversionValue c && c.Type.Equals(c.Operand.Type) && c.Width == c.Operand.Width
                 && c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate ? c.Operand : result;
         }
-        bool Pure(ManagedValue value) => IsPure(body.Method, value);
+        // 整个字段的读取、整个形参都是纯的，与类型和位宽无关；结构体类型的字段按整体值进出单字段模板。
+        bool Pure(ManagedValue value) => value is StaticFieldValue or FieldValue { Receiver: ArgumentValue { Index: -1 } } or ArgumentValue { Index: >= 0 }
+            || IsPure(body.Method, value);
         if (statements.Any(s => s is ManagedCall))
         {
             ManagedCall? forwarded = null;
