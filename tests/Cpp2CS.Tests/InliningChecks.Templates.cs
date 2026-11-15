@@ -17,7 +17,7 @@ internal static partial class InliningChecks
 {
     private static void ExpressionAccessorChecks(Assertions checks)
     {
-        foreach (string mode in new[] { "Difference", "Comparison", "NegatedComparison", "BooleanReturn", "Nested", "Slice", "MemoryMerge", "Writes", "BooleanWrites", "FieldValueWrites", "MaskedParameter", "Constants", "Partial", "Ambiguous", "CallBetween", "ReadBetween", "Largest" })
+        foreach (string mode in new[] { "Difference", "Comparison", "NegatedComparison", "BooleanReturn", "Nested", "Slice", "MemoryMerge", "Writes", "BooleanWrites", "FieldValueWrites", "MaskedParameter", "Constants", "Partial", "Ambiguous", "CallBetween", "ReadBetween", "Largest", "UnplacedLargest" })
         {
             var f = new Fixture();
             var otherDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Other", Type = f.Integer,
@@ -39,7 +39,7 @@ internal static partial class InliningChecks
             var left = new FieldValue(self, f.Field, f.Integer, 32); var right = new FieldValue(self, other, f.Integer, 32);
             var seven = new ConstantValue(7, f.Integer, 32);
             ManagedValue expression = mode == "BooleanReturn" ? new ConversionValue(ConversionKind.ZeroExtend,
-                new ComparisonValue(ComparisonKind.Equal, left, seven, boolType), boolType, 8) : mode is "Slice" or "MemoryMerge" ? left : mode is "Comparison" or "NegatedComparison" ? new ComparisonValue(ComparisonKind.Equal, left, seven, f.Integer)
+                new ComparisonValue(ComparisonKind.Equal, left, seven, boolType), boolType, 8) : mode is "Slice" or "MemoryMerge" ? left : mode is "Comparison" or "NegatedComparison" or "UnplacedLargest" ? new ComparisonValue(ComparisonKind.Equal, left, seven, f.Integer)
                 : mode == "Nested" ? new FieldValue(new FieldValue(self, child, f.OwnerType, 64), f.Field, f.Integer, 32)
                 : new BinaryValue(BinaryOperator.Subtract, left, right, f.Integer, 32);
             var stores = new ManagedStatement[] { new ManagedStore(0, left, constant ? seven : mode is "MaskedParameter" or "BooleanWrites"
@@ -49,10 +49,11 @@ internal static partial class InliningChecks
             var body = new ManagedBody(MethodRef.Open(method), [new(0, writing ? stores : [new ManagedReturn(0, expression)])]);
             checks.True(AccessorTemplates.Read(body).Status == AccessorTemplateStatus.Complete, "直线模板提取：" + mode);
             var bodies = new Dictionary<MethodDef, ManagedBody> { [method] = body };
-            if (mode is "Ambiguous" or "Largest")
+            MethodDef? alternative = null;
+            if (mode is "Ambiguous" or "Largest" or "UnplacedLargest")
             {
-                var second = f.Method(f.Owner, "Alternative", false, false, []);
-                bodies.Add(second, new(MethodRef.Open(second), [new(0, [new ManagedReturn(0, mode == "Largest" ? left : expression)])]));
+                alternative = f.Method(f.Owner, "Alternative", false, false, []);
+                bodies.Add(alternative, new(MethodRef.Open(alternative), [new(0, [new ManagedReturn(0, mode == "Ambiguous" ? expression : left)])]));
             }
             var catalog = RuntimeFunctionCatalog.Select(f.Spec.Layout.UnityVersion, f.Spec.Layout.Triple, f.Spec.Layout.DataModel);
             var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(touch), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
@@ -86,7 +87,10 @@ internal static partial class InliningChecks
             {
                 var a = Read(root, f.Field);
                 if (mode == "CallBetween") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
-                result = mode is "Slice" or "MemoryMerge" ? terms.Concat(terms.Slice(a, 1, 31), terms.Constant(0, 1)) : mode is "Comparison" or "BooleanReturn" or "NegatedComparison" ? terms.Apply(new CoreOperator(mode == "NegatedComparison" ? CoreOperation.NotEqual : CoreOperation.Equal), 1, a, terms.Constant(7, 32))
+                // 比较项之外读取还有一次使用：覆盖更大的比较模板放不下，单字段 getter 放得下。
+                result = mode == "UnplacedLargest" ? terms.Apply(new CoreOperator(CoreOperation.Add), 32,
+                        terms.Concat(terms.Apply(new CoreOperator(CoreOperation.Equal), 1, a, terms.Constant(7, 32)), terms.Constant(0, 31)), a)
+                    : mode is "Slice" or "MemoryMerge" ? terms.Concat(terms.Slice(a, 1, 31), terms.Constant(0, 1)) : mode is "Comparison" or "BooleanReturn" or "NegatedComparison" ? terms.Apply(new CoreOperator(mode == "NegatedComparison" ? CoreOperation.NotEqual : CoreOperation.Equal), 1, a, terms.Constant(7, 32))
                     : terms.Apply(new CoreOperator(mode == "Partial" ? CoreOperation.Add : CoreOperation.Subtract), 32, a, Read(root, other));
             }
             var returned = result.Width == 64 ? result : terms.Concat(result, terms.Constant(0, 64 - result.Width));
@@ -117,7 +121,8 @@ internal static partial class InliningChecks
                     { ManagedCall { Result: { } r } => r.Id, ManagedAssignment a => a.Target.Id, _ => (LocalId?)null }).OfType<LocalId>().ToHashSet();
                 checks.True(complete.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
                     .OfType<LocalValue>().All(l => defined.Contains(l.Id)), "替换后的全部局部都有定义：" + mode);
-                checks.True(recovered is [var selected] && selected.Invocation.Method.Method == method, "完整覆盖只发出一次目标调用：" + mode);
+                checks.True(recovered is [var selected] && selected.Invocation.Method.Method == (mode == "UnplacedLargest" ? alternative : method),
+                    (mode == "UnplacedLargest" ? "大模板放不下时取放得下的单字段 getter：" : "完整覆盖只发出一次目标调用：") + mode);
                 checks.True(recovered.Length == 1 && recovered[0].Address == (mode == "FieldValueWrites" ? 104UL : 100UL), "调用保留在首个读或写的位置：" + mode);
                 using var emission = new EmissionFixture(f);
                 var problems = emission.Emitter.Emit([.. bodies.Values, complete]);

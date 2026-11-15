@@ -258,7 +258,10 @@ public sealed partial class AccessorQuery
                     }
                 }
                 // 覆盖按项的包含关系取极大值；不可比较的解释也保留歧义。
-                var best = matches.Where(m => !matches.Any(other => other.Coverage.IsSupersetOf(m.Coverage) && other.Accesses.IsSupersetOf(m.Accesses)
+                // 放不下的匹配（被覆盖的读取另有使用、调用位置不成立、实参不唯一）不是这处访问的解释；有放得下的匹配时只在它们之间取极大。
+                var placeable = matches.Where(m => m.Placement is null).ToArray();
+                var pool = placeable.Length != 0 ? placeable : matches.ToArray();
+                var best = pool.Where(m => !pool.Any(other => other.Coverage.IsSupersetOf(m.Coverage) && other.Accesses.IsSupersetOf(m.Accesses)
                     && (other.Coverage.IsProperSupersetOf(m.Coverage) || other.Accesses.IsProperSupersetOf(m.Accesses)))).ToArray();
                 var closest = diagnostics.OrderByDescending(d => d.Anchor).ThenByDescending(d => d.Calls).ThenByDescending(d => d.Fields)
                     .ThenBy(d => d.Extra).ThenBy(d => d.Method.Token).FirstOrDefault();
