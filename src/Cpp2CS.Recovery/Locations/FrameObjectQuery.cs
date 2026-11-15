@@ -346,16 +346,24 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
         }
         var copies = ImmutableDictionary.CreateBuilder<WriteIdentity, FrameCopy>();
         var remainders = ImmutableHashSet.CreateBuilder<WriteIdentity>();
-        // 连续、不相交且铺满对象的写入共用整体值查询；其间不跨过任何其他内存操作。
+        // 同一写入段内可跨过与对象不相交的帧写入；读取与调用仍结束该段。
         foreach (var block in c.Snapshot.Blocks)
             for (int i = 0; i < block.Statements.Length; i++)
             {
-                if (block.Statements[i] is not MemoryWrite first || !accesses.TryGetValue(first.Identity, out var access)
-                    || types.Kind(access.Object.Type) != TypeKind.Struct) continue;
+                if (block.Statements[i] is not MemoryWrite first || remainders.Contains(first.Identity)
+                    || !accesses.TryGetValue(first.Identity, out var access) || types.Kind(access.Object.Type) != TypeKind.Struct) continue;
                 var group = new List<(MemoryWrite Write, FrameAccess Access)>(); int j = i;
-                while (j < block.Statements.Length && block.Statements[j] is MemoryWrite write
-                    && accesses.TryGetValue(write.Identity, out var next) && next.Object == access.Object && write.Width % 8 == 0)
-                { group.Add((write, next)); j++; }
+                while (j < block.Statements.Length && block.Statements[j] is MemoryWrite write && write.Width % 8 == 0)
+                {
+                    if (accesses.TryGetValue(write.Identity, out var next) && next.Object == access.Object) group.Add((write, next));
+                    else
+                    {
+                        var address = c.Get(state.Resolve, write.Address);
+                        if (!address.IsSuccess || c.Get(state.Locations, new(address.Value, write.Width)) is not { IsSuccess: true, Value.Region: Region.Frame } storage
+                            || c.Get(state.Alias, new(storage.Value, access.Object.Storage)) is not { IsSuccess: true, Value.Kind: AliasKind.Disjoint }) break;
+                    }
+                    j++;
+                }
                 var ordered = group.OrderBy(w => w.Access.Location.Offset).ToArray();
                 var cursor = access.Object.Storage.Offset!.Value; bool complete = ordered.Length > 0;
                 foreach (var part in ordered)
@@ -369,7 +377,6 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                         (int)(w.Access.Location.Offset!.Value - access.Object.Storage.Offset.Value), w.Write.Width / 8, new TermSource(w.Write.Value)))]);
                     copies.Add(first.Identity, new(access.Object, source, new(block.Identity, i)));
                     foreach (var rest in group.Skip(1)) remainders.Add(rest.Write.Identity);
-                    i = j - 1;
                 }
                 else if (first.Width == access.Object.Storage.Width && access.Location.Offset == access.Object.Storage.Offset)
                     copies.Add(first.Identity, new(access.Object, new TermSource(first.Value), new(block.Identity, i)));

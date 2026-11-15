@@ -215,6 +215,7 @@ internal static partial class LoweringChecks
         AddressChecks(checks, program);
         InterlockedChecks(checks, program);
         StructChecks(checks, program);
+        StructConstructorChecks(checks, program);
         StateChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
@@ -1054,6 +1055,8 @@ internal static partial class LoweringChecks
         var createLarge = Method("CreateLarge", largeType);
         var refLarge = Method("TakeLargeRef", Primitive("Void"), new ByRefRef(largeType));
         var consumeLarge = Method("ConsumeLarge", Primitive("Void"), largeType);
+        var noise = Method("Noise", Primitive("Void"));
+        var noiseThrow = Method("NoiseThrow", Primitive("Void"));
         var cases = new Dictionary<string, MethodDef> {
             ["Forward"] = Method("Forward", pairType, pairType),
             ["ReferenceRoot"] = Method("ReferenceRoot", Primitive("Int32"), new ByRefRef(referenceWrapperType)),
@@ -1064,6 +1067,7 @@ internal static partial class LoweringChecks
             ["ProjectWide"] = Method("ProjectWide", otherPairType, boxType),
             ["FrameRef"] = Method("FrameRef", Primitive("Void")),
             ["FrameWhole"] = Method("FrameWhole", pairType, pairType),
+            ["FrameScattered"] = Method("FrameScattered", pairType, pairType),
             ["FrameIndirectResult"] = Method("FrameIndirectResult", Primitive("Int64")),
             ["FrameResultSnapshot"] = Method("FrameResultSnapshot", Primitive("Int64")),
             ["FrameLargePass"] = Method("FrameLargePass", Primitive("Void")),
@@ -1109,6 +1113,13 @@ internal static partial class LoweringChecks
             ["ArrayCopy"] = Method("ArrayCopy", pairType, new ArrayRef(pairType, 1)),
             ["GenericForward"] = Method("GenericForward", genericType, genericType),
             ["LargeForward"] = Method("LargeForward", largeType, largeType),
+            ["LargeSplitForward"] = Method("LargeSplitForward", largeType, largeType),
+            ["LargeResultCopy"] = Method("LargeResultCopy", largeType),
+            ["FieldGap"] = Method("FieldGap", pairType, boxType),
+            ["FieldGapThrow"] = Method("FieldGapThrow", pairType, boxType),
+            ["WideAcross"] = Method("WideAcross", pairType, boxType),
+            ["SnapshotField"] = Method("SnapshotField", pairType, boxType),
+            ["TwoFields"] = Method("TwoFields", pairType, boxType, boxType),
             ["InterleavedLarge"] = Method("InterleavedLarge", largeType, largeType),
             ["ChangedField"] = Method("ChangedField", pairType, boxType),
             ["Incomplete"] = Method("Incomplete", pairType, pairType),
@@ -1199,11 +1210,13 @@ internal static partial class LoweringChecks
                 var id = new CallIdentity(); result = terms.Atom(new ResultAtom(id), 64);
                 statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), root), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], [new(new(SlotKind.Integer), result)]));
             }
-            if (mode is "FieldCopy" or "ChangedField")
+            if (mode is "FieldCopy" or "ChangedField" or "FieldGap" or "FieldGapThrow" or "SnapshotField" or "TwoFields")
             {
                 var first = Read(Add(root, box.Fields[0].Offset), 32);
+                if (mode is "FieldGap" or "FieldGapThrow") statements.Add(new Call(new(), new ImageFunction(50), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
+                if (mode == "SnapshotField") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[0].Offset), 32, terms.Constant(19, 32)));
                 if (mode == "ChangedField") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[0].Offset + 4), 32, terms.Constant(19, 32)));
-                result = terms.Concat(first, Read(Add(root, box.Fields[0].Offset + 4), 32));
+                result = terms.Concat(first, Read(Add(mode == "TwoFields" ? Input(SlotKind.Integer, 1) : root, box.Fields[0].Offset + 4), 32));
             }
             Term? secondResult = null;
             Merge? bufferMerge = null; BlockIdentity? bufferLeft = null, bufferRight = null, bufferJoin = null;
@@ -1214,10 +1227,11 @@ internal static partial class LoweringChecks
                 secondResult = root;
                 result = terms.Concat(terms.Constant(3, 8), terms.Undefined(56));
             }
-            if (mode == "FrameWhole")
+            if (mode is "FrameWhole" or "FrameScattered")
             {
                 var address = Add(frame, -32);
                 statements.Add(new MemoryWrite(new(), address, 32, terms.Slice(root, 0, 32)));
+                if (mode == "FrameScattered") statements.Add(new MemoryWrite(new(), Add(frame, -128), 64, terms.Constant(7, 64)));
                 statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Slice(root, 32, 32)));
                 statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
                 result = Read(address, 64);
@@ -1242,7 +1256,17 @@ internal static partial class LoweringChecks
             if (mode == "FrameRef") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), frame), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
             if (mode == "StoreForward") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[1].Offset), 32, terms.Slice(Input(SlotKind.Integer, 1), 0, 32)));
             if (mode is "WholeCopy" or "ProjectWide") result = Read(Add(root, box.Fields[0].Offset), 64);
+            if (mode == "WideAcross") result = Read(Add(root, box.Fields[0].Offset), 128);
             if (mode == "ArrayCopy") result = Read(Add(root, spec.Layout.ArrayDataStart), 64);
+            if (mode is "LargeSplitForward" or "LargeResultCopy")
+            {
+                var address = mode == "LargeSplitForward" ? root : Add(frame, -64);
+                if (mode == "LargeResultCopy") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), terms.Constant(0, 64)), new(new(SlotKind.IndirectResult), address)], []));
+                var first = Read(address, 128); var last = Read(Add(address, 16), 64);
+                var output = Input(SlotKind.IndirectResult, 0);
+                statements.Add(new MemoryWrite(new(), output, 128, first));
+                statements.Add(new MemoryWrite(new(), Add(output, 16), 64, last));
+            }
             if (mode is "LargeForward" or "InterleavedLarge")
             {
                 var output = Input(SlotKind.IndirectResult, 0);
@@ -1265,11 +1289,11 @@ internal static partial class LoweringChecks
                 builder.Blocks.Add(new(bufferRight!, [], [], new Jump(bufferJoin!)));
                 builder.Blocks.Add(new(bufferJoin!, [bufferMerge], [.. statements], returned));
             }
-            else builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" ? new Return([]) : returned));
-            var selectedTarget = mode is "FrameRef" or "FrameWhole" ? refTarget
-                : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" ? createLarge : target;
-            var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge), new NamingChecks.RuntimeMap(), catalog);
-            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            else builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" or "LargeSplitForward" or "LargeResultCopy" ? new Return([]) : returned));
+            var selectedTarget = mode is "FrameRef" or "FrameWhole" or "FrameScattered" ? refTarget
+                : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" or "LargeResultCopy" ? createLarge : target;
+            var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge, mode == "FieldGapThrow" ? noiseThrow : noise), new NamingChecks.RuntimeMap(), catalog);
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: mode is "FieldGap" or "FieldGapThrow" ? new NoStructWrites() : new ManagedCallEffects(calls), spec: spec, names: facts).Run();
             if (mode is "IndirectPartialCopy" or "IndirectCopyReadAfter" or "IndirectCopyTwice" or "IndirectOther")
             {
                 checks.True(lowered.Failure?.Reason.Code == "lowering.IndirectArgument.Source", mode + " 缺少间接实参来源时报洞：" + lowered.Failure);
@@ -1313,20 +1337,27 @@ internal static partial class LoweringChecks
                 is ArgumentValue { Index: 0 }, "间接按值形参转交为当前形参值");
             if (mode == "IndirectRefForward") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Invocation.Arguments[0]
                 is AddressValue { Target: ArgumentValue { Index: 0 } }, "间接形参转交 ref 使用 ldarga");
-            if (mode == "FrameWhole") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+            if (mode is "FrameWhole" or "FrameScattered") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
                 .Any(a => a.Value is ArgumentValue { Index: 0 } && a.Target.Type.Equals(pairType)), "连续叶子写入按同类型整体复制到帧局部");
             var problems = emitter.Emit([body]);
             checks.True(problems.Count == 0, mode + " 结构体 CIL 校验：" + string.Join(';', problems.Values));
             if (mode.EndsWith("Token", StringComparison.Ordinal)) checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is TypeHandleValue or FieldHandleValue or MethodHandleValue, mode + " 使用 ldtoken 值");
-            if (mode == "ChangedField") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue }
-                && body.Blocks[0].Statements[1] is ManagedStore
-                && body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is ComposedValue, "中间有写入时逐字段组成，旧字段仍在写入前求值");
+            if (mode == "ChangedField") checks.True(body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is ComposedValue,
+                "最早读取点不能给出全部叶子时保留原读与逐字段组成");
+            if (mode == "SnapshotField") checks.True(body.Blocks[0].Statements.First() is ManagedAssignment { Value: FieldValue { Type: var snapshotType } } && snapshotType.Equals(pairType)
+                && body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is LocalValue, "源改写之前在原读取处保存整体局部");
+            if (mode is "FieldGap" or "FieldGapThrow") checks.True(body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is LocalValue,
+                "已知无写入的无关调用不阻止在原读取点保存整体");
+            if (mode == "TwoFields") checks.True(body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is ComposedValue,
+                "两个来源的叶子不能冒充整体复制");
             if (mode is "Compose" or "ComposeHfa" or "ComposeMixed" or "ComposePadded" or "ProjectWide")
                 checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is ComposedValue, mode + " 逐叶子组成而非类型重解释");
             if (mode == "CallResult") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Result?.Type.Equals(pairType) == true, "结构体调用结果保存在同类型局部");
-            if (mode == "FieldCopy") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue { Type: var copied } } && copied.Equals(pairType), "整体字段在首个原生读取处保存");
+            if (mode == "FieldCopy") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue { Type: var copied } } && copied.Equals(pairType), "整体字段保留最早原读取位置");
         }
         const string indirectSource = """
+            public struct Pair { public int First, Second; }
+            public class Box { public Pair Data; }
             public struct Large { public long Part0, Part1, Part2; }
             public static class Cases {
                 public static void ConsumeLarge(Large p) { p.Part1 = 99; }
@@ -1334,11 +1365,24 @@ internal static partial class LoweringChecks
                 public static long IndirectSnapshot(Large p) { long before = p.Part1; p.Part1 = 99; return before; }
                 public static long IndirectIsolation(Large p) { ConsumeLarge(p); return p.Part1; }
                 public static Large InterleavedLarge(Large p) => p;
+                public static Large LargeSplitForward(Large p) => p;
+                public static Large CreateLarge() => new Large { Part0=1, Part1=2, Part2=3 };
+                public static Large LargeResultCopy() => CreateLarge();
+                public static void Noise() {}
+                public static void NoiseThrow() => throw new System.InvalidOperationException();
+                public static void TakeRef(ref Pair p) {}
+                public static Pair FrameScattered(Pair p) { var copy=p; TakeRef(ref copy); return copy; }
+                public static Pair WideAcross(Box b) => b.Data;
+                public static Pair FieldGap(Box b) { var p=b.Data; Noise(); return p; }
+                public static Pair FieldGapThrow(Box b) { var p=b.Data; NoiseThrow(); return p; }
+                public static Pair SnapshotField(Box b) { var p=b.Data; b.Data.First=19; return p; }
+                public static Pair TwoFields(Box a, Box b) => new Pair { First=a.Data.First, Second=b.Data.Second };
+                public static Pair ProjectWide(Box b) => b.Data;
             }
             """;
         using var indirectReference = new CompiledSource(indirectSource);
         using var indirectTested = new CompiledSource(indirectSource);
-        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge" })
+        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge", "LargeSplitForward", "LargeResultCopy", "WideAcross", "FrameScattered", "FieldGap", "FieldGapThrow", "SnapshotField", "TwoFields" })
         {
             var output = indirectTested.Method("Cases", mode);
             var emitted = skeleton.Method(cases[mode]);
@@ -1357,6 +1401,20 @@ internal static partial class LoweringChecks
             foreach (var local in output.Body.Variables) local.VariableType = MapType(local.VariableType);
             var comparison = CilComparison.Compare(indirectReference.Method("Cases", mode), output);
             checks.True(comparison.Status == CilComparisonStatus.Match, mode + " 形参写入、快照与传值隔离执行对照：" + comparison);
+            if (mode == "FieldGapThrow")
+            {
+                var saved = output.Body;
+                output.Body = new Mono.Cecil.Cil.MethodBody(output);
+                var il = output.Body.GetILProcessor();
+                il.Emit(Mono.Cecil.Cil.OpCodes.Call, indirectTested.Method("Cases", "NoiseThrow"));
+                il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0);
+                il.Emit(Mono.Cecil.Cil.OpCodes.Ldfld, indirectTested.Module.GetType("Box").Fields.Single(f => f.Name == "Data"));
+                il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+                var delayed = CilComparison.Compare(indirectReference.Method("Cases", mode), output);
+                checks.True(delayed.Status == CilComparisonStatus.Mismatch, "来源未改写仍不能把判空延迟到抛出调用之后：" + delayed);
+                Console.WriteLine($"整体读取的异常次序：原位={comparison.Status}/{comparison.CompletedCases}，延迟={delayed.Status}，种子={delayed.Seed}");
+                output.Body = saved;
+            }
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
@@ -1513,12 +1571,12 @@ internal static partial class LoweringChecks
         else builder.Blocks.Add(new(entry, [], [], Ret(sum)));
         return builder.Freeze();
     }
-    private sealed class AddressMap(MethodDef target, MethodDef wrong, MethodDef unrelated) : IBindingCodeMap
+    private sealed class AddressMap(MethodDef target, MethodDef wrong, MethodDef unrelated, MethodDef? noise = null) : IBindingCodeMap
     {
         public ImmutableArray<BindingEntry> At(ulong address) => address switch {
             10 => [new(MethodRef.Open(target), BindingEntryKind.Ordinary)],
             30 => [new(MethodRef.Open(wrong), BindingEntryKind.Ordinary)],
-            40 => [new(MethodRef.Open(unrelated), BindingEntryKind.Ordinary)], _ => [] };
+            40 => [new(MethodRef.Open(unrelated), BindingEntryKind.Ordinary)], 50 when noise is not null => [new(MethodRef.Open(noise), BindingEntryKind.Ordinary)], _ => [] };
     }
     private static void AddressChecks(Assertions checks, ProgramModel primitives)
     {

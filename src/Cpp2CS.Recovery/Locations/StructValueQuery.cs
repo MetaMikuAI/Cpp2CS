@@ -41,10 +41,10 @@ internal sealed class SourceRangeQuery(StateQueries state) : Query<SourceRange, 
                 if (key.Low < 0 || key.Low + key.Width > source.Term.Width) return Missing();
                 return c.Get(state.Resolve, t.Slice(source.Term, key.Low, key.Width));
             case StackSource stack:
-                if (key.Low % 8 != 0 || key.Width % 8 != 0 || key.Low + key.Width > stack.Length * 8) return Missing();
+                if (key.Low < 0 || key.Low % 8 != 0 || key.Width % 8 != 0 || key.Low + key.Width > stack.Length * 8) return Missing();
                 return c.Get(sources, new(stack with { Offset = stack.Offset + key.Low / 8, Length = key.Width / 8 }, key.Point));
             case IndirectSource indirect:
-                if (key.Low % 8 != 0 || key.Width % 8 != 0 || key.Low + key.Width > indirect.Length * 8) return Missing();
+                if (key.Low < 0 || key.Low % 8 != 0 || key.Width % 8 != 0 || key.Low + key.Width > indirect.Length * 8) return Missing();
                 var pointer = c.Get(sources, new(indirect.Address, key.Point));
                 if (!pointer.IsSuccess) return pointer;
                 var resolved = c.Get(state.Resolve, pointer.Value); if (!resolved.IsSuccess) return resolved;
@@ -79,14 +79,12 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     private readonly SourceRangeQuery ranges;
     internal SourceRangeQuery Ranges => ranges;
     private readonly BoundSourceQuery sourcePointers;
-    private readonly ManagedRangeQuery? memoryRanges;
     private readonly FlowQueries flow = new();
     public StructPartQuery Parts { get; }
     public StructValueQuery(ManagedTypes types, StateQueries state, ManagedLocationQuery? locations, IEnumerable<StructOrigin> origins)
     {
         this.types = types; this.state = state; this.locations = locations; this.origins = origins.ToImmutableArray();
         ranges = new(state); sourcePointers = new(state); Parts = new(this);
-        memoryRanges = locations is null ? null : new(locations, types);
     }
     public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key)
     {
@@ -123,19 +121,11 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
         foreach (var origin in origins.Where(o => o.Type.Equals(key.Type)))
         {
             if (origin.Point != key.Point && c.Get(flow.PointDominates, new(origin.Point, key.Point)) is not { IsSuccess: true, Value: true }) continue;
-            bool same = true;
-            foreach (var leaf in parts)
-            {
-                var source = c.Get(ranges, new(origin.Source, origin.Point, leaf.Projection.Bit, leaf.Projection.Width));
-                if (!source.IsSuccess) { same = false; break; }
-                if (source.Value == leaf.Value) continue;
-                var whole = WideMemory(leaf.Value) && types.StorageBits(structure) > 64
-                    ? c.Get(ranges, new(origin.Source, origin.Point, leaf.Projection.Bit, leaf.Projection.Width, types.StorageBits(structure)))
-                    : default;
-                if (!whole.IsSuccess || whole.Value != leaf.Value) { same = false; break; }
-            }
-            if (same) return Outcome<StructPlan>.Success(new(origin, null, null, parts));
+            var point = origin.Parameter is not null && origin.Source is IndirectSource ? key.Point : origin.Point;
+            if (!SameLeaves(c, origin.Source, point, parts)) continue;
+            return Outcome<StructPlan>.Success(new(origin with { Point = point }, null, null, parts));
         }
+        if (parts.All(leaf => leaf.Value.ConstantValue == 0)) return Outcome<StructPlan>.Success(new(null, null, null, parts));
         var copy = MemoryCopy(c, structure, parts, key.Point);
         if (!copy.IsSuccess || copy.Value is not null) return copy.IsSuccess
             ? Outcome<StructPlan>.Success(copy.Value!) : copy.Propagate<StructPlan>();
@@ -151,70 +141,89 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     }
     private static Outcome<StructPlan> Failure(string code, string text) => Outcome<StructPlan>.Failure(new("lowering.Struct." + code, text));
 
+    // 用现场的读取粒度向 ValueAt 取对应位段；相等仍是项身份相等。
+    private bool SameSource(QueryContext c, BoundSource source, Point point, int bit, Term value)
+    {
+        var ordinary = c.Get(ranges, new(source, point, bit, value.Width));
+        if (ordinary.IsSuccess && ordinary.Value == value) return true;
+        if (value.Kind == TermKind.Concat)
+        {
+            int offset = bit;
+            foreach (var part in value.Operands)
+            {
+                if (!SameSource(c, source, point, offset, part)) return false;
+                offset += part.Width;
+            }
+            return true;
+        }
+        var atom = value.Kind == TermKind.Slice ? value.Operands[0] : value;
+        int low = value.Kind == TermKind.Slice ? value.SliceLow!.Value : 0;
+        if (atom.Identity is not (MemoryAtom or MemoryMerge)) return false;
+        var unit = c.Get(ranges, new(source, point, bit - low, atom.Width));
+        if (!unit.IsSuccess && source is IndirectSource indirect && (bit - low) % 8 == 0)
+        {
+            var pointer = c.Get(sourcePointers, new(indirect.Address, point));
+            if (pointer.IsSuccess && c.Get(state.Resolve, pointer.Value) is { IsSuccess: true } resolved)
+            {
+                var address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), resolved.Value.Width, resolved.Value,
+                    c.Snapshot.Terms.Constant(new System.Numerics.BigInteger((bit - low) / 8) & ((System.Numerics.BigInteger.One << resolved.Value.Width) - 1), resolved.Value.Width));
+                var location = c.Get(state.Locations, new(address, atom.Width));
+                if (location.IsSuccess) unit = c.Get(state.ValueAt, new(point, location.Value));
+            }
+        }
+        if (!unit.IsSuccess) return false;
+        var slice = c.Get(state.Resolve, c.Snapshot.Terms.Slice(unit.Value, low, value.Width));
+        return slice.IsSuccess && slice.Value == value;
+    }
+    private bool SameLeaves(QueryContext c, BoundSource source, Point point, ImmutableArray<StructLeaf> leaves) =>
+        leaves.All(leaf => SameSource(c, source, point, leaf.Projection.Bit, leaf.Value));
+
     private Outcome<StructPlan?> MemoryCopy(QueryContext c, DefinitionRef type, ImmutableArray<StructLeaf> leaves, Point use)
     {
         Outcome<StructPlan?> None() => Outcome<StructPlan?>.Success(null);
         if (locations is null) return None();
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<StructPlan?>();
-        LocationView? whole = null;
-        var observations = new List<(Location Location, Term Atom, Point Point, MemoryRead Read)>();
-        foreach (var leaf in leaves)
+        var observations = new List<(Point Point, MemoryRead Read, Term Address, LocationView View)>();
+        // 从任一现场内存叶子发现候选；全部叶子的来源与时刻由 SameLeaves 一次核对。
+        void Observe(Term value, int bit)
         {
-            var term = leaf.Value; int low = 0;
-            if (term.Kind == TermKind.Slice) { low = term.SliceLow!.Value; term = term.Operands[0]; }
-            var memory = term.Identity switch { MemoryAtom atom => atom.Location, MemoryMerge merge => merge.Location, _ => null };
-            if (memory is null) return None();
-            // 读取身份来自快照索引；同值复用选择其中最早的原读取。
-            (Point Point, MemoryRead Read)? observation = null;
-            foreach (var read in index.Value.Reads.Values.OrderBy(r => r.Point.Before))
+            if (value.Kind == TermKind.Concat)
             {
-                var source = c.Get(state.Read, read.Read.Identity);
-                if (source.IsSuccess && source.Value == term
-                    && c.Get(flow.PointDominates, new(read.Point, use)) is { IsSuccess: true, Value: true })
-                { observation = read; break; }
+                foreach (var part in value.Operands) { Observe(part, bit); bit += part.Width; }
+                return;
             }
-            if (observation is not { } observed) return None();
-            var located = c.Get(locations, new(observed.Read.Address, observed.Read.Width));
-            if (!located.IsSuccess) return located.Propagate<StructPlan?>();
-            LocationView? candidate = null;
-            foreach (var view in located.Value.Views.Where(v => v.Type.Equals(type)))
+            foreach (var read in index.Value.Reads.Values)
             {
-                if (view.Offset * 8 + low != leaf.Projection.Bit || low + leaf.Projection.Width > term.Width) continue;
-                // 路径末端是同类型的结构体位置，字段范围仍由公共投影给出。
-                candidate = view with { Offset = 0, Width = types.StorageBits(type) }; break;
+                if (read.Read.Width < value.Width || c.Get(flow.PointDominates, new(read.Point, use)) is not { IsSuccess: true, Value: true }
+                    || c.Get(state.Read, read.Read.Identity) is not { IsSuccess: true } loaded) continue;
+                for (int low = 0; low <= read.Read.Width - value.Width; low += 8)
+                {
+                    if ((bit - low) % 8 != 0 || c.Snapshot.Terms.Slice(loaded.Value, low, value.Width) != value) continue;
+                    var address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), read.Read.Address.Width,
+                        read.Read.Address, c.Snapshot.Terms.Constant(new System.Numerics.BigInteger((low - bit) / 8) & ((System.Numerics.BigInteger.One << read.Read.Address.Width) - 1), read.Read.Address.Width));
+                    var located = c.Get(locations, new(address, types.StorageBits(type)));
+                    if (!located.IsSuccess) continue;
+                    foreach (var view in located.Value.Views.Where(v => v.Type.Equals(type) && v.Offset == 0))
+                        observations.Add((read.Point, read.Read, address, view));
+                }
             }
-            // 数组元素本身是结构体；定位查询的字段视图携带元素类型。
-            if (candidate is null && located.Value.Views.FirstOrDefault(v => v.Kind == ManagedLocationKind.ArrayElement && Equals(v.ElementType, type)) is { } element)
-            {
-                var projection = types.Project(type, element.Path);
-                if (projection is not null && projection.Bit + element.Offset * 8 + low == leaf.Projection.Bit)
-                    candidate = element with { Type = type, Path = [], Offset = 0, Width = types.StorageBits(type) };
-            }
-            if (candidate is null && observed.Read.Width > 64)
-            {
-                var range = c.Get(memoryRanges!, new(observed.Read.Address, observed.Read.Width));
-                if (!range.IsSuccess) return range.Propagate<StructPlan?>();
-                candidate = range.Value.Aggregates.FirstOrDefault(p => p.View!.Type.Equals(type)
-                    && p.AccessBit + leaf.Projection.Bit == low && low + leaf.Projection.Width <= p.AccessBit + p.Width)?.View;
-            }
-            if (candidate is null || whole is not null && !SameLocation(whole, candidate)) return None();
-            whole ??= candidate;
-            observations.Add((memory, term, observed.Point, observed.Read));
         }
-        if (observations.Select(o => o.Point.Block).Distinct().Count() != 1) return None();
-        var first = observations.MinBy(o => o.Point.Before);
-        var last = observations.Max(o => o.Point.Before);
-        var reads = observations.Select(o => o.Read.Identity).ToHashSet();
-        if (index.Value.Blocks[first.Point.Block].Statements.Skip(first.Point.Before).Take(last - first.Point.Before + 1)
-            .Any(s => s is Call or MemoryWrite || s is MemoryRead read && !reads.Contains(read.Identity))) return None();
-        foreach (var observation in observations)
+        foreach (var leaf in leaves) Observe(leaf.Value, leaf.Projection.Bit);
+        var candidates = observations.DistinctBy(o => (o.Point, o.Address)).ToArray();
+        foreach (var candidate in candidates)
         {
-            var value = c.Get(state.ValueAt, new(first.Point, observation.Location));
-            if (!value.IsSuccess) return value.Propagate<StructPlan?>();
-            if (value.Value != observation.Atom) return None();
+            var source = new IndirectSource(new TermSource(candidate.Address), types.Size(type));
+            if (candidate.View.Kind == ManagedLocationKind.FrameLocal && SameLeaves(c, source, use, leaves))
+                return Outcome<StructPlan?>.Success(new(null, candidate.View, null, leaves));
+            // 字段与元素的隐含检查留在最早的原读取；不跨事件或提前退出下沉。
+            if (candidates.Any(other => SameLocation(other.View, candidate.View) && other.Point != candidate.Point
+                && c.Get(flow.PointDominates, new(other.Point, candidate.Point)) is { IsSuccess: true, Value: true })) continue;
+            if (SameLeaves(c, source, candidate.Point, leaves))
+                return Outcome<StructPlan?>.Success(new(null, candidate.View, candidate.Read.Identity, leaves));
         }
-        return Outcome<StructPlan?>.Success(new(null, whole, first.Read.Identity, leaves));
+        return None();
     }
+
     private static bool SameLocation(LocationView a, LocationView b) => a.Kind == b.Kind && a.Root == b.Root && a.Index == b.Index
         && Equals(a.Type, b.Type) && a.Path.SequenceEqual(b.Path);
 
@@ -225,7 +234,8 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
             var desired = c.Get(q.state.Resolve, c.Snapshot.Terms.Slice(key.Term, key.Low, key.Width));
             if (!desired.IsSuccess) return desired.Propagate<StructPart?>();
             if (Incomplete(desired.Value)) return Outcome<StructPart?>.Success(null);
-            foreach (var origin in q.origins)
+            // 间接形参可变；标量投影没有使用点，必须沿原读取快照下降。
+            foreach (var origin in q.origins.Where(o => o.Parameter is null || o.Source is not IndirectSource))
             {
                 if (origin.Type is not DefinitionRef structure) continue;
                 foreach (var projection in q.types.Projections(structure))

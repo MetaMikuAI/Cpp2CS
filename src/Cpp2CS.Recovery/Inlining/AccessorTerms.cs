@@ -6,11 +6,12 @@ namespace Cpp2CS.Recovery.Inlining;
 
 /// <summary>模板词汇解释到调用方的项表；相等只由公共项规范化给出。</summary>
 internal sealed class AccessorTerms(TermTable terms, Func<int, Term?> parameter,
-    Func<FieldRef, Term?, Term?> read, Func<LocalValue, Term?>? local = null)
+    Func<FieldRef, Term?, Term?> read, Func<LocalValue, Term?>? local = null, Func<ManagedValue, Term?>? projection = null)
 {
     public Term? Read(ManagedValue value)
     {
         if (value.Width <= 0 || value.Width > 64) return null;
+        if (projection?.Invoke(value) is { } projected) return Resize(projected, value.Width, ManagedTypes.IsSigned(value.Type));
         if (value is LocalValue l) return local?.Invoke(l);
         if (value is ChoiceValue choice && Read(choice.Condition) is { } condition && Read(choice.True) is { } yes && Read(choice.False) is { } no)
             return terms.Apply(new CoreOperator(CoreOperation.Select), choice.Width, Truth(condition), Resize(yes, choice.Width), Resize(no, choice.Width));

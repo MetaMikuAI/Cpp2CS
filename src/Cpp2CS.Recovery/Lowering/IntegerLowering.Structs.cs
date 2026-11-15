@@ -7,6 +7,7 @@ using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Inlining;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -15,6 +16,7 @@ public sealed partial class IntegerLowering
     private readonly List<StructOrigin> structParameters = [];
     private readonly Dictionary<Term, ArgumentValue> indirectParameters = [];
     private StructValueQuery structs = null!;
+    private StructConstructorQuery? structConstructorValues;
     private StructMemoryPartQuery structMemoryParts = null!;
     private readonly Dictionary<(Term Source, LocationView View), LocalValue> structMemoryValues = [];
     private StructReturnStoreQuery? structReturnStores;
@@ -31,6 +33,7 @@ public sealed partial class IntegerLowering
                     && definition.Binding.Result.Source is { } source)
                     origins.Add(new(definition.Method.Concrete(definition.Method.Method.ReturnType), source, new(block.Identity, i + 1), Call: call.Identity));
         structs = new(types, state, locations, origins);
+        if (structConstructors is not null) structConstructorValues = new(types, structConstructors, state, origins);
         structMemoryParts = new(state, locations, types);
         if (types.Kind(method.Concrete(method.Method.ReturnType)) == TypeKind.Struct
             && binder.Return(new Return([]), signature, function.Terms, function.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), function.IncomingArgumentArea)
@@ -79,7 +82,7 @@ public sealed partial class IntegerLowering
             result.Why!.Message, result.Why, result.Why.Code.StartsWith("lowering.Struct.", StringComparison.Ordinal) ? result.Why.Code : "lowering.Struct.Source");
         var plan = result.Value;
         if (plan.Origin is { } origin) return StructOriginValue(origin);
-        if (plan.Location is { Kind: ManagedLocationKind.FrameLocal } frame && plan.Read is null) return AccessView(frame);
+        if (plan.Location is { } stable && plan.Read is null) return AccessView(stable);
         if (plan.Location is { } location && plan.Read is { } read)
         {
             var key = (read, location);
@@ -91,17 +94,37 @@ public sealed partial class IntegerLowering
             reads.Add(definition); structReadValues.Add(key, definition.Local);
             return definition.Local;
         }
+        if (plan.Leaves.Length > 0 && plan.Leaves.All(leaf => leaf.Value.ConstantValue == 0)) return new ComposedValue(type, []);
+        if (plan.Representation is not null && TokenHandle(type, plan) is { } token) return token;
+        if (failure is not null) return null;
+        if (type is DefinitionRef structure && structConstructorValues is not null
+            && plan.Leaves.Any(l => !CanWriteStructPath(l.Projection.Path)))
+        {
+            var constructor = context.Get(structConstructorValues, new(method, structure, plan.Leaves, point));
+            if (!constructor.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "结构体构造查询失败", constructor.Why, "inline.StructConstructor.Proof");
+            if (constructor.Value.Method is { } selected)
+            {
+                var arguments = new List<ManagedValue>();
+                foreach (var argument in constructor.Value.Arguments)
+                {
+                    var value = types.Kind(argument.Type) == TypeKind.Struct
+                        ? argument.Origin?.Call is not null ? StructOriginValue(argument.Origin) : StructValue(argument.Source, argument.Type, argument.Point)
+                        : context.Get(structs.Ranges, new(argument.Source, argument.Point, 0, types.StorageBits(argument.Type))) is { IsSuccess: true } scalar
+                            ? StructLeafValue(scalar.Value, argument.Type) : null;
+                    if (value is null) return null;
+                    arguments.Add(value);
+                }
+                return new NewObjectValue(selected, arguments, types.ValueWidth(type));
+            }
+            if (constructor.Value.Failure is { } why) return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
+        }
         if (source is IndirectSource indirect && BoundTerm(indirect.Address, point) is { } pointer
             && context.Get(state.Resolve, pointer) is { IsSuccess: true } resolved
             && context.Get(state.Locations, new(resolved.Value, 8)) is { IsSuccess: true, Value.Region: Region.Frame })
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧上结构体局部缺少整体来源：" + type, code: "lowering.Struct.FrameLocal");
         if (failure is not null) return null;
-        // 全部叶子均为零时就是 default；不需要逐个写入私有或只读字段。
-        if (plan.Leaves.Length > 0 && plan.Leaves.All(leaf => leaf.Value.ConstantValue == 0)) return new ComposedValue(type, []);
         if (plan.Representation is { } representation)
         {
-            if (TokenHandle(type, plan) is { } token) return token;
-            if (failure is not null) return null;
             if (!WritableStructPath(representation.Path)) return null;
             var field = types.Kind(representation.Type) == TypeKind.Struct ? StructValue(source, representation.Type, point)
                 : StructLeafValue(plan.Leaves[0].Value, representation.Type);
@@ -142,6 +165,10 @@ public sealed partial class IntegerLowering
         }
         return local;
     }
+    private bool CanWriteStructPath(IReadOnlyList<FieldRef> path) => path.All(field =>
+        ManagedAccess.Field(types, method, field, field.DeclaringType)
+        && ((field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0
+            || method.Method.Name == ".ctor" && method.Method.Owner == field.Field.Owner));
     private bool WritableStructPath(IReadOnlyList<FieldRef> path)
     {
         foreach (var field in path)

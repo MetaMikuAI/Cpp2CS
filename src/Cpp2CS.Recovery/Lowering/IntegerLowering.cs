@@ -46,6 +46,7 @@ public sealed partial class IntegerLowering
     private DispatchQuery? dispatch;
     private readonly AccessorQuery? accessors;
     private readonly ConstructorQuery? constructors;
+    private readonly StructConstructorTemplates? structConstructors;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
     private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
     private readonly Dictionary<Term, ManagedValue> values = [];
@@ -64,7 +65,7 @@ public sealed partial class IntegerLowering
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
         AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null,
-        bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null)
+        bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null, StructConstructorTemplates? structConstructors = null)
     {
         this.nestedExceptions = nestedExceptions;
         this.runtimeThrowStub = runtimeThrowStub;
@@ -72,6 +73,7 @@ public sealed partial class IntegerLowering
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
         this.constructors = constructors;
+        this.structConstructors = structConstructors;
         state = new(effects, image: image);
         boundSources = new(state);
         frameAddressUses = new(state);
@@ -340,6 +342,7 @@ public sealed partial class IntegerLowering
             if (!resolved.IsSuccess) { Fail<object>(LoweringFailureKind.Binding, "间接形参地址查询失败", resolved.Why); return; }
             var parameter = new ArgumentValue(index, type, 0);
             indirectParameters.Add(resolved.Value, parameter);
+            structParameters.Add(new(type, new IndirectSource(new TermSource(resolved.Value), indirect.Length), new(function.Entry, 0), Parameter: index));
             arguments[resolved.Value] = new AddressValue(parameter, types.PointerSize * 8);
         }
         else if (types.Kind(type) == TypeKind.Struct && bound.Source is { } aggregate)

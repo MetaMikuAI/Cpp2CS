@@ -16,7 +16,7 @@ namespace Cpp2CS.Pipeline;
 
 public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedBody>
 {
-    private sealed record Components(MethodBinder Binder, ManagedTypes Types, CallNamingQuery Calls, AccessorQuery? Accessors, ConstructorQuery? Constructors);
+    private sealed record Components(MethodBinder Binder, ManagedTypes Types, CallNamingQuery Calls, AccessorQuery? Accessors, ConstructorQuery? Constructors, StructConstructorTemplates? StructConstructors);
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<GlobalFacts, Lazy<Components>> components = [];
     private readonly bool enableAccessorInlining;
     private readonly bool enableConstructorInlining;
@@ -44,10 +44,12 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap),
             new RuntimeFunctionMap(facts.RuntimeFunctions), RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel), InternalCallAssembly.Get(facts).Facts);
         var types = new ManagedTypes(facts.Model, layouts, pointer);
+        var templateSource = constructorSource ?? new MethodTemplateSource(facts, templateFrontend, constructors: true);
         return new(binder, types, calls, enableAccessorInlining
             ? new AccessorQuery(types, new AccessorTemplateSource(facts, templateFrontend), observeAccessors) : null,
             enableConstructorInlining ? new ConstructorQuery(types,
-                new ConstructorTemplates(constructorSource ?? new MethodTemplateSource(facts, templateFrontend, constructors: true), types), observeConstructors) : null);
+                new ConstructorTemplates(templateSource, types), observeConstructors) : null,
+            enableConstructorInlining ? new StructConstructorTemplates(types, templateSource) : null);
     }
     public string Name => "恢复";
     public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context)
@@ -78,7 +80,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
             witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts),
-            runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check).Run(kind);
+            runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check, structConstructors: parts.StructConstructors).Run(kind);
         if (result.Failure is { } failure && transformed.Records.FirstOrDefault(r =>
             !r.Removed && r.Address == failure.Position && r.Why is not null) is { Why: { } why })
             return new Missing<ManagedBody>(new("结构", failure.Position, "类型判断", why with { Cause = failure.Reason }));
