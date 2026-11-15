@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Cpp2CS.Kernel.Queries;
+using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
@@ -60,6 +61,8 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     internal MethodBinder Binder => binder;
     internal SignatureBinding? EntrySignature => entry;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
+    private readonly FlowQueries referenceFlow = new();
+    private readonly PathFactQuery referencePaths = new(state);
     private readonly BoundSourceQuery entrySources = new(state);
     private ManagedLocationQuery? locations;
     internal SpecificationReadQuery SpecificationReads { get; } = new();
@@ -98,6 +101,54 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         if (value.Kind == TermKind.Slice && value.Operands[0].Identity is MemoryAtom bits)
             return Read(c, value, bits.Location with { Width=value.Width }, value.SliceLow!.Value);
         return result;
+    }
+
+    /// <summary>使用点已成立的转换提供较窄的引用视图；保留转换结果，供下降写出原有检查。</summary>
+    internal Outcome<(Term Value, DefinitionRef Type)?> RefinedReference(QueryContext c, Term source, DefinitionRef declared, Point point)
+    {
+        (Term Value, DefinitionRef Type)? answer = null;
+        foreach (var block in c.Snapshot.Blocks)
+        for (int i = 0; i < block.Statements.Length; i++)
+        {
+            if (block.Statements[i] is not Call call) continue;
+            var classified = c.Get(calls, call.Identity);
+            if (!classified.IsSuccess) return classified.Propagate<(Term, DefinitionRef)?>();
+            if (classified.Value.Operation?.Result is not { Kind: RuntimeValueKind.ManagedReference, ReferenceTypeInput: { } typeInput } result
+                || result.Relation.Kind is not (RuntimeResultRelationKind.Identity or RuntimeResultRelationKind.InputOrNull)
+                || result.Relation.Input is not { } input
+                || classified.Value.Inputs?.GetValueOrDefault(input)?.Source is not TermSource original
+                || classified.Value.Inputs?.GetValueOrDefault(typeInput)?.Source is not TermSource klass
+                || classified.Value.Result?.Source is not TermSource output || output.Term.Width != source.Width) continue;
+            var same = SameValue(c, original.Term, source);
+            if (!same.IsSuccess) return same.Propagate<(Term, DefinitionRef)?>();
+            if (!same.Value)
+            {
+                var originalName = c.Get(this, original.Term); var sourceName = c.Get(this, source);
+                if (originalName.IsSuccess && originalName.Value == NameLattice.Pending || sourceName.IsSuccess && sourceName.Value == NameLattice.Pending)
+                    return Outcome<(Term, DefinitionRef)?>.Failure(NameLattice.Pending.Why!);
+                continue;
+            }
+            var dominates = c.Get(referenceFlow.PointDominates, new(new(block.Identity, i + 1), point));
+            if (!dominates.IsSuccess) return dominates.Propagate<(Term, DefinitionRef)?>();
+            if (!dominates.Value) continue;
+            if (result.Relation.Kind == RuntimeResultRelationKind.InputOrNull)
+            {
+                var nonnull = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.NotEqual), 1, output.Term,
+                    c.Snapshot.Terms.Constant(0, output.Term.Width));
+                var fact = c.Get(referencePaths, new(point, nonnull));
+                if (!fact.IsSuccess) return fact.Propagate<(Term, DefinitionRef)?>();
+                if (fact.Value != PathTruth.True) continue;
+            }
+            var named = c.Get(this, klass.Term);
+            if (!named.IsSuccess) return named.Propagate<(Term, DefinitionRef)?>();
+            if (named.Value == NameLattice.Pending) return Outcome<(Term, DefinitionRef)?>.Failure(NameLattice.Pending.Why!);
+            if (named.Value.Name is not EntityName { Entity: ClassEntity { Type: DefinitionRef narrow } }
+                || narrow.Definition.IsInterface || narrow.Definition.IsValueType) continue;
+            var current = answer?.Type ?? declared;
+            if (narrow != current && ManagedTypes.CommonReferenceType([current, narrow], ReferenceRoot) == current)
+                answer = (output.Term, narrow);
+        }
+        return Outcome<(Term, DefinitionRef)?>.Success(answer);
     }
 
     private Outcome<NamedValue> Definition(QueryContext c, Term key)

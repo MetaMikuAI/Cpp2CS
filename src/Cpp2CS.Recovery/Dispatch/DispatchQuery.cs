@@ -94,6 +94,20 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
             if (type.Definition.IsInterface) return No(TargetShape.VtableSlot, "interface-type", "接收者静态类型为接口。");
             if (Open(type)) return No(TargetShape.VtableSlot, "open-type", "开放类型不解析虚调用。");
             var method = SlotMethod(type, slot);
+            Term? refinedReceiver = null;
+            if (method is null && receiver is not null)
+            {
+                var refined = names.RefinedReference(c, receiver, type, site.Point);
+                if (!refined.IsSuccess && refined.Why?.Code == "naming.pending") return Yes(Pending);
+                if (!refined.IsSuccess) return No(TargetShape.VtableSlot, "slot-method", "静态类型及基类没有唯一的槽方法：" + SlotWhy(type, slot), refined.Why);
+                if (refined.Value is { } narrow)
+                {
+                    if (Open(narrow.Type)) return No(TargetShape.VtableSlot, "open-type", "已证明的接收者窄类型仍是开放类型。");
+                    type = narrow.Type;
+                    refinedReceiver = narrow.Value;
+                    method = SlotMethod(type, slot);
+                }
+            }
             if (method is null) return No(TargetShape.VtableSlot, "slot-method", "静态类型及基类没有唯一的槽方法：" + SlotWhy(type, slot));
             if (method.Method.GenericParameters.Count != 0) return No(TargetShape.VtableSlot, "generic-method", "泛型虚方法不在本查询范围内。");
             var bound = binder.Call(call, method, BindingEntryKind.Ordinary, c.Snapshot.Terms);
@@ -104,7 +118,8 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
                 if (receiver is null || c.Get(locations.Types, receiver) is not { IsSuccess: true, Value.Type: var typed }
                     || typed != constraint) return No(TargetShape.VtableSlot, "generic-receiver", "调用接收者不是泛型上下文所指的 T 值。");
             }
-            if (Value(c, binding.This, site.Point) != receiver) return No(TargetShape.VtableSlot, "receiver-mismatch", "首参不是虚表所属对象。");
+            if (Value(c, binding.This, site.Point) is not { } boundReceiver || boundReceiver != receiver && boundReceiver != refinedReceiver)
+                return No(TargetShape.VtableSlot, "receiver-mismatch", "首参不是虚表所属对象或已证明的转换结果。");
             var info = Value(c, binding.MethodInformation, site.Point);
             Outcome<NamedValue>? infoName = info is null ? null : c.Get(names, info);
             if (infoName is { IsSuccess: true } && infoName.Value.Value == NameLattice.Pending) return Yes(Pending);
@@ -113,7 +128,7 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
                 mf.Field != spec.Layout.Field("VirtualInvokeData", "method").Path || mf.Owner != table ||
                 !infoRead.IsSuccess || names.SameValue(c, infoRead.Value.Root, pointerRead.Value.Root) is not { IsSuccess: true, Value: true })
                 return No(TargetShape.VtableSlot, "method-information", "隐藏方法信息与目标不是同一对象的同一槽。");
-            return Yes(new(DispatchKind.Virtual, TargetShape.VtableSlot, receiver, constraint ?? (TypeRef)type, slot, method, binding, pointer)
+            return Yes(new(DispatchKind.Virtual, TargetShape.VtableSlot, refinedReceiver ?? receiver, constraint ?? (TypeRef)type, slot, method, binding, pointer)
                 { Constraint = constraint });
         }
         var field = Field(c, target);
@@ -137,6 +152,11 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
                 return No(TargetShape.ManagedField, "delegate-this", "首参不是同一委托的 method_code。");
             if (info is null || Field(c, info) is not { } inf || !DelegateField(inf, "method") || Resolve(c, inf.Root) != receiver)
                 return No(TargetShape.ManagedField, "delegate-method", "隐藏方法信息不是同一委托的 method。");
+            var targetRead = c.Get(reads, target); var selfRead = c.Get(reads, self); var methodRead = c.Get(reads, info);
+            if (!targetRead.IsSuccess || !selfRead.IsSuccess || !methodRead.IsSuccess)
+                return No(TargetShape.ManagedField, "delegate-snapshot", "委托字段没有唯一完整的读取位置。");
+            if (DelegateSnapshot(c, site.Point, (target, targetRead.Value), (self, selfRead.Value), (info, methodRead.Value)) is { } why)
+                return Yes(new(DispatchKind.Unresolved, TargetShape.ManagedField, Why: why));
             return Yes(new(DispatchKind.Delegate, TargetShape.ManagedField, receiver, type, null, method, binding, FieldEvidence: field));
         }
         var shape = field is not null ? TargetShape.ManagedField : target.Identity switch
@@ -185,7 +205,8 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
     /// <summary>诊断用：槽方法没有解析出来的原因类别。</summary>
     private static string SlotWhy(DefinitionRef type, long slot)
     {
-        string table = (type.Definition.VTable.Count == 0 ? "类型没有虚表数据" : slot < 0 || slot >= type.Definition.VTable.Count ? "槽号超出虚表"
+        string capacity = $"静态类型 {type} 的虚表只有 {type.Definition.VTable.Count} 项，槽号 {slot}；";
+        string table = capacity + (type.Definition.VTable.Count == 0 ? "类型没有虚表数据" : slot < 0 || slot >= type.Definition.VTable.Count ? "槽号超出虚表"
             : type.Definition.VTable[(int)slot] is null ? "虚表该槽为空" : "虚表该槽有方法") + (type.Arguments.Count != 0 ? "，泛型实例" : "") + "。";
         for (DefinitionRef? current = type; current is not null; current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)
         {
@@ -232,14 +253,39 @@ public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery ca
     }
     private LocationView? Field(QueryContext c, Term term)
     {
-        if (term.Identity is not MemoryAtom m || m.Location.Offset is not { } offset) return null;
+        var read = c.Get(reads, term);
+        if (!read.IsSuccess || read.Value.Offset is not { } offset) return null;
+        var location = read.Value;
         var t = c.Snapshot.Terms;
-        var address = t.Apply(new CoreOperator(CoreOperation.Add), m.Location.Root.Width, m.Location.Root,
-            t.Constant(offset & ((System.Numerics.BigInteger.One << m.Location.Root.Width) - 1), m.Location.Root.Width));
-        var found = c.Get(locations, new(address, m.Location.Width));
+        var address = t.Apply(new CoreOperator(CoreOperation.Add), location.Root.Width, location.Root,
+            t.Constant(offset & ((System.Numerics.BigInteger.One << location.Root.Width) - 1), location.Root.Width));
+        var found = c.Get(locations, new(address, location.Width));
         if (!found.IsSuccess) return null;
         var fields = found.Value.Views.Where(v => v.Kind == ManagedLocationKind.InstanceField && v.Offset == 0 && v.Path.Length == 1 && v.Width == c.Snapshot.AddressWidth).ToArray();
         return fields.Length == 1 ? fields[0] : null;
+    }
+    private Reason? DelegateSnapshot(QueryContext c, Point point, params (Term Value, Location Location)[] fields)
+    {
+        var index = c.Get(state.Index, 0);
+        if (!index.IsSuccess) return new("dispatch.delegate-snapshot", "委托字段读取没有可用的状态索引。", index.Why);
+        var points = new HashSet<Point> { point };
+        var seen = new bool[fields.Length];
+        foreach (var (where, read) in index.Value.Reads.Values)
+        {
+            var value = Resolve(c, read.Result);
+            for (int i = 0; i < fields.Length; i++)
+                if (value == fields[i].Value) { seen[i] = true; points.Add(where); }
+        }
+        if (seen.Any(found => !found)) return new("dispatch.delegate-snapshot", "委托字段的读取没有完整的定义点凭据。");
+        // 三个字段在每次实际读取与调用点都具有相同内容；位置相同不替代版本证明。
+        foreach (var where in points)
+        foreach (var field in fields)
+        {
+            var content = c.Get(state.ValueAt, new(where, field.Location));
+            if (!content.IsSuccess || Resolve(c, content.Value) != field.Value)
+                return new("dispatch.delegate-snapshot", "委托字段在读取之间或调用前可能被改写，不能证明属于同一状态快照。", content.Why);
+        }
+        return null;
     }
     private static bool DelegateField(LocationView view, string name) => view.Path[0].Field is
         { Owner.Assembly: "mscorlib.dll", Owner.FullName: "System.Delegate" } field && field.Name == name;
