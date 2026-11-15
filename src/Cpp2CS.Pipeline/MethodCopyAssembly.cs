@@ -8,6 +8,7 @@ using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.MethodCopies;
@@ -34,7 +35,9 @@ public sealed class MethodCopySurvey
     public ImmutableDictionary<ulong, int> CandidateCounts => Counts.ToImmutableDictionary();
     public int CappedTargets => Counts.Count(p => p.Value > CandidateLimit);
     internal long Ticks, FrontendTicks, RecoveryTicks, CompareTicks;
-    internal int Targets, Registered;
+    internal int Targets, Registered, SameCode;
+    /// <summary>因代码与注册入口相同而得到身份的目标数。</summary>
+    public int SameCodeTargets => SameCode;
     public int LiftedTargets => Targets;
     public int LiftedRegistered => Registered;
     public double Seconds => (double)Interlocked.Read(ref Ticks) / Stopwatch.Frequency;
@@ -110,6 +113,10 @@ public static class MethodCopyAssembly
         private readonly ConcurrentDictionary<ulong, Lazy<Features>> features = [];
         private readonly ConcurrentDictionary<ulong, Resolution> resolved = [];
         private readonly ThreadLocal<Activity> activity = new(() => new());
+        // 代码相同的注册入口：按函数长度分组，组内的写法在第一次查询时计算。
+        private readonly Dictionary<ulong, CodeEntry[]> registeredByLength;
+        private readonly ConcurrentDictionary<ulong, Lazy<Dictionary<ulong, List<(CodeEntry Entry, ImmutableArray<ulong> Code)>>>> sameLength = [];
+        private readonly HashSet<(ulong Address, MethodRef Method)> recoverable;
         private readonly FrontendStage frontend = new([new FrontendProvider("arm64", RecoverySession.DefaultComponents)]);
         private readonly ConcurrentDictionary<int, List<IntegerRecoveryStage>> stages = [];
         private readonly MethodBinder binder;
@@ -120,6 +127,34 @@ public static class MethodCopyAssembly
             binder = new(new(new FieldLayouts(facts.Spec, facts.Image.PointerWidth, facts.Image.PointerWidth), facts.Image.PointerWidth * 8), new Aapcs64());
             metadata = new(facts);
             calls = references.Select(e => e.Address).Distinct().ToDictionary(a => a, DirectCalls);
+            recoverable = references.Select(e => (e.Address, e.Method!)).ToHashSet();
+            registeredByLength = facts.CodeMap.Entries.Where(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is { } method && EligibleCandidate(method.Method))
+                .DistinctBy(e => (e.Address, e.Method))
+                .Select(e => (Entry: e, Range: facts.FunctionsByStart[e.Address].SingleOrDefault()))
+                .Where(p => p.Range is { HasConsistentExtent: true })
+                .GroupBy(p => p.Range!.Length).ToDictionary(g => g.Key, g => g.Select(p => p.Entry).ToArray());
+        }
+        /// <summary>代码与目标逐条相同的注册入口；相同的代码就是身份凭据，不要求任一侧能恢复。</summary>
+        private CodeEntry[] SameCode(FunctionRange range)
+        {
+            if (!registeredByLength.ContainsKey(range.Length) || Arm64CodeIdentity.Create(facts.Image, range) is not { } code) return [];
+            var group = sameLength.GetOrAdd(range.Length, length => new(() =>
+            {
+                var index = new Dictionary<ulong, List<(CodeEntry, ImmutableArray<ulong>)>>();
+                var known = new Dictionary<ulong, ImmutableArray<ulong>?>();
+                foreach (var entry in registeredByLength[length])
+                {
+                    if (!known.TryGetValue(entry.Address, out var registered))
+                        known.Add(entry.Address, registered = Arm64CodeIdentity.Create(facts.Image, facts.FunctionsByStart[entry.Address].Single()));
+                    if (registered is not { } value) continue;
+                    ulong hash = Arm64CodeIdentity.Hash(value);
+                    if (!index.TryGetValue(hash, out var list)) index.Add(hash, list = []);
+                    list.Add((entry, value));
+                }
+                return index;
+            })).Value;
+            return group.TryGetValue(Arm64CodeIdentity.Hash(code), out var same)
+                ? same.Where(p => p.Code.AsSpan().SequenceEqual(code.AsSpan())).Select(p => p.Entry).ToArray() : [];
         }
         private ImmutableHashSet<object> DirectCalls(ulong address)
         {
@@ -258,12 +293,44 @@ public static class MethodCopyAssembly
         }
         private Resolution Find(ulong address)
         {
-            if (facts.FunctionsByStart[address].SingleOrDefault() is not { HasConsistentExtent: true })
+            if (facts.FunctionsByStart[address].SingleOrDefault() is not { HasConsistentExtent: true } extent)
             { return new([], new("method-copy.range", "副本目标没有一致的函数范围。")); }
-            if (references.Length == 0) return new([], new("method-copy.index", "没有允许生成内联副本的注册候选。"));
+            var candidates = ImmutableArray.CreateBuilder<MethodCopyCandidate>();
+            var attempts = ImmutableArray.CreateBuilder<MethodCopyAttempt>();
+            var mine = activity.Value!;
+            bool truncated = false;
+            // 同一段代码放在两个位置：先于任何恢复。候选规则不变；访问器候选仍要核对注册体是单字段访问器。
+            // 托管体同构的其他候选照常查找，两种凭据的候选合在一起由调用点消歧。
+            if (SameCode(extent) is { Length: > 0 and <= MethodCopySurvey.CandidateLimit } same)
+            {
+                foreach (var entry in same)
+                {
+                    int checkpoint = mine.RecursiveReads;
+                    try
+                    {
+                        if (!Aggressive(entry.Method!.Method) && (!recoverable.Contains((entry.Address, entry.Method))
+                            || Recover(entry, true) is not Completed<ManagedBody> registration || !IsInlineCandidate(registration.Value))) continue;
+                        attempts.Add(new(entry.Address, entry.Method, null, int.MaxValue));
+                        candidates.Add(new(entry.Address, new(entry.Method, entry.Kind == EntryKind.GenericMethod
+                            ? BindingEntryKind.SharedGeneric : BindingEntryKind.Ordinary, "method-copy")));
+                    }
+                    finally
+                    {
+                        if (mine.RecursiveReads != checkpoint) { truncated = true; mine.RecursiveReads = checkpoint; }
+                    }
+                }
+                if (candidates.Count != 0) Interlocked.Increment(ref result.SameCode);
+            }
+            var identical = candidates.Select(c => (c.RegisteredEntry, c.Entry.Method)).ToHashSet();
+            Resolution Finish(Reason failure)
+            {
+                result.Attempts[address] = attempts.ToImmutable();
+                return new(candidates.Distinct().ToImmutableArray(), candidates.Count == 0 ? failure : null);
+            }
+            if (references.Length == 0) return Finish(new("method-copy.index", "没有允许生成内联副本的注册候选。"));
             var target = new CodeEntry(address, references[0].Kind, references[0].Method, 0, null);
             if (Lift(target, false) is Missing<NativeFunction> missing)
-            { return new([], new("method-copy.copy-hole", "副本一侧不能完整恢复：" + missing.Hole.Reason.Message, missing.Hole.Reason)); }
+                return Finish(new("method-copy.copy-hole", "副本一侧不能完整恢复：" + missing.Hole.Reason.Message, missing.Hole.Reason));
             var shape = Describe(target, false);
             // 调用集合先分桶；其他特征只排序。预算只影响发现，不提供身份凭据。
             int distance = calls.Values.Select(c => Distance(c, shape.Calls)).DefaultIfEmpty(0).Min();
@@ -272,13 +339,10 @@ public static class MethodCopyAssembly
                 Score: Distance(p.Features.Metadata, shape.Metadata) * 4 + AbiDistance(p.Entry, shape) + Distance(p.Features.Inputs, shape.Inputs) + Distance(p.Features.Returns, shape.Returns)))
                 .OrderBy(p => p.Score).ThenBy(p => RecoverySession.Identity(p.Entry.Method!.Method), StringComparer.Ordinal).ThenBy(p => p.Entry.Address).ToArray();
             result.Counts[address] = ranked.Length;
-            var candidates = ImmutableArray.CreateBuilder<MethodCopyCandidate>();
-            var attempts = ImmutableArray.CreateBuilder<MethodCopyAttempt>();
             Reason? closest = null; int best = -1;
-            var mine = activity.Value!;
-            bool truncated = false;
             foreach (var (entry, _) in ranked.Take(MethodCopySurvey.CandidateLimit))
             {
+                if (identical.Contains((entry.Address, entry.Method))) continue;
                 int checkpoint = mine.RecursiveReads;
                 try
                 {
@@ -326,9 +390,7 @@ public static class MethodCopyAssembly
                 }
             }
             if (candidates.Count == 0 && truncated) mine.RecursiveReads++;
-            result.Attempts[address] = attempts.ToImmutable();
-            return new(candidates.Distinct().ToImmutableArray(), candidates.Count == 0
-                ? closest ?? new("method-copy.index", "索引没有可恢复的候选。") : null);
+            return Finish(closest ?? new("method-copy.index", "索引没有可恢复的候选。"));
         }
     }
     internal static void Write(GlobalFacts facts, string path)
@@ -337,7 +399,7 @@ public static class MethodCopyAssembly
         var result = value.Value;
         File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new
         {
-            result.Seconds, result.Timings, result.LiftedTargets, result.LiftedRegistered, MethodCopySurvey.CandidateLimit, result.CappedTargets,
+            result.Seconds, result.Timings, result.LiftedTargets, result.LiftedRegistered, result.SameCodeTargets, MethodCopySurvey.CandidateLimit, result.CappedTargets,
             CandidateCounts = result.CandidateCounts.OrderBy(p => p.Key).Select(p => new { Entry = p.Key, Count = p.Value }),
             Targets = result.Callers.Count, Callers = result.Callers.Values.SelectMany(x => x).Distinct().Count(),
             Copies = result.Facts.Entries.OrderBy(p => p.Key).Select(p => new { Entry = p.Key, Callers = result.Callers[p.Key],

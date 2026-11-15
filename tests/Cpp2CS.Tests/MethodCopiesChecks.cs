@@ -28,7 +28,63 @@ internal static class MethodCopiesChecks
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         IsomorphismChecks(checks);
         CandidateChecks(checks, spec, binder, catalog);
+        SameCodeChecks(checks, spec);
         return checks.Finish("托管方法副本");
+    }
+    /// <summary>代码相同的注册入口直接给出身份：相对寻址按绝对目标比较，不要求任一侧能提升或恢复。</summary>
+    private static void SameCodeChecks(Assertions checks, RuntimeSpec spec)
+    {
+        static uint Call(ulong at, ulong target) => 0x94000000 | (uint)((long)(target - at) / 4 & 0x03ffffff);
+        static uint Page(ulong at, ulong target) { long pages = (long)(target >> 12) - (long)(at >> 12); return 0x90000008 | (uint)(pages & 3) << 29 | (uint)(pages >> 2 & 0x7ffff) << 5; }
+        static uint ZeroBranch(ulong at, ulong target) => 0xb4000000 | (uint)((long)(target - at) / 4 & 0x7ffff) << 5;
+        // 每个函数：取页地址、调用、函数内的条件跳转、跳到函数外的条件跳转、不可解码的字、返回。
+        void Body(InputMemoryImage image, ulong at, ulong callee, ulong page, ulong outside)
+        {
+            image.Put(at, Page(at, page), 4); image.Put(at + 4, Call(at + 4, callee), 4); image.Put(at + 8, ZeroBranch(at + 8, at + 20), 4);
+            image.Put(at + 12, ZeroBranch(at + 12, outside), 4); image.Put(at + 16, 0xffffffff, 4); image.Put(at + 20, 0xd65f03c0, 4);
+        }
+        var functions = new ulong[] { 0x100, 0x200, 0x300, 0x400, 0x500 }.Select(start => new FunctionRange(start, 24, FunctionEvidence.UnwindTable)).ToArray();
+        var image = new InputMemoryImage { Executable = true, Functions = [.. functions, new(0x600, 8, FunctionEvidence.UnwindTable), new(0x900, 4, FunctionEvidence.UnwindTable)] };
+        Body(image, 0x100, 0x900, 0x40000, 0x900);   // 注册体
+        Body(image, 0x200, 0x900, 0x40000, 0x900);   // 同一段代码
+        Body(image, 0x300, 0x904, 0x40000, 0x900);   // 调用目标不同
+        Body(image, 0x400, 0x900, 0x41000, 0x900);   // 数据页不同
+        Body(image, 0x500, 0x900, 0x40000, 0x904);   // 函数外的跳转目标不同
+        image.Put(0x900, 0xd65f03c0, 4);
+        ImmutableArray<ulong> Code(int index) => Cpp2CS.Targets.Arm64.Arm64CodeIdentity.Create(image, functions[index])!.Value;
+        checks.True(Code(0).SequenceEqual(Code(1)), "位置不同、绝对目标相同的两段代码写法相同");
+        checks.True(!Code(0).SequenceEqual(Code(2)) && !Code(0).SequenceEqual(Code(3)) && !Code(0).SequenceEqual(Code(4)),
+            "调用目标、数据页、函数外跳转目标任一不同，写法不同");
+        var moved = new InputMemoryImage { Executable = true, Functions = image.Functions };
+        foreach (ulong start in new ulong[] { 0x100, 0x200 })
+            for (ulong offset = 0; offset < 24; offset += 4) moved.Put(start + offset, (uint)image.ReadUnsigned(0x100 + offset, 4), 4);
+        checks.True(!Cpp2CS.Targets.Arm64.Arm64CodeIdentity.Create(moved, functions[0])!.Value.SequenceEqual(Cpp2CS.Targets.Arm64.Arm64CodeIdentity.Create(moved, functions[1])!.Value),
+            "指令字相同但位置不同，相对寻址指向不同的目标，写法不同");
+        TypeDef Type(string name, string assembly = "test", bool value = false) => new()
+        { Index = 0, Assembly = assembly, Namespace = assembly == "mscorlib.dll" ? "System" : "", Name = name,
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = value, IsEnum = false };
+        var objectType = Type("Object", "mscorlib.dll"); var voidType = Type("Void", "mscorlib.dll", true); var owner = Type("Owner");
+        owner.BaseType = new DefinitionRef(objectType, []);
+        MethodRef Method(string name, bool inline) => new(new MethodDef
+        { Index = 0, Owner = owner, Name = name, Token = 0, Attributes = MethodAttributes.Public | MethodAttributes.Static,
+            ImplAttributes = inline ? MethodImplAttributes.AggressiveInlining : 0, Slot = -1, ReturnType = new DefinitionRef(voidType, []),
+            Parameters = name == "Plain" ? [new("a", new DefinitionRef(objectType, []), 0, null, false), new("b", new DefinitionRef(objectType, []), 0, null, false)] : [] }, [], []);
+        var inlined = Method("Inlined", true); var plain = Method("Plain", false); var caller = Method("Caller", false);
+        image.Put(0x600, Call(0x600, 0x200), 4); image.Put(0x604, 0xd65f03c0, 4);
+        var model = new ProgramModel { MetadataVersion = 0, Assemblies = [], Types = [objectType, voidType, owner],
+            Methods = [inlined.Method, plain.Method, caller.Method], Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [] };
+        MethodCopySurvey Survey(MethodRef registered)
+        {
+            var entries = new CodeEntry[] { new(0x100, EntryKind.Method, registered, 0, null), new(0x600, EntryKind.Method, caller, 1, null) };
+            var registrations = new Registrations { CodeRegistration = 0, MetadataRegistration = 0, Entries = entries,
+                ByAddress = entries.ToDictionary(e => e.Address, e => ImmutableArray.Create(e)), Rgctx = new Dictionary<(string, uint), ImmutableArray<RgctxEntry>>(),
+                MetadataUsageSlots = [], TypePointers = new Dictionary<ulong, int>(), InvokerOf = new Dictionary<MethodDef, int>(), UsageEntities = new Dictionary<ulong, Usage>() };
+            return new GlobalFacts(image, model, registrations, spec, "arm64").MethodCopies;
+        }
+        var survey = Survey(inlined);
+        checks.True(survey.Facts.At(0x200).Select(e => e.Method).SequenceEqual([inlined]) && survey.SameCodeTargets == 1,
+            "代码与强制内联方法的注册体相同的目标得到身份，两侧都不能提升也不妨碍");
+        checks.True(Survey(plain).Facts.At(0x200).IsEmpty, "注册方法不允许留下副本时，代码相同也不给身份");
     }
     private static void IsomorphismChecks(Assertions checks)
     {
