@@ -265,13 +265,15 @@ public sealed partial class AccessorQuery
                     && (other.Coverage.IsProperSupersetOf(m.Coverage) || other.Accesses.IsProperSupersetOf(m.Accesses)))).ToArray();
                 var closest = diagnostics.OrderByDescending(d => d.Anchor).ThenByDescending(d => d.Calls).ThenByDescending(d => d.Fields)
                     .ThenBy(d => d.Extra).ThenBy(d => d.Method.Token).FirstOrDefault();
+                // 首因只写原因的种类；候选的名字放在锚点之后，同一种原因不因候选不同而分成多行。
                 var closestReason = closest.Method is null ? "候选模板与完整项或写入组不匹配"
-                    : "最接近的候选 " + closest.Method + "：" + (closest.Reasons.Count == 0 ? "模板与完整项或区域不匹配" : string.Join("；", closest.Reasons.Order(StringComparer.Ordinal)));
+                    : closest.Reasons.Count == 0 ? "模板与完整项或区域不匹配" : string.Join("；", closest.Reasons.Order(StringComparer.Ordinal));
+                Reason? closestCause = closest.Method is null ? null : new("inline.candidate", "最接近的候选 " + closest.Method);
                 Reason? failure = best.Length > 1 ? new("inline.Accessor.Ambiguous", $"有 {best.Length} 个最大覆盖或不同实参代入，无法区分原调用")
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
                         : closestReason,
-                        inference ?? Anchor(anchor.Write, anchor.Field, candidates != 0 && incomplete.Count == candidates ? CandidateCause(incomplete) : null));
+                        inference ?? Anchor(anchor.Write, anchor.Field, candidates == 0 ? null : incomplete.Count == candidates ? CandidateCause(incomplete) : closestCause));
                 var access = new AccessorAccess(caller, anchor.Address, anchor.Field, anchor.ReceiverType,
                     anchor.Write ? AccessorKind.Setter : AccessorKind.Getter, failure is null);
                 if (best.Length == 1 && failure is null)
