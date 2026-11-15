@@ -14,7 +14,7 @@ using R = System.Reflection;
 
 namespace Cpp2CS.Tests;
 
-internal static class PipelineChecks
+internal static partial class PipelineChecks
 {
     public const string Command = "pipeline";
     public static int Run()
@@ -87,6 +87,7 @@ internal static class PipelineChecks
                 "生产门控拒绝未证明私有的清理与未定义的同步访问");
         }
         ReturnBitsChecks(checks, facts);
+        ParameterReadsChecks(checks, facts);
         return checks.Finish("Pipeline 快速检查");
     }
     private static void ReturnBitsChecks(Assertions checks, GlobalFacts basis)

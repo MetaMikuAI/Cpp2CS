@@ -206,6 +206,7 @@ public sealed partial class IntegerLowering
     {
         if (FrameClearStatement(call) is { } cleared) return cleared;
         MaterializeAccessorProgram();
+        if (failure is not null) return null;
         if (accessorCallCalls.TryGetValue(call.Identity, out var recovered)) return recovered;
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
         if (nullChecks.ContainsKey(call.Identity)) return LowerNullCheck(call, point);
@@ -223,14 +224,17 @@ public sealed partial class IntegerLowering
             var parameter = d.Method.Concrete(d.Method.Method.Parameters[i].Type);
             if (d.Registration is { } registration && parameter is not ByRefRef
                 && !CheckRegisteredArgument(d.Binding.Parameters[i], parameter, point, registration)) return null;
+            var pendingStart = pending.Count;
             var value = CallArgument(d.Binding.Parameters[i], parameter, point);
-            if (value is null) return null;
+            if (failure is not null) value = UnreadCallArgument(call, d, i, parameter, point, pendingStart);
+            if (value is null || failure is not null) return null;
             if (d.MathContraction) value = new ConversionValue(ConversionKind.FloatToFloat, value, parameter, 64);
             args.Add(value);
         }
         constructing = null;
         if (created is not null) return new ManagedAssignment(position, created.Local!, new NewObjectValue(d.Method, args, types.PointerSize * 8));
         TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
+        var receiverPendingStart = pending.Count;
         var receiver = d.Receiver is { } target
             ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element)
                 : d.Constraint is not null || Opaque(receiverType) ? Value(target) : ReferenceAt(target, receiverType, point)
@@ -246,8 +250,9 @@ public sealed partial class IntegerLowering
         }
         if (receiver is not null && Opaque(receiver.Type)) return GenericFailure<ManagedStatement>("Receiver", "类型参数值作为调用接收者缺少 T 类的分派凭据");
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
-        if (d.Binding.This is not null && receiver is null) return null;
-        bool virtualCall = d.Virtual || runtimeChecks is not null
+        if (failure is not null && d.Binding.This is not null) receiver = UnreadCallArgument(call, d, -1, receiverType, point, receiverPendingStart);
+        if (failure is not null || d.Binding.This is not null && receiver is null) return null;
+        bool virtualCall = d.Virtual || unreadCheckedCalls.Contains(call.Identity) || runtimeChecks is not null
             && context.Get(runtimeChecks.NullCheckedCalls, 0) is { IsSuccess: true } nullChecked && nullChecked.Value.Contains(call.Identity);
         var statement = new ManagedCall(position, new(d.Method, receiver, args, virtualCall), null);
         callStatements.Add(statement, d);

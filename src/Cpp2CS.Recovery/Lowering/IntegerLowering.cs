@@ -37,6 +37,7 @@ public sealed partial class IntegerLowering
     private readonly bool nestedExceptions;
     private readonly Func<ulong, Outcome<bool>>? runtimeThrowStub;
     private readonly IReturnValueBitsSource? returnValueBits;
+    private readonly IParameterReadsSource? parameterReads;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -68,11 +69,12 @@ public sealed partial class IntegerLowering
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
         AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null,
         bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null, StructConstructorTemplates? structConstructors = null,
-        IReturnValueBitsSource? returnValueBits = null)
+        IReturnValueBitsSource? returnValueBits = null, IParameterReadsSource? parameterReads = null)
     {
         this.nestedExceptions = nestedExceptions;
         this.runtimeThrowStub = runtimeThrowStub;
         this.returnValueBits = returnValueBits;
+        this.parameterReads = parameterReads;
         this.function = function; this.method = method; this.witness = witness; this.rgctx = rgctx; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
@@ -330,7 +332,7 @@ public sealed partial class IntegerLowering
                 return new(null, failure);
             }
         }
-        var body = ExceptionBody([.. blocks, .. extraBlocks]);
+        var body = AbsorbUnreadNullChecks(ExceptionBody([.. blocks, .. extraBlocks]));
         CheckGenericBody(body);
         CheckBody(body);
         if (failure is not null) return new(null, failure);

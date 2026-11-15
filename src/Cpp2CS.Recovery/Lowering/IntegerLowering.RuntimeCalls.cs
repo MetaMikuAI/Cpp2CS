@@ -49,8 +49,10 @@ public sealed partial class IntegerLowering
         if (input is null) return null;
         var value = Value(input);
         if (value is null) return null;
-        return new ManagedCheck(position, new ComparisonValue(ComparisonKind.Equal, value,
+        var statement = new ManagedCheck(position, new ComparisonValue(ComparisonKind.Equal, value,
             new ConstantValue(0, value.Type, value.Width), types.Boolean), definition.Exception);
+        explicitNullStatements.Add(statement, call.Identity);
+        return statement;
     }
 
     private MethodRef? RuntimeMethod(ClassifiedCall call, string input)

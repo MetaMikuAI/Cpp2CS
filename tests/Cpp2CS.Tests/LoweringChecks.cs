@@ -85,6 +85,7 @@ internal static partial class LoweringChecks
         FloatUseChecks(checks, program);
         MathImportChecks(checks);
         ResultBitsChecks(checks, program);
+        UnreadParameterChecks(checks, program);
         RuntimeEventExecutionChecks(checks, program);
         InternalCallWrapperChecks(checks, program);
         ExceptionChecks(checks, program);
