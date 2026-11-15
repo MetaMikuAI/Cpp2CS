@@ -164,7 +164,8 @@ internal static partial class LoweringChecks
         foreach (var local in method.Body.Variables) local.VariableType = MapType(local.VariableType);
         foreach (var instruction in method.Body.Instructions) instruction.Operand = instruction.Operand switch
         {
-            Mono.Cecil.MethodReference m => module.GetType(m.DeclaringType.FullName).Methods.Single(c => c.FullName == m.FullName),
+            Mono.Cecil.MethodReference m => module.ImportReference((module.GetType(m.DeclaringType.FullName)
+                ?? module.TypeSystem.Object.Resolve().Module.GetType(m.DeclaringType.FullName)).Methods.Single(c => c.FullName == m.FullName)),
             Mono.Cecil.FieldReference f => module.GetType(f.DeclaringType.FullName).Fields.Single(c => c.Name == f.Name),
             Mono.Cecil.TypeReference t => MapType(t), Mono.Cecil.ParameterDefinition p => method.Parameters[p.Index], _ => instruction.Operand,
         };

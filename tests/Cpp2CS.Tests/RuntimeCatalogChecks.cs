@@ -118,7 +118,7 @@ internal static class RuntimeCatalogChecks
             checks.True(original?.ManagedMethod == function.ManagedMethod && original?.Signature?.ReturnType is CFloat { Bits: 64 }
                 && function.Signature?.ReturnType is CFloat { Bits: 32 } && function.Signature.Parameters.All(p => p is CFloat { Bits: 32 }),
                 "收缩只引用已有双精度映射且原生输入输出均为单精度");
-            checks.True(function.Basis.Any(b => b.Contains("llvmorg-14.0.6", StringComparison.Ordinal)), "收缩登记保留可核对的 LLVM 版本与出处");
+            checks.True(function.Basis.Any(b => b.Contains("llvmorg-14.0.6", StringComparison.Ordinal) || b.Contains("语义假设", StringComparison.Ordinal)), "收缩登记保留 LLVM 版本出处或明确的语义假设");
         }
         Console.WriteLine($"运行时操作 {RuntimeOperations.All.Count}；目录 {string.Join('；', catalogs.Select(c => c.Triple + "=" + c.Functions.Length))}");
         return checks.Finish("运行时操作与目录");

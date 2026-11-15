@@ -49,7 +49,8 @@ public sealed partial class IntegerLowering
     private readonly ConstructorQuery? constructors;
     private readonly StructConstructorTemplates? structConstructors;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
-    private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
+    private readonly Dictionary<(Term Term, int Low, int Width, bool Floating), LocalValue> merges = [];
+    private readonly Dictionary<LocalId, (Term Term, int Low, int Width)> mergeSources = [];
     private readonly Dictionary<Term, ManagedValue> values = [];
     private readonly Dictionary<BlockIdentity, ulong> labels;
     private readonly Dictionary<MergeIdentity, (Block Block, Merge Merge)> definitions;
@@ -189,12 +190,15 @@ public sealed partial class IntegerLowering
                         continue;
                     }
                     if (interfaceLookups.Contains(call.Identity) || methodLookups.Contains(call.Identity) || arrayStoreChecks.ContainsKey(call.Identity)) continue;
-                    var statement = LowerCall(call, new(b.Identity, i));
-                    if (statement is null) return new(null, failure);
-                    statements.Add(statement);
+                    var lowered = mathCalls.ContainsKey(call.Identity) ? LowerMathCall(call, new(b.Identity, i))
+                        : LowerCall(call, new(b.Identity, i)) is { } single ? new[] { single } : null;
+                    if (lowered is null) return new(null, failure);
+                    statements.AddRange(lowered);
+                    var statement = lowered[^1];
                     if (FrameCallResult(call) is { } stored) statements.Add(stored);
                     if (failure is not null) return new(null, failure);
-                    if (exceptions is not null) exceptionCallStatements[statement] = call.Identity;
+                    if (exceptions is not null)
+                        foreach (var emitted in lowered) exceptionCallStatements[emitted] = call.Identity;
                     // 普通托管体的不返回证明沿生成链成立；运行时替换的实现不能证明参考托管体终止。
                     if (call.DoesNotReturn && statement is ManagedCall managedCall)
                     {
@@ -329,7 +333,11 @@ public sealed partial class IntegerLowering
         var body = ExceptionBody([.. blocks, .. extraBlocks]);
         CheckGenericBody(body);
         CheckBody(body);
-        return failure is null ? new(Materialize(body), null) : new(null, failure);
+        if (failure is not null) return new(null, failure);
+        body = Materialize(body);
+        if (FloatingTypeContract.Check(body, types) is { } mismatch)
+            Fail<object>(LoweringFailureKind.FloatingOrVector, mismatch.Message, mismatch.Cause, mismatch.Code);
+        return failure is null ? new(body, null) : new(null, failure);
     }
 
     private void BindParameter(int cIndex, int index, TypeRef type)
@@ -462,8 +470,8 @@ public sealed partial class IntegerLowering
     private LocalValue? MergeValue(Term term, int low = 0, int? requestedWidth = null, bool floating = false)
     {
         int width = requestedWidth ?? term.Width;
-        var key = (term, low, width);
-        // 首个使用约束决定存储视图；后续不同解释在使用处重解释，不改写已建局部。
+        var key = (term, low, width, floating);
+        // 整数与浮点使用各有存储视图；已有局部不改类型，各输入在对应视图中显式重解释。
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
         var staticType = StaticType(term);
@@ -471,6 +479,7 @@ public sealed partial class IntegerLowering
             return Fail<LocalValue>(LoweringFailureKind.UnsupportedType, "引用的部分位片没有托管值表示");
         local = new(new(nextLocal++), staticType is not null && (Opaque(staticType) || ReferenceType(staticType) || low == 0 && width == types.PointerSize * 8 && ManagedTypes.IsNativePointer(staticType)) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
+        mergeSources.Add(local.Id, (term, low, width));
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })
         {
             var d = definitions[id]; pending.Add((d.Block.Identity, local, d.Merge.Inputs, low, width));

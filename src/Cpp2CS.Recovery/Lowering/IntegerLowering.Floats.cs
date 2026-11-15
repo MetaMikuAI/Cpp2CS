@@ -14,11 +14,25 @@ public sealed partial class IntegerLowering
         : ManagedTypes.IsNativePointer(value.Type) ? NativeIntegerBits(value) : value;
     private ManagedValue FloatBits(ManagedValue value, int width)
     {
+        if (width is not (32 or 64) || value.Width != width || !IsFloat(value.Type) && !IntegerType(value.Type) && !ManagedTypes.IsNativePointer(value.Type))
+        {
+            Fail<object>(LoweringFailureKind.FloatingOrVector, "浮点位型来源的类型或位宽与使用位置不符：" + value.Type + "/" + value.Width + " → " + width, code: "lowering.Float.Bits");
+            return value;
+        }
+        if (IsFloat(value.Type) && !value.Type.Equals(FloatType(width)))
+        {
+            Fail<object>(LoweringFailureKind.FloatingOrVector, "同宽浮点使用点的类型不符", code: "lowering.Float.Type");
+            return value;
+        }
+        if (value is ChoiceValue choice)
+            return new ChoiceValue(choice.Condition, FloatBits(choice.True, width), FloatBits(choice.False, width), FloatType(width), width);
         if (IsFloat(value.Type)) return value;
+        if (value is LocalValue local && IntegerType(local.Type) && mergeSources.TryGetValue(local.Id, out var source) && source.Width == width)
+            return MergeValue(source.Term, source.Low, source.Width, floating: true) ?? value;
         if (ManagedTypes.IsNativePointer(value.Type)) value = IntegerBits(value);
         // 常量保存原始位型；不经整数到浮点的数值转换。
         if (value is ConstantValue c) return new ConstantValue(c.Bits, FloatType(width), width);
-        if (value is ConversionValue { Kind: ConversionKind.Bitcast } cast && IsFloat(cast.Operand.Type)) return cast.Operand;
+        if (value is ConversionValue { Kind: ConversionKind.Bitcast } cast && cast.Operand.Width == width && cast.Operand.Type.Equals(FloatType(width))) return cast.Operand;
         return new ConversionValue(ConversionKind.Bitcast, value, FloatType(width), width);
     }
 

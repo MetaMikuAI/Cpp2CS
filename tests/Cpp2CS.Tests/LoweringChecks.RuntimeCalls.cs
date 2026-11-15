@@ -255,7 +255,7 @@ internal static partial class LoweringChecks
                 checks.True(body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is ConversionValue { Kind: ConversionKind.FloatToFloat, Width: 32 }), "收缩结果显式截为单精度");
             }
         }
-        checks.True(catalog.FindImport("atan2f") is null && catalog.FindImport("unregisteredf") is null, "未取得收缩函数表依据的名字不登记");
+        checks.True(catalog.FindImport("atan2f")?.MathContraction == "atan2" && catalog.FindImport("unregisteredf") is null, "已登记的收缩按表接入，未登记名字保持未知");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 }

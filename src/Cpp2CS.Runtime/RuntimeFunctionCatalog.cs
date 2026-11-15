@@ -21,6 +21,7 @@ public sealed record RuntimeFunction(
 {
     public RuntimeManagedMethod? ManagedMethod { get; init; }
     public string? MathContraction { get; init; }
+    public string? MathRewrite { get; init; }
     public CSignature RequireSignature() => Signature ?? throw new NotSupportedException(
         $"运行时原型 {MangledName} 不可表示：{string.Join('；', Unsupported)}");
 }
@@ -107,10 +108,16 @@ public sealed class RuntimeFunctionCatalog
         var system = root.GetProperty("functions").EnumerateArray().Select(f => Parse(f, systemPath)).ToImmutableArray();
         if (system.Any(f => f.Recognition.Import != f.MangledName))
             throw new InvalidDataException($"{systemPath}：系统目录缺少精确导入名");
-        if (root.TryGetProperty("math_contractions", out var contractions))
+        var contractions = root.GetProperty("math_contractions").EnumerateArray().ToList();
+        if (root.TryGetProperty("math_assumptions", out var assumptions) && assumptions.GetProperty("enabled").GetBoolean())
+        {
+            system = system.AddRange(assumptions.GetProperty("functions").EnumerateArray().Select(f => Parse(f, systemPath)));
+            contractions.AddRange(assumptions.GetProperty("contractions").EnumerateArray());
+        }
+        if (contractions.Count != 0)
         {
             var mapped = new List<RuntimeFunction>();
-            foreach (var contraction in contractions.EnumerateArray())
+            foreach (var contraction in contractions)
             {
                 string original = Text(contraction, "double_import"), import = Text(contraction, "import");
                 var candidates = system.Where(f => f.Recognition.Import == original).ToArray();
@@ -208,9 +215,23 @@ public sealed class RuntimeFunctionCatalog
             static bool Matches(RuntimeManagedType type, CType native) => !type.ByRef && (type.Name, native) is
                 ("System.Single", CFloat { Bits: 32 }) or ("System.Double", CFloat { Bits: 64 });
         }
+        var rewrite = f.TryGetProperty("math_rewrite", out var rewriting) ? rewriting.GetString() : null;
+        bool FloatingSignature(int bits, int count) => signature is { } shape && shape.ReturnType is CFloat floatResult
+            && floatResult.Bits == bits && shape.Parameters.Length == count && shape.Parameters.All(p => p is CFloat input && input.Bits == bits);
+        bool validRewrite = rewrite switch
+        {
+            null => true,
+            "Remainder" => FloatingSignature(32, 2) && op.Name == "MathBinarySingle" || FloatingSignature(64, 2) && op.Name == "MathBinaryDouble",
+            "Power" => FloatingSignature(32, 2) && op.Name == "MathBinarySingle",
+            "Exp2" => FloatingSignature(32, 1) && op.Name == "MathUnarySingle",
+            "TruncateOutput" => signature is { Parameters: [CFloat { Bits: 64 }, CPointer { Bits: 64 }], ReturnType: CFloat { Bits: 64 } } && op.Name == "MathSplitDouble",
+            "SinCos" => signature is { Parameters: [CFloat { Bits: 32 }, CPointer { Bits: 64 }, CPointer { Bits: 64 }], ReturnType: CVoid } && op.Name == "MathSinCosSingle",
+            _ => false,
+        };
+        if (!validRewrite || rewrite is not null && managed is not null) throw new InvalidDataException($"{source}：{name} 的数学写法与原型、操作或托管身份冲突");
         return new(name, Text(f, "mangled_name"), Text(f, "declaration"), new(Text(location, "file"), location.GetProperty("line").GetInt32()),
             signature, unsupported, declaredNoReturn, op, args, result, types, Text(f, "result_type"), Strings(f, "basis"),
-            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null) { UsageConditions = conditions }) { ManagedMethod = managed };
+            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null) { UsageConditions = conditions }) { ManagedMethod = managed, MathRewrite = rewrite };
     }
     private static CType Type(JsonElement t) => Text(t, "kind") switch
     {

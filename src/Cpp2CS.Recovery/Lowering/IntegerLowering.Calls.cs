@@ -40,6 +40,7 @@ public sealed partial class IntegerLowering
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
         if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (c.Function?.MathRewrite is not null) { PrepareMathCall(call, c); return; }
         if (c.ManagedMethod is { } registered)
         { PrepareRegisteredCall(call, c, registered); return; }
         if (c.Operation?.Il.Name == "ThrowProfile") { PrepareProfileException(call, c); return; }

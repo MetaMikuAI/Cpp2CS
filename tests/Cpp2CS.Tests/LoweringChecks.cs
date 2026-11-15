@@ -82,6 +82,8 @@ internal static partial class LoweringChecks
         var checks = new Assertions();
         GenericChecks(checks, program);
         RuntimeCallChecks(checks, program);
+        FloatUseChecks(checks, program);
+        MathImportChecks(checks);
         ResultBitsChecks(checks, program);
         RuntimeEventExecutionChecks(checks, program);
         InternalCallWrapperChecks(checks, program);

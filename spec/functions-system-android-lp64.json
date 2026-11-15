@@ -1555,7 +1555,8 @@
       ],
       "result": "operation",
       "basis": [
-        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::FMod；libil2cpp.icalls: System.Math::FMod"
+        "vm-utils/icalls/mscorlib/System/Math.cpp: Math::FMod；libil2cpp.icalls: System.Math::FMod",
+        "ECMA-335 III.3.55 rem：浮点余数遵循 C fmod 的向零商定义"
       ],
       "recognition": {
         "symbol": true,
@@ -1564,21 +1565,7 @@
         "reference_shape": null,
         "import": "fmod"
       },
-      "managed_method": {
-        "declaring_type": "System.Math",
-        "name": "FMod",
-        "parameters": [
-          {
-            "name": "System.Double"
-          },
-          {
-            "name": "System.Double"
-          }
-        ],
-        "result": {
-          "name": "System.Double"
-        }
-      }
+      "math_rewrite": "Remainder"
     },
     {
       "name": "log10",
@@ -1985,13 +1972,120 @@
           "name": "System.Single"
         }
       }
+    },
+    {
+      "name": "fmodf",
+      "mangled_name": "fmodf",
+      "declaration": "float fmodf(float, float)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 32
+          },
+          {
+            "kind": "float",
+            "bits": 32
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 32
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x",
+        "y"
+      ],
+      "parameter_types": [
+        "float",
+        "float"
+      ],
+      "result_type": "float",
+      "unsupported": [],
+      "operation": "MathBinarySingle",
+      "arguments": [
+        "x",
+        "y"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp；C 数学函数原型；浮点库函数的托管写法和输出位置约束"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "fmodf"
+      },
+      "math_rewrite": "Remainder"
+    },
+    {
+      "name": "modf",
+      "mangled_name": "modf",
+      "declaration": "double modf(double, double*)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "float",
+            "bits": 64
+          },
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "float",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "x",
+        "integral"
+      ],
+      "parameter_types": [
+        "double",
+        "double*"
+      ],
+      "result_type": "double",
+      "unsupported": [],
+      "operation": "MathSplitDouble",
+      "arguments": [
+        "x",
+        "integral"
+      ],
+      "result": "operation",
+      "basis": [
+        "vm-utils/icalls/mscorlib/System/Math.cpp；C 数学函数原型；浮点库函数的托管写法和输出位置约束"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "modf"
+      },
+      "math_rewrite": "TruncateOutput"
     }
   ],
   "unmapped_math_imports": [
     {
       "names": [
-        "pow",
-        "powf"
+        "pow"
       ],
       "reason": "Math::Pow / MathF::Pow 对 NaN、无穷和负零另有处理；无输入域证明时不与 libm 等同",
       "basis": "vm-utils/icalls/mscorlib/System/Math.cpp / MathF.cpp: Pow"
@@ -2006,7 +2100,6 @@
     },
     {
       "names": [
-        "modf",
         "modff"
       ],
       "reason": "输出指针须恢复为可写位置；裁剪核心库可能没有 ModF 方法，尚未建立输出位置改写",
@@ -2014,26 +2107,22 @@
     },
     {
       "names": [
-        "sincos",
-        "sincosf"
+        "sincos"
       ],
       "reason": "一次调用写两个结果；需要相邻 Sin / Cos 的联合逆变换，单方法调用下降不能表达",
       "basis": "编译器合并的多结果调用"
     },
     {
       "names": [
-        "exp2",
-        "exp2f"
+        "exp2"
       ],
       "reason": "匹配核心库没有以二为底的直接方法；不能替换为特殊值定义不同的 Pow",
       "basis": "libil2cpp.icalls: System.Math / System.MathF"
     },
     {
       "names": [
-        "atan2f",
         "ceilf",
-        "floorf",
-        "fmodf"
+        "floorf"
       ],
       "reason": "所核对 LLVM 14.0.6 SimplifyLibCalls 的收缩调用表未覆盖；ceil/floor 先化为内建操作，需要另核对相应变换",
       "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeFloatingPointLibCall"
@@ -2152,5 +2241,180 @@
       "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
       "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
     }
-  ]
+  ],
+  "math_assumptions": {
+    "enabled": true,
+    "contractions": [
+      {
+        "import": "atan2f",
+        "double_import": "atan2",
+        "basis": "float 库调用的语义假设：扩 double 后调用 Math::Atan2，再截 float；不保证逐位等同 C float 实现",
+        "source": "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Atan2",
+        "preconditions": "接受 C float 实现与 double 实现截断结果可能差最后一位的假设"
+      }
+    ],
+    "functions": [
+      {
+        "name": "powf",
+        "mangled_name": "powf",
+        "declaration": "float powf(float, float)",
+        "declaration_source": {
+          "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+          "line": 0
+        },
+        "declared_noreturn": false,
+        "prototype": {
+          "parameters": [
+            {
+              "kind": "float",
+              "bits": 32
+            },
+            {
+              "kind": "float",
+              "bits": 32
+            }
+          ],
+          "result": {
+            "kind": "float",
+            "bits": 32
+          },
+          "variadic": false
+        },
+        "parameter_names": [
+          "x",
+          "y"
+        ],
+        "parameter_types": [
+          "float",
+          "float"
+        ],
+        "result_type": "float",
+        "unsupported": [],
+        "operation": "MathBinarySingle",
+        "arguments": [
+          "x",
+          "y"
+        ],
+        "result": "operation",
+        "basis": [
+          "vm-utils/icalls/mscorlib/System/Math.cpp；C 数学函数原型；浮点库函数的托管写法和输出位置约束"
+        ],
+        "recognition": {
+          "symbol": true,
+          "export": null,
+          "call_graph": null,
+          "reference_shape": null,
+          "import": "powf"
+        },
+        "math_rewrite": "Power"
+      },
+      {
+        "name": "exp2f",
+        "mangled_name": "exp2f",
+        "declaration": "float exp2f(float)",
+        "declaration_source": {
+          "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+          "line": 0
+        },
+        "declared_noreturn": false,
+        "prototype": {
+          "parameters": [
+            {
+              "kind": "float",
+              "bits": 32
+            }
+          ],
+          "result": {
+            "kind": "float",
+            "bits": 32
+          },
+          "variadic": false
+        },
+        "parameter_names": [
+          "x"
+        ],
+        "parameter_types": [
+          "float"
+        ],
+        "result_type": "float",
+        "unsupported": [],
+        "operation": "MathUnarySingle",
+        "arguments": [
+          "x"
+        ],
+        "result": "operation",
+        "basis": [
+          "vm-utils/icalls/mscorlib/System/Math.cpp；C 数学函数原型；浮点库函数的托管写法和输出位置约束"
+        ],
+        "recognition": {
+          "symbol": true,
+          "export": null,
+          "call_graph": null,
+          "reference_shape": null,
+          "import": "exp2f"
+        },
+        "math_rewrite": "Exp2"
+      },
+      {
+        "name": "sincosf",
+        "mangled_name": "sincosf",
+        "declaration": "void sincosf(float, float*, float*)",
+        "declaration_source": {
+          "file": "vm-utils/icalls/mscorlib/System/Math.cpp",
+          "line": 0
+        },
+        "declared_noreturn": false,
+        "prototype": {
+          "parameters": [
+            {
+              "kind": "float",
+              "bits": 32
+            },
+            {
+              "kind": "pointer",
+              "bits": 64
+            },
+            {
+              "kind": "pointer",
+              "bits": 64
+            }
+          ],
+          "result": {
+            "kind": "void"
+          },
+          "variadic": false
+        },
+        "parameter_names": [
+          "x",
+          "sin",
+          "cos"
+        ],
+        "parameter_types": [
+          "float",
+          "float*",
+          "float*"
+        ],
+        "result_type": "void",
+        "unsupported": [],
+        "operation": "MathSinCosSingle",
+        "arguments": [
+          "x",
+          "sin",
+          "cos"
+        ],
+        "result": "void",
+        "basis": [
+          "vm-utils/icalls/mscorlib/System/Math.cpp；C 数学函数原型；浮点库函数的托管写法和输出位置约束"
+        ],
+        "recognition": {
+          "symbol": true,
+          "export": null,
+          "call_graph": null,
+          "reference_shape": null,
+          "import": "sincosf"
+        },
+        "math_rewrite": "SinCos"
+      }
+    ]
+  }
 }

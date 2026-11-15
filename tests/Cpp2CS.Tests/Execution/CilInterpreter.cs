@@ -650,8 +650,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     private StackValue Divide(StackValue right, StackValue left, bool unsigned, bool remainder = false)
     {
-        if (left.Kind == StackKind.F && right.Kind == StackKind.F && !unsigned && !remainder)
-            return Arithmetic(right, left, (_, _) => throw new InvalidOperationException(), (a, b) => a / b);
+        if (left.Kind == StackKind.F && right.Kind == StackKind.F && !unsigned)
+            return Arithmetic(right, left, (_, _) => throw new InvalidOperationException(), (a, b) => remainder ? a % b : a / b);
         if (left.Kind != right.Kind || left.Kind is not (StackKind.I4 or StackKind.I8)) throw new Unsupported("div 操作数类型");
         var result = CilIntegerDivision.Evaluate(left, right, unsigned, remainder);
         return result.Value ?? throw new CilThrow(Types.Corlib(result.Exception!));

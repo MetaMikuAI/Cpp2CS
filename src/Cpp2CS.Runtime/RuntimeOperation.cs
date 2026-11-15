@@ -114,6 +114,17 @@ public static class RuntimeOperations
                 "CallManagedMethod", "按函数目录中的精确核心库方法身份调用；浮点值按 C 原型绑定",
                 "vm-utils/icalls/mscorlib/System/Math.cpp；逐项函数对应与排除依据保存在系统导入目录",
                 preconditions: "匹配核心库与 libm 实现；目录只登记无额外特殊值处理的对应", managedCode: "无");
+        yield return Op("MathSplitDouble", [V("x", RuntimeValueKind.Floating), new("integral", RuntimeInputUse.Location, RuntimeValueKind.NativePointer)],
+            RuntimeValueKind.Floating, RuntimeWidth.Int64, RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable, "返回小数部分并写整数部分",
+            "MathOutputs", "只用整数输出时写成 Math.Truncate；小数返回值被使用时保留洞",
+            "vm-utils/icalls/mscorlib/System/Math.cpp: Math::ModF；modf 的 C 库契约",
+            pointers: [new("integral", RuntimeAccess.Write, RuntimeMemoryDomain.ManagedHeap, new(RuntimeExtentKind.FixedBytes, "double 输出", Bytes: 8), new(RuntimeConditionKind.NormalReturn, "正常返回"))], managedCode: "无");
+        yield return Op("MathSinCosSingle", [V("x", RuntimeValueKind.Floating), new("sin", RuntimeInputUse.Location, RuntimeValueKind.NativePointer), new("cos", RuntimeInputUse.Location, RuntimeValueKind.NativePointer)],
+            RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable, "向两个输出写入正弦与余弦",
+            "MathOutputs", "按集中登记的收缩假设调用 Math.Sin 与 Math.Cos，再截为 float",
+            "vm-utils/icalls/mscorlib/System/Math.cpp: Math::Sin / Math::Cos；sincosf 的 C 库契约",
+            pointers: [new("sin", RuntimeAccess.Write, RuntimeMemoryDomain.ManagedHeap, new(RuntimeExtentKind.FixedBytes, "float 输出", Bytes: 4), new(RuntimeConditionKind.NormalReturn, "正常返回")),
+                new("cos", RuntimeAccess.Write, RuntimeMemoryDomain.ManagedHeap, new(RuntimeExtentKind.FixedBytes, "float 输出", Bytes: 4), new(RuntimeConditionKind.NormalReturn, "正常返回"))], managedCode: "无");
         foreach (bool compare in new[] { true, false })
         {
             var inputs = new List<RuntimeInput> { new("location", RuntimeInputUse.Location, RuntimeValueKind.ManagedReference), V("value", RuntimeValueKind.ManagedReference) };
