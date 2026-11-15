@@ -42,6 +42,8 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
     public TypeRef? ReferenceType { get; init; }
     /// <summary>所有来源共有的同值凭据；集合交允许撤销内层凭据而保留外层读取身份。</summary>
     public ImmutableArray<ValueName> EquivalentNames { get; init; } = [];
+    /// <summary>补充名：定义没有给出名字时，由使用处的种类或所在位置补上的名字。证据弱于定义名，格上排在一切定义名之后、未命名之前。</summary>
+    public bool Supplement { get; init; }
     /// <summary>可读取的同值视图；优先保留实体常量，不改变合流自身的定义身份。</summary>
     public ValueName? EquivalentName => EquivalentNames.FirstOrDefault(n => n is EntityName) ?? EquivalentNames.FirstOrDefault();
     public TypeRef? StaticType => ReferenceType ?? (Name switch
@@ -91,21 +93,25 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     {
         var result=Definition(c,key);
         if (!result.IsSuccess || result.Value.Kind!=ValueKind.Unnamed) return result;
+        // 定义还在待定时不取补充名：依赖有了结果后定义名会出现，名字只能沿“待定 → 定义名 → 补充名 → 未命名”前进。
+        if (result.Value == NameLattice.Pending) return result;
         var resolved=c.Get(state.Resolve,key); if (!resolved.IsSuccess) return result;
         // 合流和选择的种类由各来源证明；使用处的种类视图不能覆盖失败的定义。
         if (resolved.Value.Identity is ResultAtom { Definition: MergeIdentity }
             || resolved.Value.Operator is CoreOperator { Operation: CoreOperation.Select }) return result;
         var inputs=c.Get(inputKinds,0); if (!inputs.IsSuccess) return inputs.Propagate<NamedValue>();
         if (inputs.Value.TryGetValue(resolved.Value,out var kind))
-            return Yes(RuntimeValue(kind,new RuntimeInputName(resolved.Value,kind)));
+            return Supplemented(Yes(RuntimeValue(kind,new RuntimeInputName(resolved.Value,kind))));
         // 托管读取只补充此前所有命名来源均未命名的值。
         var value=resolved.Value;
-        if (value.Identity is MemoryAtom memory) return Read(c, value, memory.Location);
-        if (value.Identity is EdgeReadAtom projected) return Read(c, value, projected.Location);
+        if (value.Identity is MemoryAtom memory) return Supplemented(Read(c, value, memory.Location));
+        if (value.Identity is EdgeReadAtom projected) return Supplemented(Read(c, value, projected.Location));
         if (value.Kind == TermKind.Slice && value.Operands[0].Identity is MemoryAtom bits)
-            return Read(c, value, bits.Location with { Width=value.Width }, value.SliceLow!.Value);
+            return Supplemented(Read(c, value, bits.Location with { Width=value.Width }, value.SliceLow!.Value));
         return result;
     }
+    private static Outcome<NamedValue> Supplemented(Outcome<NamedValue> name) =>
+        name.IsSuccess && name.Value.Kind != ValueKind.Unnamed ? Yes(name.Value with { Supplement = true }) : name;
 
     /// <summary>使用点已成立的转换提供较窄的引用视图；保留转换结果，供下降写出原有检查。</summary>
     internal Outcome<(Term Value, DefinitionRef Type)?> RefinedReference(QueryContext c, Term source, DefinitionRef declared, Point point)
@@ -566,6 +572,8 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
     {
         if (a == Pending) return b;
         if (b == Pending || a == b) return a;
+        // 补充名高于定义名：定义名失效后才轮到补充名。
+        if (a.Supplement != b.Supplement && a.Kind != ValueKind.Unnamed && b.Kind != ValueKind.Unnamed) return a.Supplement ? a : b;
         if (Common(a, b) is not { } type) return Conflict;
         var name = a.Name switch
         {
@@ -575,9 +583,11 @@ internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedVa
             _ => a.Name,
         };
         return new(ValueKind.ManagedReference, name, "Il2CppObject") { ReferenceType = type,
-            EquivalentNames = CommonNames([a.EquivalentNames, b.EquivalentNames]) };
+            EquivalentNames = CommonNames([a.EquivalentNames, b.EquivalentNames]), Supplement = a.Supplement };
     }
     public bool LessOrEqual(NamedValue a, NamedValue b) => a == Pending || a == b
-        || b.Kind == ValueKind.Unnamed && b != Pending || Common(a, b) is { } type && type == b.StaticType
+        || b.Kind == ValueKind.Unnamed && b != Pending
+        || b.Supplement && !a.Supplement && a.Kind != ValueKind.Unnamed
+        || a.Supplement == b.Supplement && Common(a, b) is { } type && type == b.StaticType
             && b.EquivalentNames.All(name => a.EquivalentNames.Any(n => Definition(n, name)));
 }

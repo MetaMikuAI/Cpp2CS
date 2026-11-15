@@ -78,8 +78,8 @@ public sealed class FixedPointGroup
     public ImmutableArray<FixedPointMember> Members { get; }
 }
 
-public sealed class QueryCycleException(ImmutableArray<QueryAddress> cycle)
-    : InvalidOperationException("未声明的查询环：" + string.Join(" -> ", cycle.Select(a => $"{a.Query.GetType().Name}[{a.Key}]")))
+public sealed class QueryCycleException(ImmutableArray<QueryAddress> cycle, string? note = null)
+    : InvalidOperationException("未声明的查询环" + (note is null ? "" : "（" + note + "）") + "：" + string.Join(" -> ", cycle.Select(a => $"{a.Query.GetType().Name}[{a.Key}]")))
 {
     public ImmutableArray<QueryAddress> Cycle { get; } = cycle;
 }

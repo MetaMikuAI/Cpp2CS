@@ -7,6 +7,7 @@ using Cpp2CS.Kernel.State;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Recovery.Dispatch;
 using Cpp2CS.Recovery.Locations;
+using Cpp2CS.Recovery.Checks;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -25,11 +26,22 @@ public sealed partial class IntegerLowering
     private ExceptionView? ordinaryView;
     private readonly Dictionary<BlockIdentity, ExceptionView> exceptionViews = [];
 
+    // 命名、位置与分派查询按视图成套更换，上下文的不动点组只登记当前这一套；握着这些实例的查询按视图各存一份，换视图时存回、取出。
+    private readonly Dictionary<ValueNamingQuery, (SharedCallQuery? Shared, UncheckedUnboxQuery? Unbox, CheckQueries? Checks, ManagedRangeQuery? Ranges)> viewQueries
+        = new(ReferenceEqualityComparer.Instance);
+    private void SwitchViewQueries(ValueNamingQuery? from, ValueNamingQuery? to)
+    {
+        if (ReferenceEquals(from, to)) return;
+        if (from is not null) viewQueries[from] = (sharedCalls, uncheckedUnboxEvidence, runtimeChecks, ranges);
+        (sharedCalls, uncheckedUnboxEvidence, runtimeChecks, ranges) = to is not null && viewQueries.TryGetValue(to, out var saved) ? saved : default;
+    }
+
     private void SelectExceptionView(BlockIdentity block)
     {
         currentNativeBlock = block;
         if (exceptions is null || ordinaryView is null) return;
         var view = exceptionViews.GetValueOrDefault(block) ?? ordinaryView;
+        SwitchViewQueries(valueNames, view.Names);
         context = view.Context; valueNames = view.Names; locations = view.Locations; dispatch = view.Dispatch;
         values.Clear();
     }

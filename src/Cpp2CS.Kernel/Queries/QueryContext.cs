@@ -244,7 +244,8 @@ public sealed class QueryContext
     private void ThrowCycle(Entry entry)
     {
         var start = entry.Active >= 0 ? entry.Active : stack.FindIndex(e => e.Session == entry.Session);
-        throw new QueryCycleException(stack.Skip(Math.Max(0, start)).Select(e => e.Address).Append(entry.Address).ToImmutableArray());
+        throw new QueryCycleException(stack.Skip(Math.Max(0, start)).Select(e => e.Address).Append(entry.Address).ToImmutableArray(),
+            entry.Session is null ? "查询不在本上下文的不动点组里" : "环上有组外或另一次求解的查询");
     }
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Outcome<V> OnFreshStack<K, V>(Query<K, V> query, K key) where K : notnull
