@@ -348,11 +348,11 @@ public sealed class RecoverySession
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // 程序错误不是恢复的结论：该方法记为未写出并在汇总里单列，命令以失败退出；一次全量不因单个方法作废。
-            // 抛出点常在公共的改写或检查里；另取其外最近的两帧，指明是哪一步变换。
+            // 抛出点常在公共的改写、检查或查询框架里；另取其外最近的十二帧，指明是哪一步变换、哪个查询。
             var frames = error.StackTrace?.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("at Cpp2CS", StringComparison.Ordinal))
                 .Select(l => l.Split(" in ")[0]).ToArray() ?? [];
-            var where = string.Join(" ← ", frames.Take(1).Concat(frames.Skip(1).Where(l => !l.Contains("SnapshotRewrite.", StringComparison.Ordinal))
-                .Take(error is TimeoutException ? 12 : 2)));
+            var where = string.Join(" ← ", frames.Take(1).Concat(frames.Skip(1).Where(l => !l.Contains("SnapshotRewrite.", StringComparison.Ordinal)
+                && !l.Contains("Kernel.Queries.QueryContext.", StringComparison.Ordinal)).Take(12)));
             var text = $"{Identity(context.Method)}，层 {stage.Name}：{error.GetType().Name}：{error.Message}；{where}";
             programErrors.Add(text);
             Console.Error.WriteLine("程序错误：" + text);

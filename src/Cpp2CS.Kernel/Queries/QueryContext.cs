@@ -57,7 +57,7 @@ public sealed class QueryContext
             // 组内的失败是格的顶：从近似值变成失败算一次变化，读过近似值的键要重算。
             if (lattice is null || !next.IsSuccess) { Result = next; return lattice is not null; }
             if (hasCandidate && !lattice.LessOrEqual(previousCandidate.Value, next.Value))
-                throw new InvalidOperationException("不动点查询的计算结果不单调。");
+                throw new InvalidOperationException($"不动点查询的计算结果不单调：{query.GetType().Name}，{previousCandidate.Value} → {next.Value}。");
             var old = Result.Value;
             var joined = lattice.Join(old, next.Value);
             if (!lattice.LessOrEqual(old, joined) || !lattice.LessOrEqual(next.Value, joined))
