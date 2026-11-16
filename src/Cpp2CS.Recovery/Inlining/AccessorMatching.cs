@@ -34,7 +34,8 @@ public sealed partial class AccessorQuery
 
     private sealed record Site(Point Point, StableIdentity Identity, FieldRef Field, Term? Receiver, TypeRef? ReceiverType,
         Term Value, bool Write, ulong Address);
-    private sealed record TemplateParameter(MethodDef Method, int Index) : AtomIdentity
+    // 位宽属于身份：同一个泛型方法的两个实例（形参位宽不同）出现在同一个调用方里时是两个符号。
+    private sealed record TemplateParameter(MethodDef Method, int Index, int Width) : AtomIdentity
     { public override string StableText => "inline.accessor-parameter"; }
     private sealed record CandidateMatch(AccessorReplacement Replacement, HashSet<Term> Coverage, Reason? Placement)
     { public HashSet<StableIdentity> Accesses { get; } = [.. Replacement.Accesses]; }
@@ -323,7 +324,8 @@ public sealed partial class AccessorQuery
                 if (roots.Contains(index)) { symbolic[index] = binding[index]; continue; }
                 var type = selected.Concrete(selected.Method.Parameters[index].Type); int width = types.StorageBits(type);
                 // C++ bool 只有两值，解释与现场写入仍按声明存储位宽复核。
-                var parameter = terms.Atom(new TemplateParameter(selected.Method, index), types.Kind(type) == TypeKind.Bool ? 1 : width);
+                int symbolWidth = types.Kind(type) == TypeKind.Bool ? 1 : width;
+                var parameter = terms.Atom(new TemplateParameter(selected.Method, index, symbolWidth), symbolWidth);
                 free.Add(parameter); symbolic[index] = parameter.Width == width ? parameter
                     : terms.Apply(new CoreOperator(CoreOperation.ZeroExtend), width, parameter);
             }
