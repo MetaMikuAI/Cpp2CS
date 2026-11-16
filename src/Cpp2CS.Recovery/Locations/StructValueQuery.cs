@@ -16,7 +16,11 @@ public sealed record StructLeaf(ValueProjection Projection, Term Value);
 public sealed record StructPlan(StructOrigin? Origin, LocationView? Location, ReadIdentity? Read, ImmutableArray<StructLeaf> Leaves)
 {
     public ValueProjection? Representation { get; init; }
+    public StructMerge? Merge { get; init; }
+    public bool IsZero => !Leaves.IsEmpty && Leaves.All(leaf => leaf.Value.ConstantValue == 0);
+    public bool IsWhole => Origin is not null || Location is not null || IsZero || Merge is not null;
 }
+public sealed record StructMerge(BlockIdentity Block, Term Parts, ImmutableArray<Incoming> Inputs);
 public readonly record struct StructPartRequest(Term Term, int Low, int Width);
 public sealed record StructPart(StructOrigin Origin, ValueProjection Projection, int Low, int Width);
 internal readonly record struct SourceRange(BoundSource Source, Point Point, int Low, int Width, int UnitWidth = 0);
@@ -80,13 +84,23 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     internal SourceRangeQuery Ranges => ranges;
     private readonly BoundSourceQuery sourcePointers;
     private readonly FlowQueries flow = new();
+    private readonly EdgeValueQuery edgeValues;
+    private readonly PlanQuery plans;
+    // 递归保持同一结构体类型；活动块属于查询键，截断结果不依赖查询次序。
+    private readonly record struct PlanRequest(StructRequest Value, ImmutableHashSet<BlockIdentity> Active);
+    private sealed class PlanQuery(StructValueQuery owner) : Query<PlanRequest, StructPlan>
+    {
+        public override Outcome<StructPlan> Compute(QueryContext c, PlanRequest key) => owner.Plan(c, key.Value, key.Active);
+    }
     public StructPartQuery Parts { get; }
     public StructValueQuery(ManagedTypes types, StateQueries state, ManagedLocationQuery? locations, IEnumerable<StructOrigin> origins)
     {
         this.types = types; this.state = state; this.locations = locations; this.origins = origins.ToImmutableArray();
         ranges = new(state); sourcePointers = new(state); Parts = new(this);
+        edgeValues = new(state); plans = new(this);
     }
-    public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key)
+    public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key) => c.Get(plans, new(key, []));
+    private Outcome<StructPlan> Plan(QueryContext c, StructRequest key, ImmutableHashSet<BlockIdentity> active)
     {
         if (key.Type is not DefinitionRef structure || types.Layouts.Of(structure) is null)
             return Failure("Layout", "结构体缺少封闭实例布局。");
@@ -129,9 +143,50 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
         var copy = MemoryCopy(c, structure, parts, key.Point);
         if (!copy.IsSuccess || copy.Value is not null) return copy.IsSuccess
             ? Outcome<StructPlan>.Success(copy.Value!) : copy.Propagate<StructPlan>();
+        var merge = MergeCopy(c, structure, parts, active);
+        if (merge is not null) return Outcome<StructPlan>.Success(new(null, null, null, parts) { Merge = merge });
         var fields = types.Fields(structure).ToArray();
         var representation = fields.Length == 1 && fields[0].Bit == 0 && fields[0].Width == types.StorageBits(structure) ? fields[0] : null;
         return Outcome<StructPlan>.Success(new(null, null, null, parts) { Representation = representation });
+    }
+    private StructMerge? MergeCopy(QueryContext c, DefinitionRef type, ImmutableArray<StructLeaf> leaves,
+        ImmutableHashSet<BlockIdentity> active)
+    {
+        Block? block = null;
+        bool CommonBlock(Term term)
+        {
+            if (term.Kind is TermKind.Slice or TermKind.Concat) return term.Operands.All(CommonBlock);
+            if (term.Identity is not ResultAtom { Definition: MergeIdentity id }) return false;
+            if (block is not null) return block.Merges.Any(merge => merge.Identity == id);
+            block = c.Snapshot.Blocks.FirstOrDefault(candidate => candidate.Merges.Any(merge => merge.Identity == id));
+            return block is not null;
+        }
+        if (!leaves.All(leaf => CommonBlock(leaf.Value)) || block is null || active.Contains(block.Identity)) return null;
+        var index = c.Get(state.Index, 0); if (!index.IsSuccess) return null;
+        var predecessors = index.Value.Predecessors[block.Identity];
+        if (predecessors.IsEmpty || predecessors.Select(p => p.Block).Distinct().Count() != predecessors.Length) return null;
+        var t = c.Snapshot.Terms; var pieces = new List<Term>(); int cursor = 0;
+        foreach (var leaf in leaves)
+        {
+            if (cursor < leaf.Projection.Bit) pieces.Add(t.Undefined(leaf.Projection.Bit - cursor));
+            pieces.Add(leaf.Value); cursor = leaf.Projection.Bit + leaf.Projection.Width;
+        }
+        if (cursor < types.StorageBits(type)) pieces.Add(t.Undefined(types.StorageBits(type) - cursor));
+        var whole = t.Concat(pieces.ToArray()); var inputs = ImmutableArray.CreateBuilder<Incoming>();
+        var nested = active.Add(block.Identity);
+        foreach (var predecessor in predecessors)
+        {
+            var before = index.Value.Blocks[predecessor.Block];
+            // 整体值只在正常入边的前驱末尾求值；不把展开边的中途状态移到块末尾。
+            if (predecessor.Before != before.Statements.Length || !SnapshotRewrite.Targets(before.End).Contains(block.Identity)) return null;
+            var input = c.Get(edgeValues, new(whole, new(before.Identity, block.Identity)));
+            if (!input.IsSuccess) return null;
+            var source = new StructRequest(type, new TermSource(input.Value), new(before.Identity, before.Statements.Length));
+            var plan = c.Get(plans, new(source, nested));
+            if (!plan.IsSuccess || !plan.Value.IsWhole) return null;
+            inputs.Add(new(before.Identity, input.Value));
+        }
+        return new(block.Identity, whole, inputs.ToImmutable());
     }
     private static bool Incomplete(Term term) => term.Kind is TermKind.Undefined or TermKind.Unknown || term.Operands.Any(Incomplete);
     private static bool WideMemory(Term term)

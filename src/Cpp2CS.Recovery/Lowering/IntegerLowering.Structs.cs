@@ -14,6 +14,7 @@ namespace Cpp2CS.Recovery.Lowering;
 public sealed partial class IntegerLowering
 {
     private readonly List<StructOrigin> structParameters = [];
+    private readonly Dictionary<(BlockIdentity Block, TypeRef Type, Term Parts), LocalValue> structMerges = [];
     private readonly Dictionary<Term, ArgumentValue> indirectParameters = [];
     private StructValueQuery structs = null!;
     private StructConstructorQuery? structConstructorValues;
@@ -94,7 +95,16 @@ public sealed partial class IntegerLowering
             reads.Add(definition); structReadValues.Add(key, definition.Local);
             return definition.Local;
         }
-        if (plan.Leaves.Length > 0 && plan.Leaves.All(leaf => leaf.Value.ConstantValue == 0)) return new ComposedValue(type, []);
+        if (plan.IsZero) return new ComposedValue(type, []);
+        if (plan.Merge is { } merge)
+        {
+            var key = (merge.Block, type, merge.Parts);
+            if (structMerges.TryGetValue(key, out var known)) return known;
+            var local = new LocalValue(new(nextLocal++), type, 0);
+            structMerges.Add(key, local);
+            pending.Add((merge.Block, local, merge.Inputs, 0, 0));
+            return local;
+        }
         if (plan.Representation is not null && TokenHandle(type, plan) is { } token) return token;
         if (failure is not null) return null;
         if (type is DefinitionRef structure && structConstructorValues is not null

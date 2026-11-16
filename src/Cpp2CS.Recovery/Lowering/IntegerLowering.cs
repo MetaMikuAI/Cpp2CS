@@ -259,6 +259,15 @@ public sealed partial class IntegerLowering
                         && SnapshotRewrite.Targets(function.Blocks.Single(b => b.Identity == input.Predecessor).End).Contains(merge.Target))) continue;
                 position = function.Blocks.Single(b => b.Identity == input.Predecessor).Trace?.NativeAddress ?? 0;
                 SelectExceptionView(input.Predecessor);
+                if (types.Kind(merge.Local.Type) == TypeKind.Struct)
+                {
+                    var predecessor = function.Blocks.Single(block => block.Identity == input.Predecessor);
+                    var whole = StructValue(new TermSource(input.Value), merge.Local.Type, new(predecessor.Identity, predecessor.Statements.Length));
+                    if (whole is null) return new(null, failure);
+                    if (!ExceptionCopy(input.Predecessor, merge.Target, merge.Local, whole))
+                        ((List<ManagedCopy>)Edge(input.Predecessor, merge.Target).Copies).Add(new(merge.Local, whole));
+                    continue;
+                }
                 var numeric = !ReferenceType(merge.Local.Type) && !Opaque(merge.Local.Type);
                 var reference = numeric ? ReferenceSliceSource(input.Value) : null;
                 ManagedValue? v;

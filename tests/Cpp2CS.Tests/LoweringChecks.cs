@@ -221,6 +221,7 @@ internal static partial class LoweringChecks
         InterlockedChecks(checks, program);
         StructChecks(checks, program);
         StructConstructorChecks(checks, program);
+        StructMergeChecks(checks, program);
         StateChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
