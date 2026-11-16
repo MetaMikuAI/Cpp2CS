@@ -61,6 +61,32 @@ internal static class FlowChecks
         var secondEntry = Context(new(x, [], [], new Branch(t.Constant(1, 1), y, z)), new(y, [], [], new Jump(end)),
             new(z, [], [], new Jump(end)), new(outside, [], [], new Jump(y)), new(end, [], [], new Return([])));
         a.True(!secondEntry.Get(new SnapshotRegionQuery(normal, new Exits()), new(x, end)).IsSuccess, "带失败出口的区域仍拒绝第二入口");
+        var left = new BlockIdentity(); var right = new BlockIdentity();
+        var headContext = Context(new(x, [], [], new Jump(end)), new(end, [], [], new Branch(t.Constant(1, 1), y, outside)),
+            new(outside, [], [], new Jump(end)), new(y, [], [], new Branch(t.Constant(1, 1), left, right)),
+            new(left, [], [], new Jump(end)), new(right, [], [], new Jump(end)));
+        var headArea = headContext.Get(new SnapshotRegionQuery(normal), new(y, end));
+        a.True(headArea.IsSuccess && headArea.Value.Order.ToHashSet().SetEquals([left, right]),
+            "循环头可作续点；无全局出口时也保留另一路回边");
+        var headPaths = headContext.Get(new SnapshotPathsQuery(normal), new(new(y, 0), end));
+        a.True(headPaths.IsSuccess && headPaths.Value.Length == 2 && headPaths.Value.All(p => p.Edges[^1].Target == end),
+            "各路径在第一次到达循环头时停止");
+        var returning = Context(new(x, [], [firstRead], new Branch(t.Constant(1, 1), y, z)),
+            new(y, [], [new MemoryWrite(new(), t.Constant(32, 64), 32, t.Constant(1, 32))], new Return([])), new(z, [], [], new Return([])));
+        var returnArea = returning.Get(new SnapshotRegionQuery(normal), new(x, null));
+        a.True(returnArea.IsSuccess && returnArea.Value.Order.ToHashSet().SetEquals([y, z]),
+            "虚拟返回续点包含各实际返回块");
+        var returnPaths = returning.Get(new SnapshotPathsQuery(normal), new(new(x, 0), null));
+        a.True(returnPaths.IsSuccess && returnPaths.Value.Length == 2 && returnPaths.Value.Select(p => p.ReturnBlock).ToHashSet().SetEquals([y, z])
+            && returnPaths.Value.Sum(p => p.Points.Length) == 3 && returnPaths.Value.All(p => p.Edges.Length == 1),
+            "返回路径保留末块语句与真实边，不伪造虚拟边");
+        a.True(!returning.Get(new SnapshotPathsQuery(normal, pathBudget: 1), new(new(x, 0), null)).IsSuccess,
+            "虚拟返回的路径数沿用展开预算");
+        var reentry = Context(new(x, [], [], new Branch(t.Constant(1, 1), y, z)), new(y, [], [], new Jump(x)), new(z, [], [], new Return([])));
+        a.True(!reentry.Get(new SnapshotRegionQuery(normal), new(x, null)).IsSuccess, "虚拟返回仍拒绝区域内再次到达入口");
+        a.True(!loop.Get(new SnapshotRegionQuery(normal), new(x, null)).IsSuccess, "虚拟返回仍拒绝区域内部循环");
+        var otherEnd = Context(new(x, [], [], new Branch(t.Constant(1, 1), y, z)), new(y, [], [], new Return([])), new(z, [], [], new Unreachable()));
+        a.True(!otherEnd.Get(new SnapshotRegionQuery(normal), new(x, null)).IsSuccess, "虚拟返回拒绝其他结局");
         return a.Finish("控制流查询");
     }
 }

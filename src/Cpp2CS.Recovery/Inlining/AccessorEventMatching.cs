@@ -49,17 +49,29 @@ public sealed partial class AccessorQuery
                 if (c.Get(flow.Dominates, new(entry.Identity, anchor.Point.Block)) is not { IsSuccess: true, Value: true }) continue;
                 var starts = sites.Where(s => s.Point.Block == entry.Identity && s.Receiver == anchor.Receiver && templateFields.Contains(s.Field.Field)).Select(s => s.Point.Before).Distinct().ToArray();
                 if (starts.Length == 0) continue;
-                foreach (var join in blocks.Values.Where(b => b.Identity != entry.Identity))
+                foreach (var join in blocks.Keys.Where(id => id != entry.Identity).Cast<BlockIdentity?>().Append(null))
                 {
-                    var area = c.Get(regionQuery, new(entry.Identity, join.Identity));
+                    // 已有可放置的公共续点时保留该区域；返回续点只补充尚无解释的现场。
+                    if (join is null && matches.Any(m => m.Placement is null && m.Replacement.Method.Equals(selected))) continue;
+                    var area = c.Get(regionQuery, new(entry.Identity, join));
                     if (!area.IsSuccess || anchor.Point.Block != entry.Identity && !area.Value.Order.Contains(anchor.Point.Block)) continue;
                     foreach (int start in starts)
                     {
                         if (anchor.Point.Block == entry.Identity && anchor.Point.Before < start) continue;
                         var point = new Point(entry.Identity, start);
-                        var paths = c.Get(pathsQuery, new(point, join.Identity));
+                        var paths = c.Get(pathsQuery, new(point, join));
                         if (!paths.IsSuccess) continue;
                         if (paths.Value.Length != template.Paths.Count) { Unmatched(-3, "区域的路径数与模板不同"); continue; }
+                        IReadOnlyList<Term> returned = []; Return? returnEnd = null;
+                        if (join is null)
+                        {
+                            var values = paths.Value.Select(p => p.ReturnBlock is { } block && returnValues is not null
+                                ? c.Get(returnValues, block) : Outcome<IReadOnlyList<Term>>.Failure(new("inline.Accessor.Return", "没有签名返回项查询"))).ToArray();
+                            if (values.Any(v => !v.IsSuccess)) { Unmatched(0, "签名返回值未能按项确定"); continue; }
+                            returned = values[0].Value;
+                            if (values.Skip(1).Any(v => !v.Value.SequenceEqual(returned))) { Unmatched(0, "各返回路径的签名返回值不同"); continue; }
+                            returnEnd = (Return)blocks[paths.Value[0].ReturnBlock!].End;
+                        }
                         var points = paths.Value.SelectMany(p => p.Points).ToHashSet();
                         if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { Unwind: not null })) { Unmatched(-2, "区域内的调用带展开边"); continue; }
                         if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { DoesNotReturn: true } or MemoryRead { Acquire: true })) { Unmatched(-2, "区域内有不返回的调用或获取语义的读取"); continue; }
@@ -173,9 +185,9 @@ public sealed partial class AccessorQuery
                                 {
                                     while (next < wanted.Length && wanted[next] is AccessorCheck check && Implied(check, at)) next++;
                                 }
-                                foreach (var edge in path.Edges)
+                                foreach (var id in path.Edges.Select(e => e.Source).Concat(path.ReturnBlock is { } tail ? [tail] : []))
                                 {
-                                    foreach (var p in path.Points.Where(p => p.Block == edge.Source))
+                                    foreach (var p in path.Points.Where(p => p.Block == id))
                                     {
                                         var statement = blocks[p.Block].Statements[p.Before];
                                         if (statement is MemoryRead) continue;
@@ -184,7 +196,8 @@ public sealed partial class AccessorQuery
                                         next++;
                                     }
                                     if (!matched) break;
-                                    if (blocks[edge.Source].End is not Branch gate) continue;
+                                    if (blocks[id].End is not Branch gate) continue;
+                                    var edge = path.Edges.Single(e => e.Source == id);
                                     var failureEdge = new FlowEdge(edge.Source, gate.True == edge.Target ? gate.False : gate.True);
                                     SkipImplied(new(edge.Source, blocks[edge.Source].Statements.Length));
                                     var check = regionChecks.SingleOrDefault(check => check.FailureEdge == failureEdge);
@@ -193,7 +206,7 @@ public sealed partial class AccessorQuery
                                     if (next < wanted.Length && wanted[next] is AccessorCheck expectedCheck && CheckEquals(c, check, expectedCheck)) { next++; continue; }
                                     if (!check.CanAbsorb) { Unmatched(4 + next, "检查种类、被检查值或事件位置不同：" + check.Kind); matched = false; break; }
                                 }
-                                var last = path.Edges[^1].Source;
+                                var last = path.ReturnBlock ?? path.Edges[^1].Source;
                                 SkipImplied(new(last, blocks[last].Statements.Length));
                                 if (!matched || next != wanted.Length) { if (matched) Unmatched(4 + next, "模板仍有未对应事件或路径事实不足"); matched = false; break; }
 
@@ -215,32 +228,49 @@ public sealed partial class AccessorQuery
                             };
                             var equations = template.Paths.SelectMany(p => p.Conditions.Select(g => g.Value).Concat(p.Events.SelectMany(Inputs)))
                                 .Select(constraint.Instantiate).OfType<Term>().ToArray();
-                            Reason? placement = free.All(p => equations.Any(e => Determines(e, p))) ? Available(c, point, binding.Values, sites)
+                            Reason? placement = free.All(p => equations.Any(e => Determines(e, p))) ? Available(c, point, binding.Values.Concat(returned), sites)
                                 : new("inline.Accessor.Ambiguous", "带事件条件模板的形参没有完整可逆约束");
                             var outside = blocks.Values.SelectMany(b => b.Statements.Select((s, i) => (s, p: new Point(b.Identity, i)))
                                 .Where(x => !points.Contains(x.p)).SelectMany(x => SnapshotRewrite.Uses(x.s))
-                                .Concat(area.Value.Order.Append(entry.Identity).Contains(b.Identity) ? [] : SnapshotRewrite.Uses(b.End)));
+                                .Concat(area.Value.Order.Append(entry.Identity).Contains(b.Identity) ? [] : SnapshotRewrite.Uses(b.End))).Concat(returned);
                             var coveredValues = points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryRead>().Where(r => reads.Contains(r.Identity))
                                 .Select(r => c.Get(state.Read, r.Identity)).Where(v => v.IsSuccess).Select(v => v.Value).ToHashSet();
                             var removedDefinitions = points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<Call>().Select(call => (StableIdentity)call.Identity)
-                                .Concat(area.Value.Order.Append(join.Identity).SelectMany(id => blocks[id].Merges.Select(merge => merge.Identity))).ToHashSet();
+                                .Concat(area.Value.Order.SelectMany(id => blocks[id].Merges.Select(merge => merge.Identity))).ToHashSet();
                             var seen = new HashSet<Term>();
                             bool Escapes(Term term)
                             {
-                                var value = c.Get(state.Resolve, term); if (!value.IsSuccess) return true;
-                                if (!seen.Add(value.Value)) return false;
-                                return coveredValues.Contains(value.Value)
-                                    || value.Value.Identity is ResultAtom atom && removedDefinitions.Contains(atom.Definition)
-                                    || value.Value.Identity is MemoryMerge merge && area.Value.Order.Contains(merge.Block)
-                                    || value.Value.Operands.Any(Escapes);
+                                if (!seen.Add(term)) return false;
+                                // 循环下一轮的读取有自己的定义；不能把它的内存合流误作本轮旧值的使用。
+                                if (term.Identity is ResultAtom { Definition: ReadIdentity read }) return reads.Contains(read);
+                                if (term.Identity is ResultAtom atom && removedDefinitions.Contains(atom.Definition))
+                                {
+                                    var resolved = c.Get(state.Resolve, term);
+                                    return !resolved.IsSuccess || resolved.Value == term || Escapes(resolved.Value);
+                                }
+                                if (term.Identity is ResultAtom { Definition: MergeIdentity id })
+                                {
+                                    var owner = blocks.Values.Single(b => b.Merges.Any(m => m.Identity == id));
+                                    var merge = owner.Merges.Single(m => m.Identity == id);
+                                    if (owner.Identity == join)
+                                    {
+                                        var folded = merge.Inputs.Where(i => i.Predecessor == entry.Identity || area.Value.Order.Contains(i.Predecessor))
+                                            .Select(i => c.Get(state.Resolve, i.Value)).ToArray();
+                                        if (folded.Length == 0 || folded.Any(v => !v.IsSuccess) || folded.Select(v => v.Value).Distinct().Count() != 1
+                                            || Available(c, point, [folded[0].Value], sites) is not null) return true;
+                                    }
+                                    return merge.Inputs.Any(i => Escapes(i.Value));
+                                }
+                                if (coveredValues.Contains(term) || term.Identity is MemoryMerge memory && area.Value.Order.Contains(memory.Block)) return true;
+                                return term.Operands.Any(Escapes);
                             }
                             if (outside.Any(Escapes)) placement = new("inline.Accessor.Placement", "区域内读到的字段值在区域外另有使用");
                             var replacement = new AccessorReplacement(selected, selected.Method.IsStatic ? null : binding[-1],
                                 Enumerable.Range(0, selected.Method.Parameters.Count).Select(i => binding[i]).ToArray(), null, point, reads.ToArray(),
                                 points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryWrite>().Select(w => w.Identity).ToArray())
-                                { Region = new(entry.Identity, join.Identity, area.Value.Order) };
+                                { Region = new(entry.Identity, join, area.Value.Order) { Return = returnEnd } };
                             var coverage = SnapshotRewrite.Dependencies(roots.Select(r => c.Get(state.Resolve, r)).Where(v => v.IsSuccess).Select(v => v.Value));
-                            if (!matches.Any(m => m.Replacement.Method.Equals(selected) && m.Replacement.Point == point && m.Replacement.Region?.Join == join.Identity
+                            if (!matches.Any(m => m.Replacement.Method.Equals(selected) && m.Replacement.Point == point && m.Replacement.Region?.Join == join
                                 && m.Replacement.Arguments.SequenceEqual(replacement.Arguments) && m.Replacement.Receiver == replacement.Receiver))
                                 matches.Add(new(replacement, coverage, placement));
                         }

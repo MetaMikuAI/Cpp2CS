@@ -20,7 +20,10 @@ public sealed record AccessorReplacement(MethodRef Method, Term? Receiver, IRead
     public AccessorRegion? Region { get; init; }
     public IEnumerable<StableIdentity> Accesses => Reads.Cast<StableIdentity>().Concat(Writes).Concat(Call is { } call ? [call] : []).Concat(Region is { } region ? region.Blocks.Append(region.Entry) : []);
 }
-public sealed record AccessorRegion(BlockIdentity Entry, BlockIdentity Join, IReadOnlyList<BlockIdentity> Blocks);
+public sealed record AccessorRegion(BlockIdentity Entry, BlockIdentity? Join, IReadOnlyList<BlockIdentity> Blocks)
+{
+    public Return? Return { get; init; }
+}
 public sealed record AccessorCallSite(MethodRef Method, BoundCall Binding, bool Virtual, Term? Receiver);
 public sealed record AccessorProgram(IReadOnlyList<AccessorReplacement> Replacements,
     IReadOnlyDictionary<StableIdentity, Reason> Failures);
@@ -29,8 +32,9 @@ public sealed partial class AccessorQuery
 {
     public Outcome<AccessorProgram> Match(QueryContext context, MethodRef caller, StateQueries state,
         ManagedLocationQuery locations, IReadOnlyDictionary<Term, ManagedValue> arguments,
-        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls = null, CheckQueries? checks = null) =>
-        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, checks, observe, Find, StaticCandidates), 0);
+        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls = null, CheckQueries? checks = null,
+        Query<BlockIdentity, IReadOnlyList<Term>>? returnValues = null) =>
+        context.Get(new ProgramQuery(types, templates, state, locations, caller, arguments, calls, checks, returnValues, observe, Find, StaticCandidates), 0);
 
     private sealed record Site(Point Point, StableIdentity Identity, FieldRef Field, Term? Receiver, TypeRef? ReceiverType,
         Term Value, bool Write, ulong Address);
@@ -43,7 +47,8 @@ public sealed partial class AccessorQuery
     /// <summary>发现纯项、转调和无副作用区域；读取版本、支配、路径事实与最终相等均取现有查询。</summary>
     private sealed partial class ProgramQuery(ManagedTypes types, IAccessorTemplateSource templates, StateQueries state,
         ManagedLocationQuery locations, MethodRef caller, IReadOnlyDictionary<Term, ManagedValue> arguments,
-        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, CheckQueries? checks, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy, StaticCandidateLookup StaticCandidates) : Query<int, AccessorProgram>
+        IReadOnlyDictionary<CallIdentity, AccessorCallSite>? calls, CheckQueries? checks,
+        Query<BlockIdentity, IReadOnlyList<Term>>? returnValues, Action<AccessorAttempt>? observe, Func<AccessorAccess, AccessorAnswer> Legacy, StaticCandidateLookup StaticCandidates) : Query<int, AccessorProgram>
     {
         private readonly FlowQueries flow = new();
         public override Outcome<AccessorProgram> Compute(QueryContext c, int key)

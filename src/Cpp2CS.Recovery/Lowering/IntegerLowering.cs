@@ -251,7 +251,7 @@ public sealed partial class IntegerLowering
         for (int i = 0; i < pending.Count; i++)
         {
             var merge = pending[i];
-            foreach (var input in merge.Inputs)
+            foreach (var input in AccessorInputs(merge.Target, merge.Inputs))
             {
                 if (finallyRegions.Any(plan => plan.Unreachable.Contains(input.Predecessor)
                     || plan.Entry == merge.Target && plan.Removed.Contains(input.Predecessor)
@@ -391,9 +391,9 @@ public sealed partial class IntegerLowering
         if (completion is not null) return new ManagedJump(position, Edge(b.Identity, completion.Continuation));
         var decided = finallyRegions.Select(plan => plan.Branches.GetValueOrDefault(b.Identity)).FirstOrDefault(target => target is not null);
         if (decided is not null) return new ManagedJump(position, Edge(b.Identity, decided));
-        if (accessorRegions.TryGetValue(b.Identity, out var region))
-            return new ManagedJump(position, new(labels[region.Join], []));
-        switch (b.End)
+        if (accessorRegions.TryGetValue(b.Identity, out var region) && region.Join is { } join)
+            return new ManagedJump(position, Edge(b.Identity, join));
+        switch (region?.Return ?? b.End)
         {
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));
             case Branch branch:

@@ -4,6 +4,7 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Pipeline;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Inlining;
@@ -24,14 +25,17 @@ internal static partial class InliningChecks
     private static void ArrayEventAccessorChecks(Assertions checks)
     {
         foreach (bool reference in new[] { false, true })
-        foreach (var mode in new[] { "Normal", "Reversed", "PrivateContextRead", "LoweredBoolean", "ImpliedItemCheck", "MissingItemCheck", "ExtraCheck", "DifferentCheckedValue", "DifferentCheckPosition", "DifferentArray", "DifferentIndex", "DifferentValue", "OutsideAccess", "BusinessThrow", "OtherUse" })
+        foreach (var mode in new[] { "Normal", "Loop", "LoopCarried", "LoopDifferentInputs", "LoopMergeUse", "InnerCycle", "Reenter", "Return", "ReturnValue", "ReturnDifferent", "ReturnExtraWrite", "ReturnExtraCall", "ReturnProtected", "Reversed", "PrivateContextRead", "LoweredBoolean", "ImpliedItemCheck", "MissingItemCheck", "ExtraCheck", "DifferentCheckedValue", "DifferentCheckPosition", "DifferentArray", "DifferentIndex", "DifferentValue", "OutsideAccess", "BusinessThrow", "OtherUse" })
         {
             if (!reference && (mode is "ImpliedItemCheck" or "MissingItemCheck")) continue;
+            bool loop = mode is "Loop" or "LoopCarried" or "LoopDifferentInputs" or "LoopMergeUse";
+            bool returning = mode.StartsWith("Return", StringComparison.Ordinal);
+            bool returnedValue = mode is "ReturnValue" or "ReturnDifferent";
             bool itemCheck = mode is "ImpliedItemCheck" or "MissingItemCheck";
             var f = new Fixture();
             var elementType = reference ? (TypeRef)f.Types.Object : f.Integer;
             var arrayType = new ArrayRef(elementType, 1);
-            var countDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Count", Type = f.Integer, Attributes = FieldAttributes.Private, Offset = 32, Token = 0x04000003 };
+            var countDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Count", Type = f.Integer, Attributes = loop ? FieldAttributes.Public : FieldAttributes.Private, Offset = 32, Token = 0x04000003 };
             var itemsDef = new FieldDef { Index = 3, Owner = f.Owner, Name = "Items", Type = arrayType, Attributes = FieldAttributes.Private, Offset = 24, Token = 0x04000004 };
             f.Owner.Fields = [.. f.Owner.Fields, countDef, itemsDef];
             ((List<FieldDef>)f.Program.Fields).AddRange([countDef, itemsDef]);
@@ -44,7 +48,7 @@ internal static partial class InliningChecks
             var types = new ManagedTypes(f.Program, f.Types.Layouts, 8);
             var outer = f.Method(f.Owner, "Append", true, false, [elementType]);
             var slow = f.Method(f.Owner, "Grow", true, false, [elementType]);
-            var caller = f.Method(f.Caller, "UseArray", mode != "OtherUse", true, [f.OwnerType, elementType, arrayType]);
+            var caller = f.Method(f.Caller, "UseArray", !returnedValue && mode != "OtherUse", true, [f.OwnerType, elementType, arrayType]);
             var self = new ArgumentValue(-1, f.OwnerType, 64); var item = new ArgumentValue(0, elementType, reference ? 64 : 32);
             var version = new FieldValue(self, f.Field, f.Integer, 32); var size = new FieldValue(self, count, f.Integer, 32);
             var array = new FieldValue(self, items, arrayType, 64);
@@ -83,7 +87,7 @@ internal static partial class InliningChecks
             }
             var t = new TermTable(); var entry = new BlockIdentity(); var capacity = new BlockIdentity(); var fast = new BlockIdentity(); var slowBlock = new BlockIdentity();
             var bad = new BlockIdentity(); var join = new BlockIdentity(); var extra = new BlockIdentity(); var afterSize = new BlockIdentity(); var final = new BlockIdentity();
-            var functionEntry = mode == "ImpliedItemCheck" ? new BlockIdentity() : entry;
+            var functionEntry = mode == "ImpliedItemCheck" || loop ? new BlockIdentity() : entry;
             var b = new FunctionBuilder(t, functionEntry, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64)));
             var receiver = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); var argument = t.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64); var other = t.Atom(new EntryAtom(new(SlotKind.Integer, 2)), 64);
             b.Inputs.Add(new(new(SlotKind.Integer), receiver)); b.Inputs.Add(new(new(SlotKind.Integer, 1), argument)); b.Inputs.Add(new(new(SlotKind.Integer, 2), other));
@@ -103,20 +107,48 @@ internal static partial class InliningChecks
             var condition = t.Apply(new CoreOperator(CoreOperation.UnsignedLess), 1, sr.Result, lr.Result);
             bool reverse = mode == "Reversed"; if (reverse) condition = t.Apply(new CoreOperator(CoreOperation.Not), 1, condition);
             b.Blocks.Add(new(capacity, [], [sr, lr], new Branch(condition, reverse ? slowBlock : fast, reverse ? fast : slowBlock)));
+            var loopHead = join;
+            Return Returned(bool fastArm) => new([
+                .. returnedValue ? new[] { new SlotValue(new(SlotKind.Integer), t.Concat(t.Constant(mode == "ReturnDifferent" && fastArm ? 8UL : 7UL, 32), t.Constant(fastArm ? 91UL : 27UL, 32))) } : [],
+                new(new(SlotKind.Integer, 1), t.Concat(sr.Result, t.Constant(0, 32))) ]);
             var sizeWrite = new MemoryWrite(new(), Add(receiver, 32), 32, Add(sr.Result, 1));
             var index = t.Apply(new CoreOperator(CoreOperation.SignExtend), 64, sr.Result); if (mode == "DifferentIndex") index = Add(index, 1);
             var destination = Add(t.Apply(new CoreOperator(CoreOperation.Add), 64, mode == "DifferentArray" ? other : ar.Result,
                 t.Apply(new CoreOperator(CoreOperation.Multiply), 64, index, t.Constant(reference ? 8 : 4, 64))), (int)f.Spec.Layout.ArrayDataStart);
             var value = mode == "DifferentValue" ? t.Constant(0, item.Width) : t.Slice(argument, 0, item.Width);
             var store = new MemoryWrite(new(), destination, item.Width, value);
-            b.Blocks.Add(new(fast, [], wrongPosition ? [sizeWrite] : [sizeWrite, store], wrongPosition ? new Branch(IsNull(ar.Result), bad, afterSize)
-                : mode == "OutsideAccess" ? new Branch(IsNull(other), bad, join) : new Jump(join)));
+            var extraWrite = new MemoryWrite(new(), Add(receiver, 16), 32, t.Constant(123, 32));
+            b.Blocks.Add(new(fast, [], wrongPosition ? [sizeWrite] : mode == "ReturnExtraWrite" ? [sizeWrite, store, extraWrite] : [sizeWrite, store], wrongPosition ? new Branch(IsNull(ar.Result), bad, afterSize)
+                : mode == "OutsideAccess" ? new Branch(IsNull(other), bad, join) : returning ? Returned(true) : mode == "InnerCycle" ? new Branch(IsNull(other), fast, join) : mode == "Reenter" ? new Jump(entry) : new Jump(join)));
             if (wrongPosition) b.Blocks.Add(new(afterSize, [], [store], new Jump(join)));
-            var invocation = new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), receiver), new(new(SlotKind.Integer, 1), argument), new(new(SlotKind.Integer, 2), t.Constant(0, 64))], []);
-            b.Blocks.Add(new(slowBlock, [], mode == "PrivateContextRead" ? [ownerClass, invocation] : [invocation], new Jump(join)));
+            var handler = new BlockIdentity();
+            var invocation = new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), receiver), new(new(SlotKind.Integer, 1), argument), new(new(SlotKind.Integer, 2), t.Constant(0, 64))], [], Unwind: mode == "ReturnProtected" ? handler : null);
+            b.Blocks.Add(new(slowBlock, [], mode == "PrivateContextRead" ? [ownerClass, invocation] : mode == "ReturnExtraCall" ? [invocation, invocation with { Identity = new() }] : [invocation], returning ? Returned(false) : new Jump(join)));
             b.Blocks.Add(new(bad, [], [new Call(new(), new ImageFunction(20), [], [], true)], new Unreachable()));
-            b.Blocks.Add(new(join, [], mode == "OutsideAccess" ? [Load(other, (int)f.Spec.Layout.Field("Il2CppArray", "max_length").ByteOffset, 32)] : [], new Jump(final)));
-            b.Blocks.Add(new(final, [], [], new Return(mode == "OtherUse" ? [new(new(SlotKind.Integer), t.Concat(sr.Result, t.Constant(0, 32)))] : [])));
+            if (!returning && !loop) b.Blocks.Add(new(join, [], mode == "OutsideAccess" ? [Load(other, (int)f.Spec.Layout.Field("Il2CppArray", "max_length").ByteOffset, 32)] : [], new Jump(final)));
+            if (!returning) b.Blocks.Add(new(final, [], [], new Return(mode == "OtherUse" ? [new(new(SlotKind.Integer), t.Concat(sr.Result, t.Constant(0, 32)))] : [])));
+            if (mode == "ReturnProtected")
+            {
+                var caught = t.Atom(new ExceptionAtom(handler), 64);
+                var beginId = new CallIdentity();
+                var begin = new Call(beginId, new ImportedTarget(new ImportSymbol("__cxa_begin_catch")),
+                    [new(new(SlotKind.Integer), caught)], [new(new(SlotKind.Integer), t.Atom(new ResultAtom(beginId), 64))]);
+                var endCatch = new Call(new(), new ImportedTarget(new ImportSymbol("__cxa_end_catch")), [], []);
+                b.Blocks.Add(new(handler, [], [begin, endCatch], new Return([]),
+                    new(caught, t.Atom(new SelectorAtom(handler), 64), [new(ClauseKind.CatchAll, [])])));
+            }
+            if (loop)
+            {
+                var headerSize = Load(receiver, 32, 32);
+                var mergedId = new MergeIdentity(); var merged = t.Atom(new ResultAtom(mergedId), 32);
+                var merges = mode is "LoopMergeUse" or "LoopCarried" or "LoopDifferentInputs" ? new[] { new Merge(mergedId, merged,
+                    [new(functionEntry, t.Constant(0, 32)), new(fast, mode is "LoopCarried" or "LoopDifferentInputs" ? Add(merged, 1) : sr.Result),
+                        new(slowBlock, mode == "LoopCarried" ? Add(merged, 1) : mode == "LoopDifferentInputs" ? Add(merged, 2) : sr.Result)]) }.ToImmutableArray() : [];
+                b.Blocks.Add(new(functionEntry, [], [], new Jump(loopHead)));
+                b.Blocks.Add(new(loopHead, merges, mode is "LoopMergeUse" or "LoopCarried" or "LoopDifferentInputs" ? [] : [headerSize],
+                    new Branch(t.Apply(new CoreOperator(CoreOperation.UnsignedLess), 1, mode is "LoopMergeUse" or "LoopCarried" or "LoopDifferentInputs" ? merged : headerSize.Result,
+                        t.Constant(mode is "LoopCarried" or "LoopDifferentInputs" ? 2 : 3, 32)), entry, final)));
+            }
             if (mode == "ImpliedItemCheck")
             {
                 b.Blocks.Insert(0, new(functionEntry, [], [], new Branch(IsNull(argument), final, entry)));
@@ -125,9 +157,11 @@ internal static partial class InliningChecks
             var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(slow), BindingEntryKind.Ordinary)]), new ArrayRuntimeMap(catalog), catalog);
             var result = new IntegerLowering(b.Freeze(), MethodRef.Open(caller), f.Binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: f.Spec, names: facts,
                 accessors: new(types, new CachedAccessorTemplates(m => m == outer ? template : null))).Run();
-            bool positive = mode is "Normal" or "Reversed" or "PrivateContextRead" or "LoweredBoolean" or "ImpliedItemCheck";
-            checks.True(positive ? result.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined && c.Invocation.Method.Method == outer) == 1 : result.Body is null && result.Failure?.Reason.Code.StartsWith("inline.Accessor", StringComparison.Ordinal) == true,
+            bool positive = mode is "Loop" or "LoopCarried" or "Return" or "ReturnValue" or "Normal" or "Reversed" or "PrivateContextRead" or "LoweredBoolean" or "ImpliedItemCheck";
+            checks.True(positive ? result.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined && c.Invocation.Method.Method == outer) == 1 : result.Body is null && (result.Failure?.Reason.Code.StartsWith("inline.Accessor", StringComparison.Ordinal) == true || mode == "ReturnProtected" && result.Failure?.Reason.Code == "lowering.Exception.Region"),
                 $"数组写入检查匹配 {reference}/{mode}: {result.Failure}");
+            if (mode is "LoopMergeUse" or "LoopDifferentInputs")
+                checks.True(result.Failure?.Reason.Code == "inline.Accessor.Placement", $"循环头合流的边界由放置证明拒绝 {reference}/{mode}: {result.Failure}");
             if (positive && result.Body is { } body)
             {
                 using var emission = new EmissionFixture(f);
@@ -138,7 +172,7 @@ internal static partial class InliningChecks
                 using var source = new CompiledSource($$"""
                     public class Owner {
                         private int Value;
-                        private int Count;
+                        {{(loop ? "public" : "private")}} int Count;
                         private {{element}}[] Items;
                         public void Append({{element}} item) {
                             Value++; var a = Items; int n = Count;
@@ -150,27 +184,30 @@ internal static partial class InliningChecks
                             next[Count] = item; Items = next; Count++;
                         }
                         public static void Expanded(Owner owner, {{element}} item) {
+                            {{(mode == "LoopCarried" ? "for (int i = 0; i < 2; i++) {" : loop ? "while (owner.Count < 3) {" : "")}}
                             owner.Value++; var a = owner.Items; int n = owner.Count;
                             if ((uint)n < (uint)a.Length) { owner.Count = n + 1; a[n] = item; } else owner.Grow(item);
+                            {{(loop ? "}" : "")}}
                         }
                         private static int Case(bool enough, bool output) {
                             var old = {{oldItem}}; var item = {{newItem}};
                             var owner = new Owner { Value = 7, Count = 1, Items = new {{element}}[enough ? 3 : 1] };
                             owner.Items[0] = old;
-                            if (output) Caller.UseArray(owner, item, null); else Expanded(owner, item);
+                            int returned = {{(returnedValue ? "7" : "0")}};
+                            if (output) {{(returnedValue ? "returned = " : "")}}Caller.UseArray(owner, item, null); else Expanded(owner, item);
                             int contents = 0;
                             for (int i = 0; i < owner.Items.Length; i++) {
                                 int mark = owner.Items[i] == old ? 3 : owner.Items[i] == item ? 5 : 0;
                                 contents = contents * 11 + mark;
                             }
-                            return owner.Value * 100000 + owner.Count * 10000 + owner.Items.Length * 1000 + contents;
+                            return returned + owner.Value * 100000 + owner.Count * 10000 + owner.Items.Length * 1000 + contents;
                         }
                         public static int EnoughReference() => Case(true, false);
                         public static int EnoughOutput() => Case(true, true);
                         public static int GrowReference() => Case(false, false);
                         public static int GrowOutput() => Case(false, true);
                     }
-                    public static class Caller { public static void UseArray(Owner value, {{element}} item, {{element}}[] other) { value.Append(item); } }
+                    public static class Caller { public static {{(returnedValue ? "int" : "void")}} UseArray(Owner value, {{element}} item, {{element}}[] other) { value.Append(item); {{(returnedValue ? "return 7;" : "")}} } }
                     """);
                 var output = source.Method("Caller", "UseArray"); output.Body = emission.Method(caller).Body;
                 var core = source.Module.TypeSystem.Object.Resolve().Module;
@@ -181,6 +218,7 @@ internal static partial class InliningChecks
                 foreach (var instruction in output.Body.Instructions) instruction.Operand = instruction.Operand switch
                 {
                     Mono.Cecil.MethodReference method => source.Module.ImportReference((source.Module.GetType(method.DeclaringType.FullName) ?? core.GetType(method.DeclaringType.FullName)).Methods.Single(m => m.FullName == method.FullName)),
+                    Mono.Cecil.FieldReference field => source.Module.ImportReference(source.Module.GetType(field.DeclaringType.FullName).Fields.Single(f => f.Name == field.Name)),
                     Mono.Cecil.TypeReference type => MapType(type), Mono.Cecil.ParameterDefinition parameter => output.Parameters[parameter.Index], _ => instruction.Operand,
                 };
                 foreach (var capacityCase in new[] { "Enough", "Grow" })

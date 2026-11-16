@@ -8,7 +8,12 @@ namespace Cpp2CS.Kernel.Flow;
 
 /// <summary>快照改写的区域凭据：单入口、指定出口、无环。拓扑顺序供改写者处理边上的定义。</summary>
 public sealed record SnapshotRegion(ImmutableArray<BlockIdentity> Order);
-public sealed class SnapshotRegionQuery(FlowQueries flow, Query<FlowEdge, bool>? failureExits = null) : Query<BlockPair, SnapshotRegion>
+/// <summary>Join 为空时，以各路径上的函数返回作为虚拟续点；返回块仍属于区域。</summary>
+public readonly record struct SnapshotRegionKey(BlockIdentity A, BlockIdentity? B)
+{
+    public static implicit operator SnapshotRegionKey(BlockPair pair) => new(pair.A, pair.B);
+}
+public sealed class SnapshotRegionQuery(FlowQueries flow, Query<FlowEdge, bool>? failureExits = null) : Query<SnapshotRegionKey, SnapshotRegion>
 {
     private readonly RegionEdges edges = new(flow, failureExits);
     private sealed class RegionEdges(FlowQueries flow, Query<FlowEdge, bool>? failureExits)
@@ -34,20 +39,26 @@ public sealed class SnapshotRegionQuery(FlowQueries flow, Query<FlowEdge, bool>?
             return Outcome<IReadOnlyDictionary<BlockIdentity, ImmutableHashSet<BlockIdentity>>>.Success(successorsByBlock);
         }
     }
-    public override Outcome<SnapshotRegion> Compute(QueryContext c, BlockPair key)
+    public override Outcome<SnapshotRegion> Compute(QueryContext c, SnapshotRegionKey key)
     {
         Outcome<SnapshotRegion> Fail(string code, string text) => Outcome<SnapshotRegion>.Failure(new Reason(code, text));
         var graph = c.Get(flow.Graph, 0); if (!graph.IsSuccess) return graph.Propagate<SnapshotRegion>();
         var g = graph.Value;
         var filtered = c.Get(edges, 0); if (!filtered.IsSuccess) return filtered.Propagate<SnapshotRegion>();
         var successorsByBlock = filtered.Value;
+        var blocks = c.Snapshot.Blocks.ToDictionary(b => b.Identity);
         if (key.A == key.B) return Fail("structure.no-join", "入口与出口相同。");
         // 区域从终结之后开始；入口块中此前调用的异常出口不属于区域。
-        var successors = SnapshotRewrite.Targets(c.Snapshot.Blocks.Single(b => b.Identity == key.A).End).Where(successorsByBlock[key.A].Contains).Distinct().ToArray();
+        var successors = SnapshotRewrite.Targets(blocks[key.A].End).Where(successorsByBlock[key.A].Contains).Distinct().ToArray();
+        if (successors.Length == 0 && key.B is null && blocks[key.A].End is Return)
+            return Outcome<SnapshotRegion>.Success(new([]));
         if (successors.Length == 0) return Fail("structure.other-exit", "区域没有通向续点的正常出口。");
-        foreach (var successor in successors.Where(_ => failureExits is null))
+        // 循环头是首次到达即停止的边界；其余入边不属于区域。
+        var back = failureExits is null && key.B is { } join ? c.Get(flow.Dominates, new(join, key.A)) : Outcome<bool>.Success(false);
+        if (!back.IsSuccess) return back.Propagate<SnapshotRegion>();
+        foreach (var successor in successors.Where(_ => failureExits is null && key.B is not null && !back.Value))
         {
-            var post = c.Get(flow.PostDominates, new(key.B, successor));
+            var post = c.Get(flow.PostDominates, new(key.B!, successor));
             if (!post.IsSuccess) return post.Propagate<SnapshotRegion>();
             if (!post.Value) return Fail("structure.no-join", "出口不后支配分支后继。");
         }
@@ -57,6 +68,7 @@ public sealed class SnapshotRegionQuery(FlowQueries flow, Query<FlowEdge, bool>?
             if (b == key.B || !region.Add(b)) continue;
             if (c.Step() is { } why) return Outcome<SnapshotRegion>.Failure(why);
             if (b == key.A) return Fail("structure.cycle", "区域含回边。");
+            if (successorsByBlock[b].IsEmpty && key.B is null && blocks[b].End is Return) continue;
             if (successorsByBlock[b].IsEmpty) return Fail("structure.other-exit", "区域有其他结局。");
             foreach (var next in successorsByBlock[b]) pending.Push(next);
         }
@@ -78,8 +90,8 @@ public sealed class SnapshotRegionQuery(FlowQueries flow, Query<FlowEdge, bool>?
 }
 
 
-public sealed record SnapshotPath(ImmutableArray<Point> Points, ImmutableArray<FlowEdge> Edges);
-public readonly record struct SnapshotPathKey(Point Entry, BlockIdentity Join);
+public sealed record SnapshotPath(ImmutableArray<Point> Points, ImmutableArray<FlowEdge> Edges, BlockIdentity? ReturnBlock = null);
+public readonly record struct SnapshotPathKey(Point Entry, BlockIdentity? Join);
 
 /// <summary>在已证明的无环区域上展开完整路径；每个语句点和边均保留原身份。</summary>
 public sealed class SnapshotPathsQuery(FlowQueries flow, Query<FlowEdge, bool>? failureExits = null, int pathBudget = 64)
@@ -93,12 +105,23 @@ public sealed class SnapshotPathsQuery(FlowQueries flow, Query<FlowEdge, bool>? 
         var blocks = c.Snapshot.Blocks.ToDictionary(b => b.Identity);
         if (key.Entry.Before < 0 || key.Entry.Before > blocks[key.Entry.Block].Statements.Length)
             return Outcome<ImmutableArray<SnapshotPath>>.Failure(new("flow.point", "入口程序点不属于快照。"));
+        var returned = ImmutableArray.CreateBuilder<SnapshotPath>();
         var at = new Dictionary<BlockIdentity, List<SnapshotPath>> { [key.Entry.Block] = [new([], [])] };
         foreach (var id in area.Value.Order.Prepend(key.Entry.Block))
         {
             if (!at.TryGetValue(id, out var prefixes)) continue;
             var b = blocks[id]; int start = id == key.Entry.Block ? key.Entry.Before : 0;
             var points = Enumerable.Range(start, b.Statements.Length - start).Select(i => new Point(id, i)).ToArray();
+            if (key.Join is null && b.End is Return)
+            {
+                foreach (var prefix in prefixes)
+                {
+                    if (c.Step() is { } why) return Outcome<ImmutableArray<SnapshotPath>>.Failure(why);
+                    if (returned.Count >= pathBudget) return Outcome<ImmutableArray<SnapshotPath>>.Failure(new("flow.path-budget", "区域路径数超过展开预算。"));
+                    returned.Add(new([.. prefix.Points, .. points], prefix.Edges, id));
+                }
+                continue;
+            }
             foreach (var target in SnapshotRewrite.Targets(b.End).Distinct())
             {
                 var edge = new FlowEdge(id, target);
@@ -114,6 +137,6 @@ public sealed class SnapshotPathsQuery(FlowQueries flow, Query<FlowEdge, bool>? 
                 }
             }
         }
-        return Outcome<ImmutableArray<SnapshotPath>>.Success(at.GetValueOrDefault(key.Join)?.ToImmutableArray() ?? []);
+        return Outcome<ImmutableArray<SnapshotPath>>.Success(key.Join is { } join ? at.GetValueOrDefault(join)?.ToImmutableArray() ?? [] : returned.ToImmutable());
     }
 }

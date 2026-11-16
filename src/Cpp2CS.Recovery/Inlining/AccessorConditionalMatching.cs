@@ -43,7 +43,7 @@ public sealed partial class AccessorQuery
                 var possible = SnapshotRewrite.Dependencies([opportunity.Result]); possible.UnionWith(arguments.Keys);
                 // 合流的来源也是发现实参的输入，实际代入仍逐路径复核。
                 if (opportunity.Region is { } area)
-                    foreach (var merge in blocks[area.Join].Merges) possible.UnionWith(SnapshotRewrite.Dependencies(merge.Inputs.Select(i => i.Value)));
+                    foreach (var merge in blocks[area.Join!].Merges) possible.UnionWith(SnapshotRewrite.Dependencies(merge.Inputs.Select(i => i.Value)));
                 foreach (var binding in Bindings(c.Snapshot.Terms, selected, possible, fixedArgs))
                 {
                     if (c.Step() is not null) return;
@@ -78,7 +78,7 @@ public sealed partial class AccessorQuery
                     else
                     {
                         var region = opportunity.Region;
-                        var inputs = c.Get(incoming, new(opportunity.Result, region.Join));
+                        var inputs = c.Get(incoming, new(opportunity.Result, region.Join!));
                         if (!inputs.IsSuccess || inputs.Value.IsEmpty) continue;
                         var expectedConditions = expected.SelectMany(p => p.Conditions).Select(g => g.Value!).Distinct().ToArray();
                         matched = region.Blocks.Append(region.Entry).Select(b => blocks[b].End).OfType<Branch>().All(b =>
@@ -91,7 +91,7 @@ public sealed partial class AccessorQuery
                         foreach (var input in inputs.Value)
                         {
                             var cases = Enumerable.Range(0, expected.Length).Where(i => expected[i].Conditions.All(g =>
-                                c.Get(facts, new(default, g.Value!, new FlowEdge(input.Predecessor, region.Join))) is { IsSuccess: true } fact
+                                c.Get(facts, new(default, g.Value!, new FlowEdge(input.Predecessor, region.Join!))) is { IsSuccess: true } fact
                                 && fact.Value == (g.Positive ? PathTruth.True : PathTruth.False))).ToArray();
                             if (cases is not [var one] || interpreter.Result(input.Value) != interpreter.Result(expected[one].Value!)) { matched = false; break; }
                             covered.Add(one);
@@ -111,7 +111,7 @@ public sealed partial class AccessorQuery
                     {
                         var removed = regionAt.Blocks.ToHashSet(); var included = reads.Select(s => s.Identity).ToHashSet();
                         var escapingReads = sites.Where(s => !s.Write && (removed.Contains(s.Point.Block) || included.Contains(s.Identity))).Select(s => s.Value).ToHashSet();
-                        var escapingMerges = removed.Append(regionAt.Join).SelectMany(b => blocks[b].Merges).Select(m => m.Identity).ToHashSet();
+                        var escapingMerges = removed.Append(regionAt.Join!).SelectMany(b => blocks[b].Merges).Select(m => m.Identity).ToHashSet();
                         var outside = blocks.Values.Where(b => !removed.Contains(b.Identity)).SelectMany(b => b.Statements
                             .Where(s => s is not MemoryRead read || !included.Contains(read.Identity)).SelectMany(SnapshotRewrite.Uses)
                             .Concat(b.Identity == regionAt.Entry ? [] : SnapshotRewrite.Uses(b.End)));

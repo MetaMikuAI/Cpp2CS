@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
@@ -232,6 +234,33 @@ public sealed partial class IntegerLowering
             readValues.Add(resolved.Value, definition = new(read));
         readDefinitions.Add(read.Identity, definition);
     }
+    /// <summary>只投影签名实际使用的返回片；间接结果不以缓冲区地址冒充返回值。</summary>
+    private sealed class AccessorReturnsQuery(MethodBinder binder, SignatureBinding signature, StateQueries state, bool isVoid)
+        : Query<BlockIdentity, IReadOnlyList<Term>>
+    {
+        private readonly BoundSourceQuery sources = new(state);
+        public override Outcome<IReadOnlyList<Term>> Compute(QueryContext c, BlockIdentity key)
+        {
+            Outcome<IReadOnlyList<Term>> No(string message) => Outcome<IReadOnlyList<Term>>.Failure(new("inline.Accessor.Return", message));
+            var block = c.Snapshot.Blocks.Single(b => b.Identity == key);
+            if (block.End is not Return returned) return No("区域路径没有以返回结束");
+            if (isVoid) return Outcome<IReadOnlyList<Term>>.Success([]);
+            var bound = binder.Return(returned, signature, c.Snapshot.Terms,
+                c.Snapshot.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), c.Snapshot.IncomingArgumentArea);
+            if (bound.Value?.Source is not { } source) return No("签名返回值绑定失败");
+            IEnumerable<BoundSource> parts = source is PiecesSource pieces ? pieces.Pieces.OrderBy(p => p.ValueOffset).Select(p => p.Source) : [source];
+            var values = new List<Term>();
+            foreach (var part in parts)
+            {
+                var value = c.Get(sources, new(part, new(key, block.Statements.Length)));
+                if (!value.IsSuccess) return value.Propagate<IReadOnlyList<Term>>();
+                var resolved = c.Get(state.Resolve, value.Value);
+                if (!resolved.IsSuccess) return resolved.Propagate<IReadOnlyList<Term>>();
+                values.Add(resolved.Value);
+            }
+            return Outcome<IReadOnlyList<Term>>.Success(values);
+        }
+    }
     private void PrepareAccessorProgram()
     {
         if (accessorProgramPrepared || accessors is null || locations is null) return;
@@ -247,7 +276,8 @@ public sealed partial class IntegerLowering
         }
         var answer = accessors.Match(context, method, state, locations, arguments, callDefinitions.ToDictionary(p => p.Key,
             p => new AccessorCallSite(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)),
-            calls is null ? null : new Cpp2CS.Recovery.Checks.CheckQueries(state, calls, locations));
+            calls is null ? null : new Cpp2CS.Recovery.Checks.CheckQueries(state, calls, locations),
+            new AccessorReturnsQuery(binder, signature, state, ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))));
         if (!answer.IsSuccess) { accessorProgramFailure = new("inline.Accessor.None", "模板项匹配查询未完成", answer.Why); return; }
         accessorProgram = answer.Value;
         foreach (var replacement in accessorProgram.Replacements)
@@ -275,6 +305,26 @@ public sealed partial class IntegerLowering
             accessorResults.Add(replacement, local);
             accessorConsumedReads.UnionWith(replacement.Reads);
         }
+    }
+    // 区域的几个出口折成入口的一条边；保留续点的其他入边与并行赋值。
+    private IReadOnlyList<Incoming> AccessorInputs(BlockIdentity target, IReadOnlyList<Incoming> inputs)
+    {
+        if (accessorRegions.Count == 0) return inputs;
+        var result = inputs.ToList();
+        foreach (var region in accessorRegions.Values.Where(r => r.Join == target))
+        {
+            var folded = result.Where(i => i.Predecessor == region.Entry || region.Blocks.Contains(i.Predecessor)).ToArray();
+            if (folded.Length == 0) continue;
+            var values = folded.Select(i => context.Get(state.Resolve, i.Value)).ToArray();
+            if (values.Any(v => !v.IsSuccess) || values.Select(v => v.Value).Distinct().Count() != 1)
+            {
+                Fail<object>(LoweringFailureKind.State, "区域出口对续点合流的输入不同", code: "inline.Accessor.Placement");
+                return [];
+            }
+            result.RemoveAll(i => folded.Contains(i));
+            result.Add(new(region.Entry, values[0].Value));
+        }
+        return result;
     }
     private void MaterializeAccessorProgram()
     {
