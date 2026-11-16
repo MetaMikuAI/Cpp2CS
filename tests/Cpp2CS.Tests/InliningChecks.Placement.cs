@@ -24,6 +24,7 @@ internal static partial class InliningChecks
             for (; why is not null; why = why.Cause) yield return why;
         }
         foreach (var mode in new[] { "Public", "Private", "Static", "Ambiguous", "NoGetter", "Write", "Receiver", "Parts", "Accessible", "SplitReads" })
+        foreach (bool reverse in mode == "Ambiguous" ? new[] { false, true } : new[] { false })
         {
             var f = new Fixture(valueOwner: true, fieldOffset: 0, receiverOwner: mode == "Receiver");
             f.Owner.Size = 16;
@@ -109,16 +110,16 @@ internal static partial class InliningChecks
             else builder.Blocks.Add(new(entry, [], [.. statements], new Return(mode == "Write" ? [] :
                 [new(new(SlotKind.Integer), value.Width == 64 ? value : terms.Concat(value, terms.Constant(0, 32)))])));
             var attempts = new List<AccessorAttempt>();
+            if (reverse) f.Caller.Methods = f.Caller.Methods.Reverse().ToArray();
             var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault), attempts.Add);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(caller), f.Binder, f.Types,
                 calls: f.Calls, spec: f.Spec, names: names, accessors: accessors).Run();
-            if (mode is "Ambiguous" or "NoGetter" or "Write" or "Receiver" or "SplitReads")
+            if (mode is "NoGetter" or "Write" or "Receiver" or "SplitReads")
             {
                 checks.True(lowered.Body is null, "结构体内部访问反例保留洞：" + mode);
                 var why = lowered.Failure?.Reason;
                 checks.True(mode switch
                 {
-                    "Ambiguous" => why?.Code == "inline.Accessor.Ambiguous",
                     "NoGetter" or "Receiver" => attempts.Any(t => t.Answer.NoneReason == AccessorNoneReason.NoCandidates),
                     "SplitReads" => Reasons(why).Any(r => r.Code == "inline.Accessor.Placement.ReadDominance"),
                     _ => why?.Code == "inline.Accessor.None" && Reasons(why).Any(r => r.Code == "inline.Accessor.Placement.NestedAccess"
@@ -133,6 +134,8 @@ internal static partial class InliningChecks
                     || v is StaticFieldValue { Accessor: { } shared } && shared.Method.Method == getter)).Select(a => a.Address).ToArray();
             checks.True(positions.SequenceEqual(mode switch { "Parts" => new[] { 100UL, 104UL }, "Static" => [108UL],
                 "Accessible" => [], _ => [100UL] }), "整字段 getter 保留每次原读取的位置：" + mode);
+            if (mode == "Ambiguous") checks.True(attempts.Any(a => a.Answer is { Failure: null, Matches: 2 } && a.Answer.Method?.Method == getter),
+                "结构体内部读取的相同模板确定选取并记录个数，不依赖声明次序");
             using var emission = new EmissionFixture(f);
             var problems = emission.Emitter.Emit([.. bodies.Values, complete]);
             checks.True(problems.Count == 0, "结构体整体 getter 与子路径通过 CIL 校验：" + mode + " " + string.Join("；", problems.Values));

@@ -90,8 +90,13 @@ internal static partial class InliningChecks
             ManagedBody Body(MethodDef m) => new(MethodRef.Open(m), [new(0, [new ManagedReturn(0, openField)])]);
             var ambiguous = new AccessorQuery(f.Types, new CachedAccessorTemplates(Body));
             var closed = new DefinitionRef(f.Owner, [f.Integer]);
-            checks.True(ambiguous.Resolve(new(MethodRef.Open(caller), 0, new(f.Field.Field, closed), closed, AccessorKind.Getter, true))
-                is { Failure.Code: "inline.Accessor.Ambiguous", Matches: 2 }, "泛型声明类型的两个读模板保持歧义");
+            foreach (bool reverse in new[] { false, true })
+            {
+                f.Owner.Methods = reverse ? [another, getter] : [getter, another];
+                var choice = ambiguous.Resolve(new(MethodRef.Open(caller), 0, new(f.Field.Field, closed), closed, AccessorKind.Getter, true));
+                checks.True(choice is { Failure: null, Matches: 2 } && choice.Method?.Method == getter && choice.Method.DeclaringType.Equals(closed),
+                    "同一泛型声明实例的相同模板确定选取，不依赖声明次序");
+            }
             another.GenericParameters = [new() { Name = "M", Position = 0, Attributes = 0 }];
             f.Owner.Methods = [another];
             int requested = 0;
@@ -246,8 +251,14 @@ internal static partial class InliningChecks
             var another = f.Method(f.Owner, "Another", false, false); another.ReturnType = target.Type;
             var ambiguousSource = new AccessorTemplateSource(Facts([.. entries, new(72, EntryKind.GenericMethod, On(another, f.Integer), 5, null)]),
                 new ClosedTemplateFrontend(m => Native(m, target, false)));
-            checks.True(Ask(new(f.Types, ambiguousSource), f.Types.Int64) is { Failure.Code: "inline.Accessor.Ambiguous", Matches: 2 },
-                "两个封闭见证模板相同仍保留歧义洞");
+            foreach (bool reverse in new[] { false, true })
+            {
+                f.Owner.Methods = reverse ? [another, getter] : [getter, another];
+                var choice = Ask(new(f.Types, ambiguousSource), f.Types.Int64);
+                checks.True(choice is { Failure: null, Matches: 2 } && choice.Method?.Method == getter
+                    && choice.Method.DeclaringType.Equals(new DefinitionRef(f.Owner, [f.Types.Int64])),
+                    "相同封闭见证模板确定选取，保留现场实例且不依赖声明次序");
+            }
         }
         static IEnumerable<Reason> Reasons(Reason? reason)
         { for (; reason is not null; reason = reason.Cause) yield return reason; }

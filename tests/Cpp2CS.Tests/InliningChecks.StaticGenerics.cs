@@ -28,9 +28,10 @@ internal static partial class InliningChecks
 
     private static void GenericStaticAccessorChecks(Assertions checks)
     {
-        foreach (string mode in new[] { "Closed", "Method", "ArrayArgument", "Declaring", "Both", "Open", "Ambiguous", "Conflict", "Mismatch", "Inaccessible", "Unbound", "Invalid", "ForeignInitializer", "Initialization", "Barrier" })
+        foreach (string mode in new[] { "DifferentInstances", "Closed", "Method", "ArrayArgument", "Declaring", "Both", "Open", "Ambiguous", "Conflict", "Mismatch", "Inaccessible", "Unbound", "Invalid", "ForeignInitializer", "Initialization", "Barrier" })
+        foreach (bool reverse in mode == "Ambiguous" ? new[] { false, true } : new[] { false })
         {
-            var f = new Fixture(generic: mode is "Declaring" or "Both", externalCaller: true);
+            var f = new Fixture(generic: mode is "Declaring" or "Both" or "DifferentInstances", externalCaller: true);
             GenericParameterDef Parameter(string name, int index = 0) => new() { Name = name, Position = index, Attributes = 0 };
             var hidden = new TypeDef { Index = f.Program.Types.Count, Assembly = f.Owner.Assembly, Namespace = "", Name = "Cache`1",
                 Token = (uint)(0x02000001 + f.Program.Types.Count), Attributes = TypeAttributes.NotPublic, IsValueType = false, IsEnum = false,
@@ -43,10 +44,10 @@ internal static partial class InliningChecks
                 Attributes = FieldAttributes.Assembly | FieldAttributes.Static, Offset = 0, Token = (uint)(0x04000001 + f.Program.Fields.Count) };
             hidden.Fields = [field]; ((List<FieldDef>)f.Program.Fields).Add(field);
             var getter = f.Method(f.Owner, "Fetch", false, true, accessible: mode != "Inaccessible");
-            if (mode is not ("Closed" or "Declaring")) getter.GenericParameters = mode == "Unbound" ? [Parameter("M"), Parameter("N", 1)] : [Parameter("M")];
+            if (mode is not ("Closed" or "Declaring" or "DifferentInstances")) getter.GenericParameters = mode == "Unbound" ? [Parameter("M"), Parameter("N", 1)] : [Parameter("M")];
             var open = MethodRef.Open(getter);
             var patternArguments = mode == "Both" ? open.TypeArguments.Concat(open.MethodArguments).ToArray()
-                : mode == "Declaring" ? open.TypeArguments.ToArray() : open.MethodArguments.Take(1).ToArray();
+                : mode is "Declaring" or "DifferentInstances" ? open.TypeArguments.ToArray() : open.MethodArguments.Take(1).ToArray();
             if (mode == "Closed") patternArguments = [f.Integer];
             if (mode == "Conflict") patternArguments = [patternArguments[0], patternArguments[0]];
             if (mode == "Mismatch") patternArguments = [new ArrayRef(patternArguments[0], 1)];
@@ -60,26 +61,40 @@ internal static partial class InliningChecks
                 var other = f.Method(f.Owner, "Other", false, true); other.GenericParameters = getter.GenericParameters;
                 other.ReturnType = getter.ReturnType; bodies.Add(other, Body(other));
             }
+            if (mode == "DifferentInstances")
+            {
+                var other = f.Method(f.Owner, "Other", false, true);
+                TypeRef element = new ArrayRef(open.TypeArguments[0], 1);
+                var secondPattern = new FieldRef(field, new DefinitionRef(hidden, [element]));
+                other.ReturnType = field.Type.Substitute([element], []);
+                bodies.Add(other, new(MethodRef.Open(other), [new(0, [new ManagedReturn(0,
+                    new StaticFieldValue(secondPattern, other.ReturnType, 64))])]));
+            }
             // 候选所在的类另有静态构造函数：调用它会多触发一次现场没有的初始化。
             if (mode == "ForeignInitializer") f.Method(f.Owner, ".cctor", true, true, []);
             var caller = f.Method(f.Caller, "Use", false, true);
             if (mode == "Open") caller.GenericParameters = [Parameter("U")];
             TypeRef argument = mode == "Open" ? MethodRef.Open(caller).MethodArguments[0]
-                : mode == "Invalid" ? new PointerRef(f.Integer) : mode == "ArrayArgument" ? new ArrayRef(f.Integer, 1) : f.Integer;
+                : mode == "Invalid" ? new PointerRef(f.Integer) : mode is "ArrayArgument" or "DifferentInstances" ? new ArrayRef(f.Integer, 1) : f.Integer;
             var actualArguments = mode is "Both" or "Conflict" ? new[] { argument, f.Types.String } : new[] { argument };
             var actual = new FieldRef(field, new DefinitionRef(hidden, actualArguments));
             caller.ReturnType = field.Type.Substitute(actualArguments, []);
+            if (reverse) f.Owner.Methods = f.Owner.Methods.Reverse().ToArray();
+            if (reverse) ((List<MethodDef>)f.Program.Methods).Reverse();
             var query = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault));
             var answer = query.Resolve(new(MethodRef.Open(caller), 0, actual, null, AccessorKind.Getter, true));
-            bool rejected = mode is "Ambiguous" or "Conflict" or "Mismatch" or "Inaccessible" or "Unbound" or "Invalid" or "ForeignInitializer";
+            bool rejected = mode is "DifferentInstances" or "Conflict" or "Mismatch" or "Inaccessible" or "Unbound" or "Invalid" or "ForeignInitializer";
             checks.True((answer.Method is null) == rejected, "静态字段类型合一：" + mode + " " + answer.Failure);
             if (rejected)
             {
+                if (mode == "DifferentInstances") checks.True(answer is { Matches: 2, Failure.Code: "inline.Accessor.Ambiguous" },
+                    "同一泛型声明类型的不同封闭实例保留歧义");
                 checks.True(answer.Failure?.Cause is not null, "失败保留锚点与推导原因：" + mode);
-                if (mode == "Ambiguous") checks.True(answer is { Matches: 2, Failure.Code: "inline.Accessor.Ambiguous" }, "两个封闭实例保持歧义");
                 if (mode is "Conflict" or "Mismatch" or "Unbound" or "Invalid") checks.True(answer.Failure?.Cause?.Code == "inline.Accessor.TypeArguments", "合一失败说明泛型实参缺口：" + mode);
                 continue;
             }
+            if (mode == "Ambiguous") checks.True(answer is { Failure: null, Matches: 2 } && answer.Method?.Method == getter,
+                "同一声明实例的泛型静态方法确定选取，不依赖声明次序");
             checks.True(answer.Method!.TypeArguments.SequenceEqual(mode is "Declaring" or "Both" ? [argument] : [])
                 && answer.Method.MethodArguments.SequenceEqual(mode is "Closed" or "Declaring" ? [] : mode == "Both" ? [f.Types.String] : [argument]), "类与方法的泛型槽位独立绑定：" + mode);
             var (native, names) = f.Function(actual, false, width: 64);

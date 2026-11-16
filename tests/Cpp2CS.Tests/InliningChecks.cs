@@ -94,7 +94,12 @@ internal static partial class InliningChecks
         f.Owner.Methods = [getter, other];
         var ambiguous = new AccessorQuery(f.Types, new CachedAccessorTemplates(m => Body(m, new ManagedReturn(0, field))));
         var multiple = ambiguous.Resolve(new(MethodRef.Open(caller), 0, f.Field, f.OwnerType, AccessorKind.Getter, true));
-        checks.True(multiple.Failure?.Code == "inline.Accessor.Ambiguous" && multiple.Matches == 2, "两个模板成立时报 Ambiguous 并给出个数");
+        checks.True(multiple.Method?.Method == getter && multiple.Failure is null && multiple.Matches == 2, "相同单字段模板按元数据次序选取并保留个数");
+        f.Owner.Methods = [other, getter];
+        checks.True(ambiguous.Resolve(new(MethodRef.Open(caller), 0, f.Field, f.OwnerType, AccessorKind.Getter, true)).Method?.Method == getter,
+            "相同单字段模板的选择不依赖候选声明次序");
+        checks.True(ambiguous.Resolve(new(MethodRef.Open(caller), 0, f.Field, f.OwnerType, AccessorKind.Getter, false))
+            is { Method: null, Failure.Code: "inline.Accessor.Ambiguous", Matches: 2 }, "多个模板都放不下时保留原歧义原因");
         var virtualGetter = f.Method(f.Owner, "Virtual", false, false, virtualMethod: true);
         f.Owner.Methods = [virtualGetter];
         checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.NoCandidates, "虚方法不进候选");

@@ -18,6 +18,7 @@ internal static partial class InliningChecks
     private static void ForwardingChecks(Assertions checks)
     {
         foreach (string mode in new[] { "Getter", "Arguments", "Virtual", "Void", "DifferentArgument", "DifferentIdentity", "OtherUse", "TwoCandidates", "ExtraWrite" })
+        foreach (bool reverse in mode == "TwoCandidates" ? new[] { false, true } : new[] { false })
         {
             var f = new Fixture();
             bool argument = mode is "Arguments" or "DifferentArgument";
@@ -81,20 +82,34 @@ internal static partial class InliningChecks
             if (mode == "OtherUse") returned = terms.Apply(new CoreOperator(CoreOperation.Select), 32,
                 terms.Apply(new CoreOperator(CoreOperation.Equal), 1, loaded, terms.Constant(0, 64)), returned, terms.Constant(7, 32));
             builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), new Return(empty ? [] : [new(new(SlotKind.Integer), terms.Concat(returned, terms.Constant(0, 32)))])));
-            var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault));
+            if (reverse) f.Owner.Methods = f.Owner.Methods.Reverse().ToArray();
+            var attempts = new List<AccessorAttempt>();
+            var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault), attempts.Add);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(caller), f.Binder, f.Types,
                 calls: calls, effects: new ManagedCallEffects(calls), spec: f.Spec, accessors: accessors).Run();
             if (mode is "DifferentArgument" or "DifferentIdentity" or "OtherUse" or "ExtraWrite")
                 checks.True(lowered.Body is null, "转调身份、实参、事件与其他使用反例保持洞：" + mode + " " + lowered.Failure);
-            else if (mode == "TwoCandidates") checks.True(lowered.Failure?.Reason.Code == "inline.Accessor.Ambiguous", "同一转调的两个外层候选保留歧义：" + lowered.Failure);
             else
             {
                 checks.True(lowered.Body is not null, "转调下降：" + mode + " " + lowered.Failure);
                 if (lowered.Body is not { } body) continue;
                 var recovered = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().ToArray();
                 checks.True(recovered is [{ Inlined: true, Address: 104 }] && recovered[0].Invocation.Method.Method == outer, "转调在原调用位置只发出一次外层调用：" + mode);
+                if (mode == "TwoCandidates") checks.True(attempts.Any(a => a.Answer is { Failure: null, Matches: 2 } && a.Answer.Method?.Method == outer),
+                    "同一转调的两个外层模板确定选取并记录个数，不依赖声明次序");
                 using var emission = new EmissionFixture(f);
-                checks.True(emission.Emitter.Emit([.. bodies.Values, body]).Count == 0, "转调结果与实参通过 CIL 校验：" + mode);
+                var problems = emission.Emitter.Emit([.. bodies.Values, body]);
+                checks.True(problems.Count == 0, "转调结果与实参通过 CIL 校验：" + mode);
+                if (mode == "TwoCandidates" && problems.Count == 0) CompareExplanationCalls(checks, emission.Method(caller), """
+                    public class Owner {
+                        private Owner Child;
+                        public int Target() => 7;
+                        public int Forward() => Child.Target();
+                        public int Alternative() => Child.Target();
+                        public static int Expanded(Owner value) => value.Child.Target();
+                    }
+                    public static class Caller { public static int Output(Owner value) => 0; }
+                    """);
             }
         }
     }

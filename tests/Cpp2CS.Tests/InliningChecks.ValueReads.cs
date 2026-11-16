@@ -22,6 +22,7 @@ internal static partial class InliningChecks
     private static void ValueAccessorChecks(Assertions checks)
     {
         foreach (string mode in new[] { "Parameter", "CallResult", "Nested", "Readonly", "Generic", "Ambiguous", "Inaccessible", "Event", "Conditional", "NoGetter", "SplitReads" })
+        foreach (bool reverse in mode == "Ambiguous" ? new[] { false, true } : new[] { false })
         {
             bool generic = mode == "Generic";
             var f = new Fixture(valueOwner: true, generic: generic, fieldOffset: 0);
@@ -81,9 +82,10 @@ internal static partial class InliningChecks
             var catalog = RuntimeFunctionCatalog.Select(f.Spec.Layout.UnityVersion, f.Spec.Layout.Triple, f.Spec.Layout.DataModel);
             var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(create), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
             var attempts = new List<AccessorAttempt>();
+            if (reverse) f.Owner.Methods = f.Owner.Methods.Reverse().ToArray();
             var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault), attempts.Add);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(caller), f.Binder, f.Types, calls: calls, spec: f.Spec, accessors: accessors).Run();
-            bool positive = mode is "Parameter" or "CallResult" or "Nested" or "Readonly";
+            bool positive = mode is "Parameter" or "CallResult" or "Nested" or "Readonly" or "Ambiguous";
             if (mode == "SplitReads")
             {
                 checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == "lowering.Access.ReadPlacement", "纯 getter 不绕过读取局部的支配要求：" + lowered.Failure);
@@ -92,7 +94,6 @@ internal static partial class InliningChecks
             if (!positive)
             {
                 checks.True(lowered.Body is null && attempts.Any(a => a.Answer.Failure is not null), "纯值读取反例保留查询原因：" + mode + " " + lowered.Failure);
-                if (mode == "Ambiguous") checks.True(attempts.Any(a => a.Answer.Failure?.Code == "inline.Accessor.Ambiguous"), "纯值读取保持模板歧义");
                 continue;
             }
             checks.True(lowered.Body is not null, "纯值读取下降：" + mode + " " + lowered.Failure);
@@ -101,6 +102,8 @@ internal static partial class InliningChecks
                 .OfType<FieldValue>().Where(v => v.Accessor is not null).ToArray();
             checks.True(recovered.Length == 1 && recovered[0].Accessor!.Method.Method == getter
                 && recovered[0].Accessor!.Method.DeclaringType.Equals(instance), "纯值读取采用接收者类型的唯一 getter：" + mode);
+            if (mode == "Ambiguous") checks.True(attempts.Any(a => a.Answer is { Failure: null, Matches: 2 } && a.Answer.Method?.Method == getter),
+                "纯值读取的相同模板确定选取并记录个数，不依赖声明次序");
             using var skeleton = new SkeletonScope(f.Program);
             var emitter = new BodyEmitter(skeleton.Value, f.Types);
             var problems = emitter.Emit([.. bodies.Values, complete]);
@@ -121,7 +124,7 @@ internal static partial class InliningChecks
                 """;
             using var reference = new CompiledSource(source);
             using var tested = new CompiledSource(source);
-            var selected = nesting ? "NestedRead" : mode;
+            var selected = nesting ? "NestedRead" : mode == "Ambiguous" ? "Parameter" : mode;
             var actual = tested.Method("Caller", selected);
             actual.Body = emitted.Body;
             Mono.Cecil.TypeReference MapType(Mono.Cecil.TypeReference type) => type is Mono.Cecil.ByReferenceType byref

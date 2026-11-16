@@ -269,6 +269,14 @@ public sealed partial class AccessorQuery
                 var pool = placeable.Length != 0 ? placeable : matches.ToArray();
                 var best = pool.Where(m => !pool.Any(other => other.Coverage.IsSupersetOf(m.Coverage) && other.Accesses.IsSupersetOf(m.Accesses)
                     && (other.Coverage.IsProperSupersetOf(m.Coverage) || other.Accesses.IsProperSupersetOf(m.Accesses)))).ToArray();
+                int matchCount = best.Length;
+                if (best.Length > 1 && best.Select(m => m.Replacement.Method.Method).Distinct().Count() == best.Length
+                    && best.All(m => m.Placement is null && m.Coverage.SetEquals(best[0].Coverage) && m.Accesses.SetEquals(best[0].Accesses)
+                        && m.Replacement.Result == best[0].Replacement.Result && m.Replacement.Receiver == best[0].Replacement.Receiver))
+                {
+                    var selected = OrderExplanations(best.Select(m => m.Replacement.Method), templates).First();
+                    best = [best.Single(m => m.Replacement.Method.Equals(selected))];
+                }
                 var closest = diagnostics.OrderByDescending(d => d.Anchor).ThenByDescending(d => d.Calls).ThenByDescending(d => d.Fields)
                     .ThenBy(d => d.Extra).ThenBy(d => d.Method.Token).FirstOrDefault();
                 // 首因只写原因的种类；候选的名字放在锚点之后，同一种原因不因候选不同而分成多行。
@@ -303,7 +311,7 @@ public sealed partial class AccessorQuery
                     else
                     {
                         replacements.Add(accepted); consumed.UnionWith(accepted.Accesses);
-                        observe?.Invoke(new(access, new(accepted.Method, null, Matches: 1) { IncompleteCandidates = incomplete }));
+                        observe?.Invoke(new(access, new(accepted.Method, null, Matches: matchCount) { IncompleteCandidates = incomplete }));
                         continue;
                     }
                 }

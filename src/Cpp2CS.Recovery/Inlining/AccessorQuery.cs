@@ -103,11 +103,19 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             }
         }
         if (matches.Count == 0) return None(reason);
+        int matchCount = matches.Count;
+        if (matches.Count > 1 && (access.HasPlacement || valueRead) && matches.Select(m => m.Method).Distinct().Count() == matches.Count
+            && matches.All(m => m.DeclaringType.Equals(matches[0].DeclaringType)))
+            matches = [OrderExplanations(matches, templates).First()];
         if (matches.Count > 1) return new(null, new("inline.Accessor.Ambiguous", $"有 {matches.Count} 个访问器模板相同，无法区分原调用", witnesses.Values.FirstOrDefault()), Matches: matches.Count)
             { IncompleteCandidates = incomplete };
         if (!access.HasPlacement && !valueRead) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置",
-                witnesses.GetValueOrDefault(matches[0]) is { } evidence ? evidence with { Cause = access.PlacementFailure } : access.PlacementFailure), Matches: 1)
+                witnesses.GetValueOrDefault(matches[0]) is { } evidence ? evidence with { Cause = access.PlacementFailure } : access.PlacementFailure), Matches: matchCount)
             { IncompleteCandidates = incomplete };
-        return new(matches[0], null, Matches: 1) { IncompleteCandidates = incomplete, Witness = witnesses.GetValueOrDefault(matches[0]) };
+        return new(matches[0], null, Matches: matchCount) { IncompleteCandidates = incomplete, Witness = witnesses.GetValueOrDefault(matches[0]) };
     }
+
+    private static IOrderedEnumerable<MethodRef> OrderExplanations(IEnumerable<MethodRef> methods, IAccessorTemplateSource templates) =>
+        methods.OrderByDescending(m => templates.Get(m).Template?.SingleField == true)
+            .ThenBy(m => m.Method.Owner.FullName, StringComparer.Ordinal).ThenBy(m => m.Method.Token).ThenBy(m => m.Method.Index);
 }
