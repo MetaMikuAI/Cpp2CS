@@ -26,7 +26,8 @@ public sealed class StructConstructorTemplates(ManagedTypes types, IMethodTempla
     {
         if (!active.Add(method)) return No("Recursive", "this 构造链成环。");
         var body = source.GetBody(method);
-        if (body is null) return No("Incomplete", "构造函数没有完整模板。", source.GetFailure(method));
+        if (body is null) return No("Incomplete", "构造函数没有完整模板。",
+            new("inline.candidate", "候选 " + method.Owner.FullName + "." + method.Name, source.GetFailure(method)));
         if (method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: true } || method.GenericParameters.Count != 0)
             return No("Signature", "候选不是值类型的实例构造函数。");
         if (body.Method.DeclaringType is not DefinitionRef type || type.Arguments.Any(ContainsParameter))

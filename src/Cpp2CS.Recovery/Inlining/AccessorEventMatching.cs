@@ -28,7 +28,8 @@ public sealed partial class AccessorQuery
             Dictionary<int, Term> fixedArgs, List<Site> sites, Dictionary<BlockIdentity, Block> blocks,
             List<CandidateMatch> matches, HashSet<string> shapes)
         {
-            int reached = 0; string? detail = null;
+            // 负的阶段是区域成立之前的原因：候选的续点多数本来就不对，只在没有更靠后的原因时才报。
+            int reached = -4; string? detail = null;
             void Unmatched(int stage, string why) { if (stage >= reached) { reached = stage; detail = why; } }
             if (template.Paths.Any(p => p.Result is not null)) { shapes.Add("带事件条件模板：返回值尚未配对"); return; }
             var invoked = template.Paths.SelectMany(p => p.Events).OfType<AccessorInvocation>().Select(call => call.Method.Method).Distinct().ToArray();
@@ -57,9 +58,11 @@ public sealed partial class AccessorQuery
                         if (anchor.Point.Block == entry.Identity && anchor.Point.Before < start) continue;
                         var point = new Point(entry.Identity, start);
                         var paths = c.Get(pathsQuery, new(point, join.Identity));
-                        if (!paths.IsSuccess || paths.Value.Length != template.Paths.Count) continue;
+                        if (!paths.IsSuccess) continue;
+                        if (paths.Value.Length != template.Paths.Count) { Unmatched(-3, "区域的路径数与模板不同"); continue; }
                         var points = paths.Value.SelectMany(p => p.Points).ToHashSet();
-                        if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { Unwind: not null } or Call { DoesNotReturn: true } or MemoryRead { Acquire: true })) continue;
+                        if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { Unwind: not null })) { Unmatched(-2, "区域内的调用带展开边"); continue; }
+                        if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { DoesNotReturn: true } or MemoryRead { Acquire: true })) { Unmatched(-2, "区域内有不返回的调用或获取语义的读取"); continue; }
                         var regionChecks = paths.Value.SelectMany(p => p.Edges).Distinct().Select(edge =>
                         {
                             if (blocks[edge.Source].End is not Branch gate) return null;
@@ -67,7 +70,7 @@ public sealed partial class AccessorQuery
                             return checks is not null && c.Get(exits, failure) is { IsSuccess: true, Value: true }
                                 && c.Get(checks.Checks, failure) is { IsSuccess: true, Value: { } check } ? check : null;
                         }).OfType<ConditionalCheck>().Distinct().ToArray();
-                        if (regionChecks.Any(check => check.CanAbsorb && !check.Accesses.All(points.Contains))) continue;
+                        if (regionChecks.Any(check => check.CanAbsorb && !check.Accesses.All(points.Contains))) { Unmatched(-1, "被吸收的检查有访问点在区域外"); continue; }
                         var window = sites.Where(s => points.Contains(s.Point)).ToArray();
                         var roots = points.SelectMany(p => SnapshotRewrite.Uses(blocks[p.Block].Statements[p.Before]))
                             .Concat(paths.Value.SelectMany(p => p.Edges).Select(e => blocks[e.Source].End).OfType<Branch>().Select(b => b.Condition));
@@ -244,7 +247,7 @@ public sealed partial class AccessorQuery
                     }
                 }
             }
-            if (matches.Count == 0) shapes.Add("带事件条件模板未匹配：" + (detail ?? "区域或路径数量不成立"));
+            if (matches.Count == 0) shapes.Add("带事件条件模板未匹配：" + (detail ?? "没有从锚点字段的读取通向公共续点的区域"));
         }
         private bool CheckEquals(QueryContext c, ConditionalCheck actual, AccessorCheck expected)
         {
