@@ -116,7 +116,17 @@ public sealed partial class IntegerLowering
     {
         var body = new ManagedBody(method, blocks);
         if (exceptions is null) return body;
-        var order = exceptions.Order.Select(id => labels[id]).ToArray();
+        // 访问器区域折成一次调用后只剩入口块：被折掉的块必须与入口块在同一组保护区与处理体里，
+        // 否则这次调用受到的保护与原来各条路径上的不同。
+        foreach (var region in accessorRegions.Values)
+            if (region.Blocks.Any(removed => exceptions.Regions.Any(r => r.Try.Contains(region.Entry) != r.Try.Contains(removed)
+                || r.Clauses.Any(clause => clause.Body.Contains(region.Entry) != clause.Body.Contains(removed)))))
+            {
+                Fail<object>(LoweringFailureKind.Exception, "访问器区域跨越保护区或处理体的边界", code: "lowering.Exception.Region");
+                return body;
+            }
+        var kept = exceptions.Order.Where(id => !accessorRemovedBlocks.Contains(id)).ToArray();
+        var order = kept.Select(id => labels[id]).ToArray();
         if (extraBlocks.Count != 0)
         {
             Fail<object>(LoweringFailureKind.Exception, "异常区域中的跳转表扩展尚未建立区域归属", code: "lowering.Exception.Region");
@@ -138,8 +148,8 @@ public sealed partial class IntegerLowering
                     .Append(new ManagedEndFault(0)).ToArray() };
             }).ToArray(),
             Regions = exceptions.Regions.SelectMany(r => r.Clauses.Select(clause => new ManagedRegion(
-                exceptions.Order.Where(r.Try.Contains).Select(id => labels[id]).ToArray(), labels[clause.Entry],
-                exceptions.Order.Where(clause.Body.Contains).Select(id => labels[id]).ToArray(), clause.Finally is null ? caughtLocals[clause] : null, clause.Finally is null ? ManagedRegionKind.Catch : ManagedRegionKind.Finally)
+                kept.Where(r.Try.Contains).Select(id => labels[id]).ToArray(), labels[clause.Entry],
+                kept.Where(clause.Body.Contains).Select(id => labels[id]).ToArray(), clause.Finally is null ? caughtLocals[clause] : null, clause.Finally is null ? ManagedRegionKind.Catch : ManagedRegionKind.Finally)
                 { CatchType = clause.Finally is null ? clause.Type : null })).ToArray(),
         };
     }
