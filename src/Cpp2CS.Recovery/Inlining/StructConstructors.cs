@@ -142,6 +142,8 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
         foreach (var method in key.Type.Definition.Methods.Where(m => m is { Name: ".ctor", IsStatic: false }))
         {
             var selected = new MethodRef(method, key.Type.Arguments, []);
+            // 一个函数的方法体里没有它自己的内联副本（设计 12.4）：正在恢复的构造函数不作自己的候选，也不为此去取自己的模板。
+            if (method == key.Caller.Method && key.Type.Equals(key.Caller.DeclaringType)) continue;
             if (!ManagedAccess.Method(types, key.Caller.Method.Owner, selected, key.Type)) continue;
             if (method.Parameters.Any(p => types.Kind(selected.Concrete(p.Type)) == TypeKind.Struct
                 ? !origins.Any(o => o.Type.Equals(selected.Concrete(p.Type)))

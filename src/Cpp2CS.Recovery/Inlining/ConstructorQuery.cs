@@ -37,7 +37,9 @@ public sealed class ConstructorQuery(ManagedTypes types, ConstructorTemplates te
         ConstructorAnswer No(string code, string message) => new(null, new(code, message)) { Candidates = diagnostics };
         if (access.Type is not DefinitionRef type || type.Definition.IsValueType)
             return No("inline.Constructor.NotStraight", "Signature：构造类型没有引用类型定义。");
-        foreach (var candidate in type.Definition.Methods.Where(m => m is { Name: ".ctor", IsStatic: false } && (access.Anchor != ConstructorAnchor.Base || m != access.Caller.Method)))
+        // 正在恢复的构造函数不作自己的候选：基类初始化本来就不能是自己；对象创建处，一个函数的方法体里没有它自己的内联副本（设计 12.4）。
+        foreach (var candidate in type.Definition.Methods.Where(m => m is { Name: ".ctor", IsStatic: false }
+            && (m != access.Caller.Method || access.Anchor != ConstructorAnchor.Base && !type.Equals(access.Caller.DeclaringType))))
         {
             var selected = new MethodRef(candidate, type.Arguments, []);
             if (!ManagedAccess.Method(types, access.Caller.Method.Owner, selected,
