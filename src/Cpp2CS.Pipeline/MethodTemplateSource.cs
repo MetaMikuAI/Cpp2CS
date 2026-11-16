@@ -42,7 +42,7 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
             };
         };
     }
-    private static Missing<ManagedBody> Missing(string code, string message) => new(new("恢复", 0, "模板", new(code, message)));
+    private static Missing<ManagedBody> Missing(string code, string message, Reason? cause = null) => new(new("恢复", 0, "模板", new(code, message, cause)));
     public ManagedBody? GetBody(MethodDef method) => Result(MethodRef.Open(method)) is Completed<ManagedBody> complete ? complete.Value : null;
     public Reason? GetFailure(MethodDef method) => Result(MethodRef.Open(method)) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
     internal ManagedBody? GetBody(MethodRef method) => Result(method) is Completed<ManagedBody> complete ? complete.Value : null;
@@ -65,7 +65,12 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
         // 环上的方法（恢复期间重入了自己或仍在活动的外层）读到了截断，不提供模板。
         // 截断只算在环上：重入的是自己时环在自己之内，外层读到的是这个方法的最终结果，不受牵连。
         mine.Reentered = Math.Min(outer, reentered < level ? reentered : int.MaxValue);
-        if (reentered != int.MaxValue) body = Missing("inline.Template.Recursive", "候选恢复读取了递归截断，不能提供完整模板");
+        if (reentered != int.MaxValue)
+        {
+            var head = (reentered < level ? mine.Active[reentered] : method).Method;
+            body = Missing("inline.Template.Recursive", "候选恢复读取了递归截断，不能提供完整模板",
+                new("inline.Template.Reentered", "重入的方法：" + head.Owner.FullName + "." + head.Name));
+        }
         return bodies.GetOrAdd(method, body);
     }
 }
