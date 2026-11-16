@@ -218,6 +218,7 @@ internal static partial class LoweringChecks
         MergedSlotChecks(checks, program);
         RangeChecks(checks, program);
         AddressChecks(checks, program);
+        FrameFieldChecks(checks, program);
         InterlockedChecks(checks, program);
         StructChecks(checks, program);
         StructConstructorChecks(checks, program);

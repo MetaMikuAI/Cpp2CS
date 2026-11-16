@@ -46,6 +46,8 @@ public sealed record FrameClear(CallIdentity Identity, BoundSource Address, int 
 public sealed record FrameObject(Location Storage, TypeRef Type, Term Address)
 {
     public ImmutableArray<ValueProjection> Fields { get; init; } = [];
+    /// <summary>完整字段位置，包含叶子与嵌套结构体整体；均由布局投影证明。</summary>
+    public ImmutableArray<ValueProjection> Positions { get; init; } = [];
 }
 public sealed record FrameAccess(FrameObject Object, Location Location, ImmutableArray<ValueProjection> Parts);
 public sealed record FrameCopy(FrameObject Object, BoundSource Source, Point Point);
@@ -65,7 +67,7 @@ public sealed record FrameObjects(ImmutableArray<FrameObject> Objects, Immutable
         var relative = offset - item.Storage.Offset!.Value;
         var views = ImmutableArray.CreateBuilder<LocationView>();
         views.Add(new(ManagedLocationKind.FrameLocal, item.Address, item.Type, [], relative, location.Width, null, null));
-        foreach (var field in item.Fields.Where(f => f.Contains((int)relative * 8, location.Width)))
+        foreach (var field in item.Positions.Where(f => f.Contains((int)relative * 8, location.Width)))
             views.Add(new(ManagedLocationKind.FrameLocal, item.Address, field.Type, [.. field.Path], relative - field.Bit / 8,
                 location.Width, null, null));
         return new(ManagedLocationKind.FrameLocal, views.ToImmutable());
@@ -162,7 +164,8 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
             else if (block.End is Branch branch) uses.Add((branch.Condition, null));
             else if (block.End is JumpTable table) uses.Add((table.Selector, null));
         }
-        // 先收齐类型见证；不把一次合法用途误作另一次用途的许可。
+        // 先收齐类型见证，再按范围认定外层对象；使用顺序不决定对象的边界。
+        var candidates = new List<FrameObject>();
         foreach (var (term, element) in uses.Where(u => u.Element is not null))
         {
             var resolved = c.Get(state.Resolve, term); if (!resolved.IsSuccess) return resolved.Propagate<FrameObjects>();
@@ -184,9 +187,29 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 }
                 if (fields.IsEmpty) return Failure("Struct", "结构体帧对象没有完整叶子布局：" + element);
             }
-            var item = new FrameObject(native.Value with { Width = width }, element!, resolved.Value) { Fields = fields };
-            if (objects.TryGetValue(offset, out var previous) && !previous.Type.Equals(element))
-                return Failure("Mixed", "同一帧起点被取作不同类型：" + previous.Type + "、" + element);
+            var leaves = fields.Select(f => new LocationPiece(new(ManagedLocationKind.FrameLocal, resolved.Value,
+                f.Type, [.. f.Path], 0, f.Width, null, null, element), f.Bit, 0, f.Width));
+            var aggregates = ManagedRangeQuery.WholeStructures(types, leaves, width)
+                .Where(p => p.View is { Path.IsEmpty: false })
+                .Select(p => new ValueProjection(p.View!.Path, p.View!.Type, p.AccessBit, p.Width));
+            candidates.Add(new(native.Value with { Width = width }, element!, resolved.Value)
+                { Fields = fields, Positions = [.. fields, .. aggregates] });
+        }
+        foreach (var item in candidates.OrderByDescending(o => o.Storage.Width).ThenByDescending(o => o.Positions.Length))
+        {
+            var offset = item.Storage.Offset!.Value;
+            // 内部的类型使用属于外层局部；是否合法由下方逐次核对，不另建重叠对象。
+            bool contained = false;
+            foreach (var owner in objects.Values.Where(o => types.Kind(o.Type) == TypeKind.Struct))
+            {
+                var overlap = c.Get(state.Alias, new(item.Storage, owner.Storage));
+                if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
+                if (overlap.Value.Kind == AliasKind.Overlap && overlap.Value.LeftLow == 0 && overlap.Value.Width == item.Storage.Width)
+                { contained = true; break; }
+            }
+            if (contained) continue;
+            if (objects.TryGetValue(offset, out var previous) && !previous.Type.Equals(item.Type))
+                return Failure("Mixed", "同一帧起点被取作不同类型：" + previous.Type + "、" + item.Type);
             objects[offset] = item;
         }
         if (objects.Count == 0)
@@ -203,8 +226,16 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     && objects.TryGetValue(offset, out var item) && item.Type.Equals(element)) continue;
                 // 首因只写种类；是哪一种用法、涉及哪些类型放在后面的原因里。
                 var owner = use.Location.Offset is { } at
-                    ? objects.Values.FirstOrDefault(o => o.Storage.Offset <= at && at < o.Storage.Offset + (o.Storage.Width + 7) / 8) : null;
-                string detail = use.Location.Offset is not { } position ? "地址的偏移不是常量"
+                    ? objects.Values.FirstOrDefault(o => o.Storage.Root == use.Location.Root && o.Storage.Offset <= at
+                        && at < o.Storage.Offset + (o.Storage.Width + 7) / 8) : null;
+                bool direct = use.Term == resolved.Value && element is not null;
+                var bit = owner is not null && use.Location.Offset is { } start
+                    ? (int)((start - owner.Storage.Offset!.Value) * 8) : -1;
+                if (direct && owner is not null && owner.Positions.Any(p => p.Bit == bit
+                    && p.Width == types.StorageBits(element!) && p.Type.Equals(element))) continue;
+                string detail = direct && owner is not null && types.Kind(owner.Type) == TypeKind.Struct
+                    ? owner.Positions.Any(p => p.Bit == bit) ? "字段类型与使用类型不同" : "偏移不在字段起点"
+                    : use.Location.Offset is not { } position ? "地址的偏移不是常量"
                     : owner is null ? "地址不在任何已认定的帧对象里"
                     : position != owner.Storage.Offset ? (element is null ? "帧对象内部的地址用于写入内存、普通实参或运算" : "帧对象内部的地址用于按引用形参或接收者")
                     : use.Term != resolved.Value ? "帧对象的地址参与运算后使用"
@@ -239,22 +270,14 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     if (overlap.Value.Kind != AliasKind.Disjoint) return Failure("Use", "帧对象与入口栈实参重叠，缺少局部初值证明：" + item.Type);
                 }
             }
-        var fieldsOfObjects = new HashSet<FrameObject>();
         for (int i = 0; i < list.Length; i++)
             for (int j = 0; j < i; j++)
             {
                 var overlap = c.Get(state.Alias, new(list[i].Storage, list[j].Storage));
                 if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
                 if (overlap.Value.Kind == AliasKind.Disjoint) continue;
-                // 布局证明的完整字段属于外层局部；不能把相邻或部分相交的槽当作字段。
-                if (overlap.Value.Kind == AliasKind.Overlap && overlap.Value.LeftLow == 0 && overlap.Value.Width == list[i].Storage.Width
-                    && types.Kind(list[i].Type) != TypeKind.Struct && list[j].Type is DefinitionRef parent
-                    && types.Project(parent, overlap.Value.RightLow, overlap.Value.Width) is { } field
-                    && field.Bit == overlap.Value.RightLow && field.Width == overlap.Value.Width && field.Type.Equals(list[i].Type))
-                { fieldsOfObjects.Add(list[i]); continue; }
                 return Failure("Mixed", "已取址的帧对象范围相交：" + list[i].Type + "、" + list[j].Type);
             }
-        list = list.Where(item => !fieldsOfObjects.Contains(item)).ToImmutableArray();
         var cleared = ImmutableDictionary.CreateBuilder<CallIdentity, FrameObject>();
         foreach (var (clear, pointer) in clearBuffers)
         {
@@ -325,6 +348,10 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
             {
                 var overlap = c.Get(state.Alias, new(location.Value, item.Storage)); if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
                 if (overlap.Value.Kind == AliasKind.Disjoint) continue;
+                if (statement is MemoryWrite && overlap.Value.Kind == AliasKind.Overlap && overlap.Value.LeftLow > 0
+                    && overlap.Value.RightLow == 0 && overlap.Value.Width == item.Storage.Width)
+                    return Failure("Use", "帧地址用于写入内存、普通实参或运算",
+                        new("lowering.Frame.Use.Detail", "外层对象没有类型见证"));
                 if (overlap.Value.Kind != AliasKind.Overlap || overlap.Value.LeftLow != 0 || overlap.Value.Width != request.Width)
                     return request.Width > 64 ? WideFailure(0, request.Width, "直接帧访问跨越对象边界：" + item.Type)
                         : Failure("Mixed", "直接帧访问跨越对象边界：" + item.Type);
