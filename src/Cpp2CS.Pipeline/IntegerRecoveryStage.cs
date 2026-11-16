@@ -77,7 +77,11 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         bool open = GenericWitness.IsGeneric(context.Method) && !ManagedCSignatureBuilder.IsClosed(method);
         var layouts = open ? new GenericWitness(method, context.Entry.Method!, parts.Types.Layouts) : parts.Types.Layouts;
         var types = open ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
-        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts, method: method);
+        // 按封闭实例恢复泛型方法时，隐藏的方法信息形参就是这个实例：结构层的泛型上下文（上下文实体、RGCTX 项的解码）取它，
+        // 见证的定义一侧与实例一侧相同，类型都是封闭的，布局与不带见证时一样。
+        ITypeLayouts contextLayouts = !open && GenericWitness.IsGeneric(context.Method) && context.Entry.Method is { } closedEntry
+            ? new GenericWitness(method, closedEntry, parts.Types.Layouts) : layouts;
+        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, contextLayouts, method: method);
         MethodProgress.Mark("下降");
         var result = new IntegerLowering(transformed.Function, method, parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
