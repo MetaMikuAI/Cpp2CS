@@ -243,11 +243,15 @@ public static class MethodCopyAssembly
             {
                 // 索引的原生快照不交给并发恢复：每个恢复有独立的项表。
                 long liftStarted = Stopwatch.GetTimestamp();
-                var liftedBody = frontend.Run(entry, new(entry.Method!.Method, entry, facts));
+                var context = new MethodContext(entry.Method!.Method, entry, facts);
+                // 泛型值类型上的方法按入口的封闭实例恢复：开放签名里的值类型没有布局。其余候选按开放定义。
+                var instance = AccessorTemplates.UsesClosedWitness(entry.Method.Method) && ManagedCSignatureBuilder.IsClosed(entry.Method)
+                    ? entry.Method : MethodRef.Open(entry.Method.Method);
+                var liftedBody = frontend.Run(entry, context);
                 Interlocked.Add(ref result.FrontendTicks, Stopwatch.GetTimestamp() - liftStarted);
                 body = liftedBody switch
                 {
-                    Completed<NativeFunction> lifted => recovery.Run(lifted.Value, new(entry.Method!.Method, entry, facts)),
+                    Completed<NativeFunction> lifted => recovery.Run(lifted.Value, context, instance),
                     Missing<NativeFunction> missing => new Missing<ManagedBody>(missing.Hole),
                     _ => throw new InvalidOperationException("未知的前端恢复结果"),
                 };
