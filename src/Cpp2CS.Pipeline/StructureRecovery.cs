@@ -17,7 +17,7 @@ namespace Cpp2CS.Pipeline;
 public static class StructureRecovery
 {
     public static StructureResult Run(NativeFunction input, MethodContext context, MethodBinder binder, BindingEntryKind kind, ITypeLayouts? layouts = null,
-        InternalCallFacts? internalCalls = null, MethodRef? discoverInternalCall = null)
+        InternalCallFacts? internalCalls = null, MethodRef? discoverInternalCall = null, MethodRef? method = null)
     {
         input = NormalizeExceptions(input, context.Facts.Spec);
         // 没有调用或条件分支，且写入全在帧内时，本变换没有任何删除或折叠候选。
@@ -38,7 +38,7 @@ public static class StructureRecovery
         MethodProgress.Mark("结构：异常区域");
         bool hasHandlers = input.Blocks.Any(block => block.Handler is not null);
         if (hasHandlers) input = ExceptionScaffolding.Project(input, calls, splitEntries: true);
-        var signature = binder.Definition(MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
+        var signature = binder.Definition(method ?? MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
         MethodProgress.Mark("结构：命名普查");
         var surveyTimer = System.Diagnostics.Stopwatch.StartNew();
         var survey = new NamingSurvey(calls, new MetadataSlotDecoder(facts), facts.Image, binder, facts.Spec, signature);

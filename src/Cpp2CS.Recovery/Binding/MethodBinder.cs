@@ -16,6 +16,8 @@ public sealed class MethodBinder(ManagedCSignatureBuilder signatures, IAbiClassi
     public BindingResult<SignatureBinding> Definition(MethodRef definition, BindingEntryKind kind, MethodRef? witness)
     {
         if (!GenericWitness.IsGeneric(definition.Method)) return Entry(definition, kind);
+        if (kind == BindingEntryKind.SharedGeneric && definition == witness && ManagedCSignatureBuilder.IsClosed(definition))
+            return Entry(definition, kind);
         if (witness is null || witness.Method != definition.Method || kind != BindingEntryKind.SharedGeneric
             || !GenericWitness.IsCanonical(witness) && !GenericWitness.IsValueInstance(witness))
             return BindingResult<SignatureBinding>.Fail(BindingFailureKind.SignatureUnavailable, "泛型定义缺少规范引用实例或封闭值类型实例见证");

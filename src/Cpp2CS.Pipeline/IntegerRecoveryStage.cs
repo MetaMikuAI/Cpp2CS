@@ -52,7 +52,10 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             enableConstructorInlining ? new StructConstructorTemplates(types, templateSource) : null);
     }
     public string Name => "恢复";
-    public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context)
+    public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context) => Run(input, context, MethodRef.Open(context.Method));
+
+    // 模板见证可保留封闭身份；定义的发布仍由双参入口按开放身份恢复。
+    internal StageResult<ManagedBody> Run(NativeFunction input, MethodContext context, MethodRef method)
     {
         if (context.Facts.Architecture != "arm64")
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "绑定", new("lowering.Binding", "该架构的 ABI 尚未装配")));
@@ -71,13 +74,12 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             EntryKind.Invoker => BindingEntryKind.Invoker,
             _ => BindingEntryKind.Wrapper,
         };
-        var definition = MethodRef.Open(context.Method);
-        var layouts = GenericWitness.IsGeneric(context.Method)
-            ? new GenericWitness(definition, context.Entry.Method!, parts.Types.Layouts) : parts.Types.Layouts;
-        var types = GenericWitness.IsGeneric(context.Method) ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
-        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts);
+        bool open = GenericWitness.IsGeneric(context.Method) && !ManagedCSignatureBuilder.IsClosed(method);
+        var layouts = open ? new GenericWitness(method, context.Entry.Method!, parts.Types.Layouts) : parts.Types.Layouts;
+        var types = open ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
+        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts, method: method);
         MethodProgress.Mark("下降");
-        var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
+        var result = new IntegerLowering(transformed.Function, method, parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
             witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts),
             runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check, structConstructors: parts.StructConstructors,
@@ -116,7 +118,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         if (failureReason is not null)
             foreach (var diagnostic in transformed.Records.Where(r => !r.Removed && r.Address == result.Failure!.Position && r.Reason is not null).Select(r => r.Reason!).Distinct())
                 failureReason = Attach(failureReason, diagnostic);
-        return result.Body is { } body ? new Completed<ManagedBody>(GenericWitness.IsGeneric(context.Method)
+        return result.Body is { } body ? new Completed<ManagedBody>(open
             ? body with { WitnessCoverage = GenericWitnessCoverage.ReferenceOnly } : body)
             : new Missing<ManagedBody>(new(Name, result.Failure!.Position == 0 ? context.Entry.Address : result.Failure.Position,
                 result.Failure.Kind.ToString(), failureReason!));

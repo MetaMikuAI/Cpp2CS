@@ -83,7 +83,7 @@ internal static partial class InliningChecks
             var attempts = new List<AccessorAttempt>();
             var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault), attempts.Add);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(caller), f.Binder, f.Types, calls: calls, spec: f.Spec, accessors: accessors).Run();
-            bool positive = mode is "Parameter" or "CallResult" or "Nested" or "Readonly" or "Generic";
+            bool positive = mode is "Parameter" or "CallResult" or "Nested" or "Readonly";
             if (mode == "SplitReads")
             {
                 checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == "lowering.Access.ReadPlacement", "纯 getter 不绕过读取局部的支配要求：" + lowered.Failure);

@@ -106,7 +106,7 @@ public sealed partial class AccessorQuery
                 var writesInWindow = window.Where(s => s.Write && s.Point.Before >= low && s.Receiver == anchor.Receiver).ToArray();
                 var ordinary = anchor.Field.DeclaringType is DefinitionRef instance
                     ? anchor.Field.Field.Owner.Methods.Where(m => m.Name is not (".ctor" or ".cctor")
-                    && !m.IsOverridable
+                    && !m.IsOverridable && !AccessorTemplates.UsesClosedWitness(m)
                     && m.GenericParameters.Count == 0 && (!anchor.Write || ManagedTypes.IsVoid(m.ReturnType)))
                     .Select(m => new MethodRef(m, instance.Arguments, [])) : [];
                 Reason? inference = null;
@@ -292,8 +292,13 @@ public sealed partial class AccessorQuery
                 // 既有单字段证明仍可处理复合接收者；它不替代更大的已匹配表达式或歧义。
                 bool singlePlacement = best is [var single] && single.Replacement.Result == anchor.Value
                     && templates.Get(single.Replacement.Method.Method).Template?.SingleField == true;
-                if (failure?.Code != "inline.Accessor.Ambiguous" && (best.Length == 0 || singlePlacement)
-                    && Legacy(access with { HasPlacement = true }).Method is not null) continue;
+                if (failure?.Code != "inline.Accessor.Ambiguous" && (best.Length == 0 || singlePlacement))
+                {
+                    var singleAnswer = Legacy(access with { HasPlacement = true });
+                    if (singleAnswer.Method is not null) continue;
+                    // 泛型值类型只走已有单字段核对，不用其他实例的项参与表达式匹配。
+                    if (anchor.Field.Field.Owner is { IsValueType: true, GenericParameters.Count: > 0 }) failure = singleAnswer.Failure;
+                }
                 failures[anchor.Identity] = WithAnchor(failure!, access);
                 // 失败在实际使用处报告，未使用的读取不额外制造洞。
             }

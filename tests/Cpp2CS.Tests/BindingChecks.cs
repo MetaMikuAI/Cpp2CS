@@ -77,6 +77,13 @@ internal static class BindingChecks
         var canonical = new MethodRef(generic, [], [method.Method.Parameters[0].Type]);
         a.True(binder.Entry(canonical, BindingEntryKind.SharedGeneric).Success,
             "封闭规范实例走普通 C 层签名推导");
+        var referenceType = new DefinitionRef(new TypeDef { Index = 11, Assembly = "mscorlib.dll", Namespace = "System", Name = "String",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false }, []);
+        var closedReference = canonical with { MethodArguments = [referenceType] };
+        a.True(binder.Definition(closedReference, BindingEntryKind.SharedGeneric, closedReference).Value?.Entry?.Method == closedReference,
+            "封闭身份复用入口绑定，无须反代入规范引用实例");
+        a.True(!binder.Definition(MethodRef.Open(generic), BindingEntryKind.SharedGeneric, closedReference).Success,
+            "封闭引用实例不能被反代入成开放定义");
         var fullyShared = new DefinitionRef(new TypeDef {
             Index = 10, Assembly = "mscorlib.dll", Namespace = "Unity.IL2CPP.Metadata", Name = "__Il2CppFullySharedGenericType",
             Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);

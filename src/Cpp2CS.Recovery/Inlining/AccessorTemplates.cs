@@ -21,17 +21,31 @@ public sealed record AccessorEvidence(IReadOnlySet<FieldDef> Fields, IReadOnlySe
 public sealed record AccessorTemplateResult(AccessorTemplateStatus Status, AccessorTemplate? Template = null, Reason? Failure = null)
 {
     public AccessorEvidence? Evidence { get; init; }
+    public Reason? Witness { get; init; }
 }
 
 /// <summary>只提供关闭内联逆后完整恢复的方法体摘要；实现须按方法缓存并可并发取用。</summary>
 public interface IAccessorTemplateSource
 {
     AccessorTemplateResult Get(MethodDef method);
+    AccessorTemplateResult Get(MethodRef method) => AccessorTemplates.UsesClosedWitness(method.Method)
+        ? new(AccessorTemplateStatus.Incomplete, Failure: new("inline.Accessor.Witness.Unavailable", "模板来源没有封闭实例见证"))
+        : Get(method.Method);
 }
 
 /// <summary>纯返回、完整字段赋值、单次转调或纯条件返回；局部只展开单定义。</summary>
 public static class AccessorTemplates
 {
+    public static bool UsesClosedWitness(MethodDef method) => method.Owner.IsValueType && method.Owner.GenericParameters.Count != 0;
+
+    public static AccessorTemplateResult ReadSingleField(ManagedBody body)
+    {
+        var result = Read(body);
+        return result.Template is { SingleField: true, Field.Field.IsStatic: false } ? result
+            : result with { Status = AccessorTemplateStatus.NotTemplate, Template = null,
+                Failure = result.Failure ?? new("inline.Accessor.Witness.Shape", "泛型值类型见证不是 this 上的单字段读写") };
+    }
+
     private static AccessorTemplateResult No(string shape, string message) =>
         new(AccessorTemplateStatus.NotTemplate, Failure: new("inline.Accessor.None", "候选的方法体不是模板：" + shape + "；" + message));
     public static AccessorTemplateResult Read(ManagedBody body)
@@ -60,8 +74,15 @@ public static class AccessorTemplates
                 && c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate ? c.Operand : result;
         }
         // 整个字段的读取、整个形参都是纯的，与类型和位宽无关；结构体类型的字段按整体值进出单字段模板。
-        bool Pure(ManagedValue value) => value is StaticFieldValue or FieldValue { Receiver: ArgumentValue { Index: -1 } } or ArgumentValue { Index: >= 0 }
-            || IsPure(body.Method, value);
+        bool Parameter(ArgumentValue value) => value.Index >= -1 && value.Index < body.Method.Method.Parameters.Count
+            && (value.Index >= 0 || !body.Method.Method.IsStatic);
+        bool Pure(ManagedValue value) => value switch
+        {
+            ArgumentValue argument => Parameter(argument),
+            FieldValue { Receiver: ArgumentValue receiver } => Parameter(receiver),
+            StaticFieldValue => true,
+            _ => value.Width > 0 && IsPure(body.Method, value),
+        };
         if (statements.Any(s => s is ManagedCall))
         {
             ManagedCall? forwarded = null;
@@ -139,7 +160,7 @@ public static class AccessorTemplates
             var fields = stores.Select(s => FieldAccessor.FieldOf(s.Target)!).ToArray();
             bool single = stores is [var one] && method.Parameters is [var parameter]
                 && one.Value is ArgumentValue { Index: 0 } argument && parameter.Type.Equals(fields[0].Field.Type)
-                && argument.Type.Equals(parameter.Type)
+                && argument.Type.Equals(body.Method.Concrete(parameter.Type))
                 && one.Target is FieldValue { Receiver: ArgumentValue { Index: -1 } } or StaticFieldValue;
             return new(AccessorTemplateStatus.Complete, new(AccessorKind.Setter, fields[0])
             { Stores = stores, Fields = fields, SingleField = single });

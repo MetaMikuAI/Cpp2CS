@@ -15,10 +15,11 @@ public sealed record AccessorCandidateFailure(MethodDef Method, Reason? Failure)
 public sealed record AccessorAnswer(MethodRef? Method, Reason? Failure, AccessorNoneReason? NoneReason = null, int Matches = 0)
 {
     public IReadOnlyList<AccessorCandidateFailure> IncompleteCandidates { get; init; } = [];
+    public Reason? Witness { get; init; }
 }
 public sealed record AccessorAttempt(AccessorAccess Access, AccessorAnswer Answer);
 
-/// <summary>元数据筛候选，候选自己的开放恢复体证明模板；不依赖名称、属性登记或枚举次序。</summary>
+/// <summary>元数据筛候选，候选自己的恢复体证明模板；泛型值类型保留封闭见证，不依赖名称或枚举次序。</summary>
 public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateSource templates, Action<AccessorAttempt>? observe = null)
 {
     public AccessorReadPlacementQuery ReadPlacement { get; } = new();
@@ -44,6 +45,7 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
     {
         var incomplete = new List<AccessorCandidateFailure>();
         Reason? inference = null;
+        var witnesses = new Dictionary<MethodRef, Reason>();
         // 方法体里读写了这个字段、却不是单字段模板的第一个候选；只用于诊断。
         Reason? rejected = null;
         AccessorAnswer None(AccessorNoneReason reason) => new(null, new("inline.Accessor.None", reason switch
@@ -76,11 +78,17 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             : new List<MethodRef>();
         foreach (var candidate in candidates.Where(m => m.GenericParameters.Count == 0))
         {
-            var result = templates.Get(candidate);
-            // 定位已给出字段所属实例；模板核对开放字段身份，不比较实例间的布局偏移。
+            bool closed = AccessorTemplates.UsesClosedWitness(candidate);
+            var result = closed ? templates.Get(OnInstance(candidate)) : templates.Get(candidate);
+            // 封闭见证只核对字段定义；现场的声明类型实例仍由定位给出。
             var openField = new FieldRef(field, MethodRef.Open(candidate).DeclaringType);
             if (result.Template is { } template && result.Status == AccessorTemplateStatus.Complete
-                && template.SingleField && template.Kind == access.Kind && template.Field.Equals(openField)) { var selected = OnInstance(candidate); if (!matches.Contains(selected)) matches.Add(selected); }
+                && template.SingleField && template.Kind == access.Kind && (closed ? template.Field.Field == field : template.Field.Equals(openField)))
+            {
+                var selected = OnInstance(candidate);
+                if (!matches.Contains(selected)) matches.Add(selected);
+                if (result.Witness is { } witness) witnesses[selected] = witness;
+            }
             else if (result.Status == AccessorTemplateStatus.Incomplete)
             {
                 incomplete.Add(new(candidate, result.Failure));
@@ -89,16 +97,17 @@ public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateS
             else
             {
                 reason = AccessorNoneReason.NotTemplate;
-                if (rejected is null && result.Evidence?.Fields.Contains(field) == true)
+                if (rejected is null && (closed || result.Evidence?.Fields.Contains(field) == true))
                     rejected = new("inline.candidate", "候选 " + candidate.Owner.FullName + "." + candidate.Name,
-                        result.Failure ?? new("inline.Accessor.None", "候选的模板不是这个字段的单字段读写"));
+                        result.Failure ?? new("inline.Accessor.None", "候选的模板不是这个字段的单字段读写", result.Witness));
             }
         }
         if (matches.Count == 0) return None(reason);
-        if (matches.Count > 1) return new(null, new("inline.Accessor.Ambiguous", $"有 {matches.Count} 个访问器模板相同，无法区分原调用"), Matches: matches.Count)
+        if (matches.Count > 1) return new(null, new("inline.Accessor.Ambiguous", $"有 {matches.Count} 个访问器模板相同，无法区分原调用", witnesses.Values.FirstOrDefault()), Matches: matches.Count)
             { IncompleteCandidates = incomplete };
-        if (!access.HasPlacement && !valueRead) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置", access.PlacementFailure), Matches: 1)
+        if (!access.HasPlacement && !valueRead) return new(null, new("inline.Accessor.Placement", "调用无法放在这次完整字段访问的原位置",
+                witnesses.GetValueOrDefault(matches[0]) is { } evidence ? evidence with { Cause = access.PlacementFailure } : access.PlacementFailure), Matches: 1)
             { IncompleteCandidates = incomplete };
-        return new(matches[0], null, Matches: 1) { IncompleteCandidates = incomplete };
+        return new(matches[0], null, Matches: 1) { IncompleteCandidates = incomplete, Witness = witnesses.GetValueOrDefault(matches[0]) };
     }
 }
