@@ -115,13 +115,17 @@ public sealed partial class IntegerLowering
             if (constructor.Value.Method is { } selected)
             {
                 var arguments = new List<ManagedValue>();
-                foreach (var argument in constructor.Value.Arguments)
+                for (int i = 0; i < constructor.Value.Arguments.Count; i++)
                 {
+                    var argument = constructor.Value.Arguments[i];
                     var value = types.Kind(argument.Type) == TypeKind.Struct
                         ? argument.Origin?.Call is not null ? StructOriginValue(argument.Origin) : StructValue(argument.Source, argument.Type, argument.Point)
                         : context.Get(structs.Ranges, new(argument.Source, argument.Point, 0, types.StorageBits(argument.Type))) is { IsSuccess: true } scalar
                             ? StructLeafValue(scalar.Value, argument.Type) : null;
                     if (value is null) return null;
+                    // 调用结果已经由 LowerCall 保存到临时局部；按值形参本身也是可寻址的位置。
+                    if (selected.Concrete(selected.Method.Parameters[i].Type) is ByRefRef)
+                        value = new AddressValue(value, types.PointerSize * 8);
                     arguments.Add(value);
                 }
                 return new NewObjectValue(selected, arguments, types.ValueWidth(type));

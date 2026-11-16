@@ -17,10 +17,12 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
     private readonly System.Collections.Concurrent.ConcurrentDictionary<MethodRef, StageResult<ManagedBody>> bodies = new();
     private readonly ThreadLocal<Activity> activity = new(() => new());
     private readonly Func<MethodRef, StageResult<ManagedBody>> recover;
+    private readonly ClosedTemplateWitnesses witnesses;
     public MethodTemplateSource(GlobalFacts facts, IMethodStage<CodeEntry, NativeFunction> frontend, bool constructors)
     {
         var entries = facts.CodeMap.Entries.Where(e => e.Method is not null).GroupBy(e => e.Method!.Method)
             .ToDictionary(g => g.Key, g => g.ToArray());
+        witnesses = new(facts, entries);
         var recovery = new IntegerRecoveryStage(enableAccessorInlining: false, enableConstructorInlining: constructors, constructorSource: this);
         recover = method =>
         {
@@ -45,8 +47,10 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
     private static Missing<ManagedBody> Missing(string code, string message, Reason? cause = null) => new(new("恢复", 0, "模板", new(code, message, cause)));
     public ManagedBody? GetBody(MethodDef method) => Result(MethodRef.Open(method)) is Completed<ManagedBody> complete ? complete.Value : null;
     public Reason? GetFailure(MethodDef method) => Result(MethodRef.Open(method)) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
-    internal ManagedBody? GetBody(MethodRef method) => Result(method) is Completed<ManagedBody> complete ? complete.Value : null;
-    internal Reason? GetFailure(MethodRef method) => Result(method) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
+    public ManagedBody? GetBody(MethodRef method) => Result(method) is Completed<ManagedBody> complete ? complete.Value : null;
+    public Reason? GetFailure(MethodRef method) => Result(method) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
+    public MethodTemplateWitness GetWitness(MethodRef method) => AccessorTemplates.UsesClosedWitness(method.Method)
+        ? witnesses.Select(method, "inline.StructConstructor.Witness") : new(method);
     private StageResult<ManagedBody> Result(MethodRef method)
     {
         if (bodies.TryGetValue(method, out var body)) return body;

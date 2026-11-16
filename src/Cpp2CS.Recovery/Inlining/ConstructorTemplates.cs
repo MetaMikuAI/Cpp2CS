@@ -9,7 +9,12 @@ public interface IMethodTemplateSource
 {
     ManagedBody? GetBody(MethodDef method);
     Reason? GetFailure(MethodDef method) => null;
+    ManagedBody? GetBody(MethodRef method) => GetBody(method.Method);
+    Reason? GetFailure(MethodRef method) => GetFailure(method.Method);
+    MethodTemplateWitness GetWitness(MethodRef method) => new(method);
 }
+
+public sealed record MethodTemplateWitness(MethodRef? Method, Reason? Evidence = null, Reason? Failure = null, bool Borrowed = false);
 
 public sealed record ConstructorField(FieldRef Field, ManagedValue Value, bool AfterCall = false);
 public sealed record ConstructorInvocation(MethodRef Method, IReadOnlyList<ManagedValue> Arguments);
