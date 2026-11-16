@@ -19,6 +19,8 @@ internal static partial class InliningChecks
     private static void EventAccessorChecks(Assertions checks)
     {
         ReadAnchoredEventChecks(checks);
+        ArrayEventAccessorChecks(checks);
+        CheckOriginChecks(checks);
         foreach (var mode in new[] { "Simple", "Reversed", "ExtraWrite", "DifferentArgument", "OtherUse", "SecondEntry" })
         {
             var f = new Fixture();

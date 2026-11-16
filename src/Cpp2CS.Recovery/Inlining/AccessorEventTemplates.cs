@@ -11,23 +11,33 @@ namespace Cpp2CS.Recovery.Inlining;
 
 public abstract record AccessorEvent;
 public sealed record AccessorFieldWrite(FieldRef Field, Term Receiver, Term Value) : AccessorEvent;
+public sealed record AccessorArrayWrite(Term Array, Term Index, Term Value, TypeRef ElementType) : AccessorEvent;
+public sealed record AccessorCheckInput(string Role, Term Value);
+public sealed record AccessorCheck(string Kind, IReadOnlyList<AccessorCheckInput> Inputs, Term FailureCondition) : AccessorEvent;
 public sealed record AccessorInvocation(MethodRef Method, bool Virtual, Term? Receiver, IReadOnlyList<Term> Arguments) : AccessorEvent;
-public sealed record AccessorEventPath(IReadOnlyList<AccessorCondition> Conditions, IReadOnlyList<AccessorEvent> Events, Term? Result);
+public sealed record AccessorTemplateRead(Term Value, int BeforeEffect);
+public sealed record AccessorEventPath(IReadOnlyList<AccessorCondition> Conditions, IReadOnlyList<AccessorEvent> Events, Term? Result)
+{
+    public IReadOnlyList<AccessorTemplateRead> Reads { get; init; } = [];
+}
 public sealed record AccessorEventTemplate(IReadOnlyList<AccessorEventPath> Paths, IReadOnlyList<ManagedValue> Anchors);
 
 /// <summary>带事件的托管体投影到公共快照；路径由内核区域查询展开。</summary>
 internal static class AccessorEventTemplates
 {
+    private sealed class FailureExits(IReadOnlySet<FlowEdge> exits) : Query<FlowEdge, bool>
+    { public override Outcome<bool> Compute(QueryContext c, FlowEdge key) => Outcome<bool>.Success(exits.Contains(key)); }
     public static AccessorTemplateResult Read(ManagedBody body)
     {
         AccessorTemplateResult No(string text) => new(AccessorTemplateStatus.NotTemplate,
             Failure: new("inline.Accessor.None", "候选的方法体不是模板：Conditional；" + text));
         if (body.Regions.Count != 0 || body.Blocks.Count == 0) return No("含异常区域或没有入口");
         var all = body.Blocks.SelectMany(b => b.Statements).ToArray();
-        if (all.Any(s => s is not (ManagedAssignment or ManagedStore or ManagedCall or ManagedBranch or ManagedJump or ManagedReturn)))
+        if (all.Any(s => s is not (ManagedAssignment or ManagedStore or ManagedCall or ManagedBranch or ManagedJump or ManagedReturn or ManagedThrow { CheckOrigins.Count: > 0 })))
             return No("含显式抛出路径或未支持的事件");
-        if (all.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is ArrayElementValue or ArrayLengthValue))
-            return No("数组访问的隐含检查缺少模板来源凭据");
+        var throwing = body.Blocks.Where(b => b.Statements is [ManagedThrow { CheckOrigins.Count: > 0 }]).ToDictionary(b => b.Address, b => (ManagedThrow)b.Statements[0]);
+        if (throwing.Count != all.OfType<ManagedThrow>().Count()) return No("检查失败臂含其他语句");
+        if (all.OfType<ManagedStore>().Any(s => s.AccessChecks.Count != 0)) return No("数组写入的吸收检查尚未逐访问配对");
         var assignments = all.OfType<ManagedAssignment>().ToArray();
         if (assignments.Any(a => a.ExceptionArrival) || assignments.GroupBy(a => a.Target.Id).Any(g => g.Count() != 1))
             return No("局部不是单定义");
@@ -44,7 +54,7 @@ internal static class AccessorEventTemplates
             }
             return ManagedValues.Map(value, Normalize);
         }
-        bool Pure(ManagedValue value) => AccessorTemplates.IsPure(body.Method, value)
+        bool Pure(ManagedValue value) => AccessorTemplates.IsPure(body.Method, value, arrayLengths: true)
             && ManagedValues.Walk(value).All(v => v is not StaticFieldValue && (v is not FieldValue field || field.Receiver is ArgumentValue { Index: -1 }));
         var terms = new TermTable(); var entry = new BlockIdentity(); var exit = new BlockIdentity();
         var builder = new FunctionBuilder(terms, entry, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
@@ -55,7 +65,8 @@ internal static class AccessorEventTemplates
             .GroupBy(a => a.Index).ToDictionary(g => g.Key, g => g.Max(a => a.Width));
         var interpreter = new AccessorTerms(terms, i => widths.TryGetValue(i, out int width) ? terms.Atom(new AccessorParameter(i), width) : null,
             (field, receiver) => terms.Atom(new AccessorField(field, receiver), all.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
-                .Where(v => FieldAccessor.FieldOf(v)?.Equals(field) == true).Max(v => v.Width)));
+                .Where(v => FieldAccessor.FieldOf(v)?.Equals(field) == true).Max(v => v.Width)),
+            arrayLength: (array, width) => terms.Atom(new AccessorArrayLength(array, width), width));
         Term? Read(ManagedValue value)
         {
             value = Normalize(value);
@@ -65,11 +76,23 @@ internal static class AccessorEventTemplates
             return interpreter.Read(value);
         }
         var events = new Dictionary<Point, AccessorEvent>();
+        var reading = new Dictionary<Point, Term[]>();
+        bool Reads(ManagedStatement statement, Point point)
+        {
+            var inputs = statement is ManagedStore store ? new[] { store.Value }.Concat(store.Target is ArrayElementValue a ? new[] { a.Array, a.Index } : []) : ManagedValues.Of(statement);
+            var found = inputs.SelectMany(ManagedValues.Walk).Where(v => v is FieldValue or ArrayLengthValue).Select(Read).ToArray();
+            if (found.Any(v => v is null)) return false;
+            if (found.Length != 0) reading.Add(point, found.OfType<Term>().ToArray());
+            return true;
+        }
         var returned = new Dictionary<BlockIdentity, Term?>();
+        var checkEvents = new Dictionary<FlowEdge, AccessorCheck>();
         builder.Blocks.Add(new(entry, [], [], new Jump(blocks[body.Blocks[0].Address])));
         foreach (var block in body.Blocks)
         {
             var statements = new List<Statement>();
+            if (throwing.ContainsKey(block.Address))
+            { builder.Blocks.Add(new(blocks[block.Address], [], [], new Unreachable())); continue; }
             foreach (var statement in block.Statements.SkipLast(1))
             {
                 var point = new Point(blocks[block.Address], statements.Count);
@@ -83,7 +106,10 @@ internal static class AccessorEventTemplates
                         {
                             fields.TryAdd(field.Field, field); effect = new AccessorFieldWrite(field.Field, self, value);
                         }
-                        else return No("写入不是 this 字段");
+                        else if (target is ArrayElementValue { Array: FieldValue { Receiver: ArgumentValue { Index: -1 } } } element
+                            && Read(element.Array) is { } array && Read(element.Index) is { } index && value is not null)
+                            effect = new AccessorArrayWrite(array, index, value, element.Type);
+                        else return No("写入不是 this 字段或其数组元素");
                         break;
                     case ManagedCall { Result: null, Invocation.Constraint: null } call:
                         var args = call.Invocation.Arguments.Select(Read).ToArray();
@@ -92,15 +118,29 @@ internal static class AccessorEventTemplates
                         effect = new AccessorInvocation(call.Invocation.Method, call.Invocation.Virtual, receiver, args.OfType<Term>().ToArray()); break;
                     default: return No("含未支持的局部、调用结果或事件");
                 }
+                if (!Reads(statement, point)) return No("读取不是模板纯项");
                 statements.Add(new MemoryWrite(new(), terms.Constant(0, 64), 1, terms.Constant(0, 1)));
                 if (effect is not null) events.Add(point, effect);
             }
+            if (!Reads(block.Statements[^1], new(blocks[block.Address], statements.Count))) return No("终结的读取不是模板纯项");
             Terminator end;
             switch (block.Statements.LastOrDefault())
             {
                 case ManagedJump jump: end = new Jump(blocks[jump.Edge.Target]); break;
                 case ManagedBranch branch when Read(branch.Condition) is { } condition:
-                    end = new Branch(interpreter.Truth(condition), blocks[branch.Taken.Target], blocks[branch.Fallthrough.Target]); break;
+                    var truth = interpreter.Truth(condition);
+                    foreach (var (target, positive) in new[] { (branch.Taken.Target, true), (branch.Fallthrough.Target, false) })
+                    {
+                        if (!throwing.TryGetValue(target, out var failed)) continue;
+                        var failure = positive ? truth : terms.Apply(new CoreOperator(CoreOperation.Not), 1, truth);
+                        var origins = failed.CheckOrigins.Where(o => Read(o.FailureCondition) is { } f && interpreter.Truth(f) == failure).ToArray();
+                        if (origins is not [var origin]) return No("检查失败来源不能与分支唯一对应");
+                        if (origin.Inputs.Count == 0) return No("检查的被检查值尚未确定");
+                        var inputs = origin.Inputs.Select(i => (i.Role, Value: Read(i.Value))).ToArray();
+                        if (inputs.Any(i => i.Value is null)) return No("被检查值不是纯项");
+                        checkEvents.Add(new(blocks[block.Address], blocks[target]), new(origin.Kind, inputs.Select(i => new AccessorCheckInput(i.Role, i.Value!)).ToArray(), failure));
+                    }
+                    end = new Branch(truth, blocks[branch.Taken.Target], blocks[branch.Fallthrough.Target]); break;
                 case ManagedReturn result:
                     var value = result.Value is null ? null : Read(result.Value);
                     if (result.Value is not null && value is null) return No("返回值不是纯项");
@@ -112,12 +152,15 @@ internal static class AccessorEventTemplates
         if (invalid || fields.Count == 0) return No("局部依赖不完整或没有 this 字段锚点");
         builder.Blocks.Add(new(exit, [], [], new Return([])));
         var snapshot = builder.Freeze(); var context = new QueryContext(snapshot);
-        var paths = context.Get(new SnapshotPathsQuery(new FlowQueries(false)), new(new(entry, 0), exit));
+        var paths = context.Get(new SnapshotPathsQuery(new FlowQueries(false), new FailureExits(checkEvents.Keys.ToHashSet())), new(new(entry, 0), exit));
         if (!paths.IsSuccess) return No("不是单入口无环返回区域：" + paths.Why!.Message);
         var byId = snapshot.Blocks.ToDictionary(b => b.Identity); var resultPaths = new List<AccessorEventPath>();
         foreach (var path in paths.Value)
         {
-            var effects = path.Points.Where(events.ContainsKey).Select(p => events[p]).ToArray();
+            FlowEdge? Failure(FlowEdge edge) => byId[edge.Source].End is Branch branch
+                ? new(edge.Source, branch.True == edge.Target ? branch.False : branch.True) : null;
+            var effects = path.Edges.SelectMany(edge => path.Points.Where(p => p.Block == edge.Source && events.ContainsKey(p)).Select(p => events[p])
+                .Concat(Failure(edge) is { } failure && checkEvents.TryGetValue(failure, out var check) ? new AccessorEvent[] { check } : [])).ToArray();
             if (effects.OfType<AccessorInvocation>().Count() > 1) return No("路径上的调用多于一次");
             var written = new HashSet<FieldRef>(); bool called = false;
             foreach (var edge in path.Edges.Where(e => e.Source != entry))
@@ -133,11 +176,20 @@ internal static class AccessorEventTemplates
                     called |= statement is ManagedCall;
                 }
             }
-            var guards = path.Edges.Where(e => byId[e.Source].End is Branch).Select(e =>
+            var guards = path.Edges.Where(e => byId[e.Source].End is Branch && (Failure(e) is not { } failure || !checkEvents.ContainsKey(failure))).Select(e =>
             {
                 var branch = (Branch)byId[e.Source].End; return new AccessorCondition(branch.Condition, branch.True == e.Target);
             }).ToArray();
-            resultPaths.Add(new(guards, effects, returned[path.Edges[^1].Source]));
+            var templateReads = new List<AccessorTemplateRead>(); int beforeEffect = 0;
+            foreach (var edge in path.Edges)
+            {
+                foreach (var point in path.Points.Where(p => p.Block == edge.Source).Append(new(edge.Source, byId[edge.Source].Statements.Length)))
+                {
+                    if (reading.TryGetValue(point, out var values)) templateReads.AddRange(values.Select(v => new AccessorTemplateRead(v, beforeEffect)));
+                    if (events.ContainsKey(point)) beforeEffect++;
+                }
+            }
+            resultPaths.Add(new(guards, effects, returned[path.Edges[^1].Source]) { Reads = templateReads });
         }
         return new(AccessorTemplateStatus.Complete, new(ManagedTypes.IsVoid(body.Method.Method.ReturnType) ? AccessorKind.Setter : AccessorKind.Getter, fields.Keys.First())
         { Fields = fields.Keys.ToArray(), Events = new(resultPaths, fields.Values.ToArray()) });

@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery.Inlining;
 
 /// <summary>模板词汇解释到调用方的项表；相等只由公共项规范化给出。</summary>
 internal sealed class AccessorTerms(TermTable terms, Func<int, Term?> parameter,
-    Func<FieldRef, Term?, Term?> read, Func<LocalValue, Term?>? local = null, Func<ManagedValue, Term?>? projection = null)
+    Func<FieldRef, Term?, Term?> read, Func<LocalValue, Term?>? local = null, Func<ManagedValue, Term?>? projection = null, Func<Term, int, Term?>? arrayLength = null)
 {
     public Term? Read(ManagedValue value)
     {
@@ -23,6 +23,7 @@ internal sealed class AccessorTerms(TermTable terms, Func<int, Term?> parameter,
         if (value is ConstantValue k) return terms.Constant(new System.Numerics.BigInteger(k.Bits) & ((System.Numerics.BigInteger.One << k.Width) - 1), k.Width);
         if (value is FieldValue f && Read(f.Receiver) is { } receiver)
             return read(f.Field, receiver) is { } instanceField ? Resize(instanceField, f.Width, ManagedTypes.IsSigned(f.Type)) : null;
+        if (value is ArrayLengthValue length && Read(length.Array) is { } array) return arrayLength?.Invoke(array, length.Width);
         if (value is StaticFieldValue s) return read(s.Field, null) is { } staticField ? Resize(staticField, s.Width, ManagedTypes.IsSigned(s.Type)) : null;
         if (value is ConversionValue c && Read(c.Operand) is { } operand)
             return c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate
@@ -80,6 +81,8 @@ internal sealed class AccessorTerms(TermTable terms, Func<int, Term?> parameter,
             if (field.Receiver is not null && receiver is null) return null;
             return read(field.Field, receiver) is { } loaded ? Resize(loaded, value.Width) : null;
         }
+        if (value.Identity is AccessorArrayLength length)
+            return Instantiate(length.Array) is { } array ? arrayLength?.Invoke(array, value.Width) : null;
         if (value.Kind == TermKind.Constant) return terms.Constant(value.ConstantValue!.Value, value.Width);
         var operands = value.Operands.Select(Instantiate).ToArray();
         if (operands.Any(o => o is null)) return null;

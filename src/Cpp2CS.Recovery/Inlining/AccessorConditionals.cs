@@ -12,6 +12,8 @@ internal sealed record AccessorParameter(int Index) : AtomIdentity
 { public override string StableText => "inline.parameter"; }
 internal sealed record AccessorField(FieldRef Field, Term? Receiver) : AtomIdentity
 { public override string StableText => "inline.field"; }
+internal sealed record AccessorArrayLength(Term Array, int Width) : AtomIdentity
+{ public override string StableText => "inline.array-length"; }
 public sealed record AccessorCondition(Term Value, bool Positive);
 public sealed record AccessorPath(IReadOnlyList<AccessorCondition> Conditions, Term Value);
 public sealed record AccessorConditional(IReadOnlyList<AccessorPath> Paths, IReadOnlyList<ManagedValue> Anchors);

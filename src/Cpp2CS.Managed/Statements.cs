@@ -10,7 +10,16 @@ public sealed record ManagedAssignment(ulong Address, LocalValue Target, Managed
     public bool ExceptionArrival { get; init; }
 }
 /// <summary>写入字段、静态字段或数组元素。</summary>
-public sealed record ManagedStore(ulong Address, ManagedValue Target, ManagedValue Value) : ManagedStatement(Address);
+public sealed record ManagedStore(ulong Address, ManagedValue Target, ManagedValue Value) : ManagedStatement(Address)
+{
+    /// <summary>由本次访问吸收的目录检查；保留来源供模板复核，输出不使用。</summary>
+    public IReadOnlyList<ManagedAccessCheck> AccessChecks { get; init; } = [];
+}
+public sealed record ManagedAccessCheck(string Kind, IReadOnlyList<ManagedCheckInput> Inputs)
+{
+    public ManagedAccessCheck Map(Func<ManagedValue, ManagedValue> map) => this with
+    { Inputs = Inputs.Select(i => i with { Value = map(i.Value) }).ToArray() };
+}
 /// <summary>调用。原生的尾调用也写成调用加返回，只有一种形式。</summary>
 public sealed record ManagedCall(ulong Address, ManagedInvocation Invocation, LocalValue? Result) : ManagedStatement(Address)
 {
@@ -23,7 +32,17 @@ public sealed record ManagedBranch(ulong Address, ManagedValue Condition, Manage
 /// <summary>按 int32 下标跳转（跳转表）：Cases[i] 是下标 i 的出边；下标越界不可达（原生代码在前驱中检查了上界）。</summary>
 public sealed record ManagedSwitch(ulong Address, ManagedValue Index, IReadOnlyList<ManagedEdge> Cases) : ManagedStatement(Address);
 /// <summary>抛出 Exception（引用类型的值）。</summary>
-public sealed record ManagedThrow(ulong Address, ManagedValue Exception) : ManagedStatement(Address);
+public sealed record ManagedThrow(ulong Address, ManagedValue Exception) : ManagedStatement(Address)
+{
+    /// <summary>目录登记的检查失败来源；业务抛出为空，输出不使用此字段。</summary>
+    public IReadOnlyList<ManagedCheckOrigin> CheckOrigins { get; init; } = [];
+}
+public sealed record ManagedCheckInput(string Role, ManagedValue Value);
+public sealed record ManagedCheckOrigin(string Kind, ManagedValue FailureCondition, IReadOnlyList<ManagedCheckInput> Inputs)
+{
+    public ManagedCheckOrigin Map(Func<ManagedValue, ManagedValue> map) => this with
+    { FailureCondition = map(FailureCondition), Inputs = Inputs.Select(i => i with { Value = map(i.Value) }).ToArray() };
+}
 public sealed record ManagedRethrow(ulong Address) : ManagedStatement(Address);
 public sealed record ManagedEndFault(ulong Address) : ManagedStatement(Address);
 /// <summary>await Task（只出现在 源码视图提升 提升出的 C# 输出方法体里）；Result 为 null 表示丢弃结果或无结果。</summary>

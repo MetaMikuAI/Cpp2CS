@@ -71,7 +71,7 @@ public static class ManagedTypeMap
         ManagedStatement Statement(ManagedStatement statement) => statement switch
         {
             ManagedAssignment a => a with { Target = Local(a.Target), Value = Value(a.Value) },
-            ManagedStore s => s with { Target = Value(s.Target), Value = Value(s.Value) },
+            ManagedStore s => s with { Target = Value(s.Target), Value = Value(s.Value), AccessChecks = s.AccessChecks.Select(o => o.Map(Value)).ToArray() },
             ManagedCall c => c with
             {
                 Invocation = c.Invocation with
@@ -87,7 +87,7 @@ public static class ManagedTypeMap
             ManagedJump j => j with { Edge = Edge(j.Edge) },
             ManagedBranch b => b with { Condition = Value(b.Condition), Taken = Edge(b.Taken), Fallthrough = Edge(b.Fallthrough) },
             ManagedSwitch w => w with { Index = Value(w.Index), Cases = w.Cases.Select(Edge).ToArray() },
-            ManagedThrow t => t with { Exception = Value(t.Exception) },
+            ManagedThrow t => t with { Exception = Value(t.Exception), CheckOrigins = t.CheckOrigins.Select(o => o.Map(Value)).ToArray() },
             ManagedCheck c => c with { Condition = Value(c.Condition), Exception = Method(c.Exception) },
             ManagedAwait a => a with { Task = Value(a.Task), Result = a.Result is { } awaited ? Local(awaited) : null },
             ManagedRethrow or ManagedEndFault or ManagedHole => statement,

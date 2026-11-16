@@ -12,10 +12,16 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Checks;
 
-public sealed record ThrowOnly(string Exception, ImmutableHashSet<Point> Throws);
+public sealed record ThrowOnly(string Exception, ImmutableHashSet<Point> Throws)
+{
+    public string? Kind { get; init; }
+}
 public sealed record CheckSubject(Term? Value = null, Term? Index = null, Term? Length = null, Term? Array = null);
 public sealed record ConditionalCheck(FlowEdge FailureEdge, FlowEdge PassEdge, string Exception, Term FailureCondition,
-    CheckSubject Subject, bool CanAbsorb, ImmutableHashSet<Point> Accesses, Reason? ExplicitReason);
+    CheckSubject Subject, bool CanAbsorb, ImmutableHashSet<Point> Accesses, Reason? ExplicitReason)
+{
+    public string? Kind { get; init; }
+}
 public sealed record CheckPoint(bool Event, bool HeapWrite, ImmutableArray<LocationView> Locations, ImmutableArray<Term> Divisors, Term? Receiver,
     bool ReceiverRequiresCallvirt = false);
 public sealed record CheckAbsorption(bool CanAbsorb, ImmutableHashSet<Point> Accesses, Reason? Why = null);
@@ -164,7 +170,7 @@ public sealed class ThrowOnlyQuery(CheckQueries q) : Query<BlockIdentity, ThrowO
         var frontier = c.Get(q.Events, new(new(key, 0))); if (!frontier.IsSuccess) return frontier.Propagate<ThrowOnly?>();
         var f = frontier.Value;
         if (f.ReachesExit || f.HasCycle || f.Stops.Count == 0) return Outcome<ThrowOnly?>.Success(null);
-        string? exception = null;
+        string? exception = null, kind = null;
         foreach (var point in f.Stops)
         {
             if (CheckQueries.Statement(c, point) is not Call { Unwind: null } call) return Outcome<ThrowOnly?>.Success(null);
@@ -172,9 +178,10 @@ public sealed class ThrowOnlyQuery(CheckQueries q) : Query<BlockIdentity, ThrowO
             if (named.Value.Operation is not { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } type })
                 return Outcome<ThrowOnly?>.Success(null);
             if (exception is not null && exception != type) return Outcome<ThrowOnly?>.Success(null);
-            exception = type;
+            if (kind is not null && kind != named.Value.Operation.Name) return Outcome<ThrowOnly?>.Success(null);
+            exception = type; kind = named.Value.Operation.Name;
         }
-        return Outcome<ThrowOnly?>.Success(new(exception!, f.Stops));
+        return Outcome<ThrowOnly?>.Success(new(exception!, f.Stops) { Kind = kind });
     }
 }
 
@@ -194,7 +201,7 @@ public sealed class ConditionalCheckQuery(CheckQueries q) : Query<FlowEdge, Cond
         var pass = new FlowEdge(key.Source, trueEdge ? branch.False : branch.True);
         Outcome<ConditionalCheck?> Result(bool absorb, ImmutableHashSet<Point> accesses, string? code = null, string? text = null) =>
             Outcome<ConditionalCheck?>.Success(new(key, pass, only.Exception, condition, subject.Value, absorb, accesses,
-                code is null ? null : new("check." + code, text!)));
+                code is null ? null : new("check." + code, text!)) { Kind = only.Kind });
         if (subject.Value.Value is null && subject.Value.Array is null)
             return Result(false, [], "subject", "条件没有可用于吸收的对象。");
         var frontier = c.Get(q.AccessFrontier, FrontierStart.FromEdge(pass)); if (!frontier.IsSuccess) return frontier.Propagate<ConditionalCheck?>();

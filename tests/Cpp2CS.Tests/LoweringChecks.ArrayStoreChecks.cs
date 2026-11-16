@@ -133,6 +133,10 @@ internal static partial class LoweringChecks
                 checks.True(lowered.Body is not null, mode + " 检查由元素写入吸收：" + lowered.Failure);
                 if (lowered.Body is { } managed)
                 {
+                    checks.True(mode == "ValueElement"
+                        ? managed.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().All(s => s.AccessChecks.Count == 0)
+                        : managed.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Any(s => s.AccessChecks is [{ Kind: "CheckArrayElementType", Inputs.Count: 2 }]),
+                        mode + " 数组写入保留目录检查种类、数组和值");
                     checks.True(emitter.Emit([managed]).Count == 0, mode + " 数组写入 CIL 契约");
                     checks.True(skeleton.Method(method).Body.Instructions.Any(i => i.OpCode.Code is Mono.Cecil.Cil.Code.Stelem_Ref or Mono.Cecil.Cil.Code.Stelem_I4 or Mono.Cecil.Cil.Code.Stelem_Any), mode + " 输出元素存入指令");
                 }

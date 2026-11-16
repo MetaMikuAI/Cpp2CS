@@ -26,6 +26,45 @@ public sealed partial class IntegerLowering
     private CheckQueries? runtimeChecks;
     private readonly Dictionary<CallIdentity, (BoundValue Value, MethodRef Exception)> nullChecks = [];
 
+    private Dictionary<CallIdentity, List<ConditionalCheck>>? throwCheckOrigins;
+    private ManagedThrow LowerCheckThrow(Call call, MethodRef constructor)
+    {
+        var result = new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
+        if (locations is null || calls is null) return result;
+        runtimeChecks ??= new(state, calls, locations, dispatch is null ? null : new CheckedDispatchReceiver(dispatch));
+        if (throwCheckOrigins is null)
+        {
+            throwCheckOrigins = [];
+            foreach (var block in function.Blocks.Where(b => b.End is Branch && !accessorRemovedBlocks.Contains(b.Identity) && !accessorRegions.ContainsKey(b.Identity)))
+            foreach (var target in SnapshotRewrite.Targets(block.End))
+            {
+                if (context.Get(runtimeChecks.Checks, new(block.Identity, target)) is not { IsSuccess: true, Value: { Kind: not null } check }) continue;
+                if (context.Get(runtimeChecks.ThrowOnly, target) is not { IsSuccess: true, Value: { } throwing }) continue;
+                foreach (var point in throwing.Throws)
+                {
+                    var id = ((Call)function.Blocks.Single(b => b.Identity == point.Block).Statements[point.Before]).Identity;
+                    if (!throwCheckOrigins.TryGetValue(id, out var origins)) throwCheckOrigins.Add(id, origins = []);
+                    origins.Add(check);
+                }
+            }
+        }
+        if (!throwCheckOrigins.TryGetValue(call.Identity, out var checks)) return result;
+        var items = new List<ManagedCheckOrigin>();
+        foreach (var check in checks)
+        {
+            var inputs = new List<ManagedCheckInput>();
+            foreach (var (role, term) in new[] { ("value", check.Subject.Value), ("index", check.Subject.Index), ("length", check.Subject.Length), ("array", check.Subject.Array) })
+            {
+                if (term is null) continue;
+                if (Value(term) is not { } value) return result;
+                inputs.Add(new(role, value));
+            }
+            if (Value(check.FailureCondition) is not { } condition) return result;
+            items.Add(new(check.Kind!, condition, inputs));
+        }
+        return result with { CheckOrigins = items };
+    }
+
     private void PrepareNullCheck(Call call, ClassifiedCall classified)
     {
         if (classified.Inputs?.GetValueOrDefault("value") is not { } input)

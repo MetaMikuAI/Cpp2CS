@@ -446,8 +446,12 @@ public sealed partial class IntegerLowering
         value = types.Kind(target.Type) == TypeKind.Struct ? value : Opaque(target.Type) || Opaque(value.Type) || ReferenceType(target.Type) || ManagedTypes.IsNativePointer(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
             : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 IntegerBits(value), target.Type, write.Width);
-        return accessor is null ? new ManagedStore(position, target, value)
-            : new ManagedCall(position, AccessorInvocation(accessor, target, [value]), null) { Inlined = true };
+        if (accessor is not null) return new ManagedCall(position, AccessorInvocation(accessor, target, [value]), null) { Inlined = true };
+        return new ManagedStore(position, target, value)
+        {
+            AccessChecks = target is ArrayElementValue element ? arrayStoreChecks.Values.Where(c => c.Stores.Contains(point))
+                .Select(c => new ManagedAccessCheck(c.Kind, [new("array", element.Array), new("value", value)])).ToArray() : [],
+        };
     }
 
     private MethodRef? FieldAccessor(ManagedValue storage, bool write, ReadDefinition? read = null, WriteIdentity? writeIdentity = null)

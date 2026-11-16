@@ -93,16 +93,16 @@ public static class ManagedValues
 
     /// <summary>
     /// 语句级的 <see cref="Map"/>：把 value 作用于语句直接包含的值（含边上的并行复制），存储的目标改用 target（默认同 value）。
-    /// 赋值的目标是局部变量，不改。与 <see cref="Of(ManagedStatement)"/> 是仅有的两处按语句种类穷举的遍历。
+    /// 检查来源不属于 IL 求值集合；includeChecks 为真时才映射。赋值的目标是局部变量，不改。与 <see cref="Of(ManagedStatement)"/> 是仅有的两处按语句种类穷举的遍历。
     /// </summary>
-    public static ManagedStatement Map(ManagedStatement statement, Func<ManagedValue, ManagedValue> value, Func<ManagedValue, ManagedValue>? target = null)
+    public static ManagedStatement Map(ManagedStatement statement, Func<ManagedValue, ManagedValue> value, Func<ManagedValue, ManagedValue>? target = null, bool includeChecks = false)
     {
         target ??= value;
         ManagedEdge Edge(ManagedEdge edge) => edge with { Copies = edge.Copies.Select(c => c with { Value = value(c.Value) }).ToArray() };
         return statement switch
         {
             ManagedAssignment a => a with { Value = value(a.Value) },
-            ManagedStore s => s with { Target = target(s.Target), Value = value(s.Value) },
+            ManagedStore s => s with { Target = target(s.Target), Value = value(s.Value), AccessChecks = includeChecks ? s.AccessChecks.Select(o => o.Map(value)).ToArray() : s.AccessChecks },
             ManagedCall c => c with
             {
                 Invocation = c.Invocation with
@@ -115,7 +115,7 @@ public static class ManagedValues
             ManagedJump j => j with { Edge = Edge(j.Edge) },
             ManagedBranch b => b with { Condition = value(b.Condition), Taken = Edge(b.Taken), Fallthrough = Edge(b.Fallthrough) },
             ManagedSwitch w => w with { Index = value(w.Index), Cases = w.Cases.Select(Edge).ToArray() },
-            ManagedThrow t => t with { Exception = value(t.Exception) },
+            ManagedThrow t => t with { Exception = value(t.Exception), CheckOrigins = includeChecks ? t.CheckOrigins.Select(o => o.Map(value)).ToArray() : t.CheckOrigins },
             ManagedCheck c => c with { Condition = value(c.Condition) },
             ManagedAwait a => a with { Task = value(a.Task) },
             ManagedRethrow or ManagedEndFault or ManagedHole => statement,
@@ -123,9 +123,9 @@ public static class ManagedValues
         };
     }
 
-    /// <summary>对方法体的每条语句做 <see cref="Map(ManagedStatement, Func{ManagedValue, ManagedValue}, Func{ManagedValue, ManagedValue}?)"/>。</summary>
-    public static ManagedBody Map(ManagedBody body, Func<ManagedValue, ManagedValue> value, Func<ManagedValue, ManagedValue>? target = null) =>
-        body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Map(s, value, target)).ToArray() }).ToArray() };
+    /// <summary>对方法体的每条语句做 <see cref="Map(ManagedStatement, Func{ManagedValue, ManagedValue}, Func{ManagedValue, ManagedValue}?, bool)"/>。</summary>
+    public static ManagedBody Map(ManagedBody body, Func<ManagedValue, ManagedValue> value, Func<ManagedValue, ManagedValue>? target = null, bool includeChecks = false) =>
+        body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Map(s, value, target, includeChecks)).ToArray() }).ToArray() };
 
     /// <summary>语句的出边（跳转、分支、switch）；其余语句为空。按语句种类列出出边的唯一地方。</summary>
     public static IReadOnlyList<ManagedEdge> Edges(ManagedStatement statement) => statement switch

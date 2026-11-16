@@ -14,14 +14,14 @@ namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
-    private readonly Dictionary<CallIdentity, (Term Array, Term Value, Point Point)> arrayStoreChecks = [];
+    private readonly Dictionary<CallIdentity, (Term Array, Term Value, Point Point, string Kind, HashSet<Point> Stores)> arrayStoreChecks = [];
 
     private void PrepareArrayStoreCheck(Call call, ClassifiedCall classified, Point point)
     {
         if (classified.Inputs?.GetValueOrDefault("array")?.Source is not TermSource array
             || classified.Inputs?.GetValueOrDefault("value")?.Source is not TermSource value)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "数组存入检查的数组或值没有绑定", code: "lowering.ArrayStoreCheck"); return; }
-        arrayStoreChecks.Add(call.Identity, (array.Term, value.Term, point));
+        arrayStoreChecks.Add(call.Identity, (array.Term, value.Term, point, classified.Operation!.Name, []));
         PairArrayStoreCheck(call.Identity);
     }
 
@@ -45,6 +45,7 @@ public sealed partial class IntegerLowering
                 && v.Path.IsEmpty && v.Offset == 0 && v.Width == write.Width && ManagedTypes.IsReferenceType(v.Type)
                 && Same(v.Root, check.Array)) == 1;
             if (!matched) pairingWhy ??= new("lowering.ArrayStoreCheck.Location", "写入位置没有同一数组的唯一完整引用元素视图。", located.Why ?? located.Value?.Why);
+            if (matched) check.Stores.Add(point);
             return matched;
         }
         Outcome<bool> Stop(QueryContext c, Point point)

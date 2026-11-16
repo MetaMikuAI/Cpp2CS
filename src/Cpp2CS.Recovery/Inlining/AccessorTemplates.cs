@@ -146,11 +146,12 @@ public static class AccessorTemplates
         }
         return No("Effects", "返回值与字段写入不能组成纯取值或无返回赋值模板");
     }
-    internal static bool IsPure(MethodRef method, ManagedValue value, bool locals = false) => ManagedValues.Walk(value).All(v => v.Width is > 0 and <= 64 && (v switch
+    internal static bool IsPure(MethodRef method, ManagedValue value, bool locals = false, bool arrayLengths = false) => ManagedValues.Walk(value).All(v => v.Width is > 0 and <= 64 && (v switch
         {
             ArgumentValue a => a.Index >= -1 && a.Index < method.Method.Parameters.Count && (a.Index >= 0 || !method.Method.IsStatic),
             ConstantValue or FieldValue or StaticFieldValue or ChoiceValue or BooleanValue or NegatedValue => true,
             LocalValue => locals,
+            ArrayLengthValue a => arrayLengths && a.Array is FieldValue { Receiver: ArgumentValue { Index: -1 } },
             BinaryValue b => b.Op is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply
                 or BinaryOperator.And or BinaryOperator.Or or BinaryOperator.Xor
                 or BinaryOperator.ShiftLeft or BinaryOperator.ShiftRightSigned or BinaryOperator.ShiftRightUnsigned,

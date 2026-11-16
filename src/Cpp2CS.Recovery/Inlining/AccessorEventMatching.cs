@@ -21,14 +21,15 @@ public sealed partial class AccessorQuery
             {
                 if (checks is null) return Outcome<bool>.Success(false);
                 var result = c.Get(checks.Checks, key);
-                return result.IsSuccess ? Outcome<bool>.Success(result.Value is { CanAbsorb: true,
-                    Exception: "System.NullReferenceException" or "System.IndexOutOfRangeException" }) : result.Propagate<bool>();
+                return result.IsSuccess ? Outcome<bool>.Success(result.Value is { Kind: not null }) : result.Propagate<bool>();
             }
         }
         private void EventConditional(QueryContext c, Site anchor, MethodRef selected, AccessorEventTemplate template,
             Dictionary<int, Term> fixedArgs, List<Site> sites, Dictionary<BlockIdentity, Block> blocks,
             List<CandidateMatch> matches, HashSet<string> shapes)
         {
+            int reached = 0; string? detail = null;
+            void Unmatched(int stage, string why) { if (stage >= reached) { reached = stage; detail = why; } }
             if (template.Paths.Any(p => p.Result is not null)) { shapes.Add("带事件条件模板：返回值尚未配对"); return; }
             var invoked = template.Paths.SelectMany(p => p.Events).OfType<AccessorInvocation>().Select(call => call.Method.Method).Distinct().ToArray();
             if (invoked.Any(method => calls is null || !calls.Values.Any(call => call.Method.Method == method)))
@@ -59,17 +60,14 @@ public sealed partial class AccessorQuery
                         if (!paths.IsSuccess || paths.Value.Length != template.Paths.Count) continue;
                         var points = paths.Value.SelectMany(p => p.Points).ToHashSet();
                         if (points.Any(p => blocks[p.Block].Statements[p.Before] is Call { Unwind: not null } or Call { DoesNotReturn: true } or MemoryRead { Acquire: true })) continue;
-                        // 被排除的检查失败出口必须由区域内的访问吸收：区域换成调用后由这次调用对接收者的判空承接。吸收点在区域外的检查不能随区域消失。
-                        bool absorbedInside = true;
-                        foreach (var edge in paths.Value.SelectMany(p => p.Edges).Distinct())
+                        var regionChecks = paths.Value.SelectMany(p => p.Edges).Distinct().Select(edge =>
                         {
-                            if (blocks[edge.Source].End is not Branch gate) continue;
+                            if (blocks[edge.Source].End is not Branch gate) return null;
                             var failure = new FlowEdge(edge.Source, gate.True == edge.Target ? gate.False : gate.True);
-                            if (c.Get(exits, failure) is not { IsSuccess: true, Value: true }) continue;
-                            if (checks is null || c.Get(checks.Checks, failure) is not { IsSuccess: true, Value: { } check }
-                                || !check.Accesses.All(points.Contains)) { absorbedInside = false; break; }
-                        }
-                        if (!absorbedInside) continue;
+                            return checks is not null && c.Get(exits, failure) is { IsSuccess: true, Value: true }
+                                && c.Get(checks.Checks, failure) is { IsSuccess: true, Value: { } check } ? check : null;
+                        }).OfType<ConditionalCheck>().Distinct().ToArray();
+                        if (regionChecks.Any(check => check.CanAbsorb && !check.Accesses.All(points.Contains))) continue;
                         var window = sites.Where(s => points.Contains(s.Point)).ToArray();
                         var roots = points.SelectMany(p => SnapshotRewrite.Uses(blocks[p.Block].Statements[p.Before]))
                             .Concat(paths.Value.SelectMany(p => p.Edges).Select(e => blocks[e.Source].End).OfType<Branch>().Select(b => b.Condition));
@@ -86,24 +84,43 @@ public sealed partial class AccessorQuery
                                 if (found.Length == 0 || found.Select(s => s.Value).Distinct().Count() != 1) { uncertain = true; return null; }
                                 reads.UnionWith(found.Select(s => (ReadIdentity)s.Identity)); return found[0].Value;
                             }
-                            var interpreter = new AccessorTerms(c.Snapshot.Terms, i => binding.GetValueOrDefault(i), Read);
+                            Term? Length(Term array, int width)
+                            {
+                                var found = points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryRead>()
+                                    .Where(r => c.Get(locations, new(r.Address, r.Width)) is { IsSuccess: true } at
+                                        && at.Value.Views is [ { Kind: ManagedLocationKind.ArrayLength } view ]
+                                        && c.Get(state.Resolve, view.Root) is { IsSuccess: true } root && root.Value == array).ToArray();
+                                var values = found.Select(r => c.Get(state.Read, r.Identity)).ToArray();
+                                if (values.Length == 0 || values.Any(v => !v.IsSuccess) || values.Select(v => v.Value).Distinct().Count() != 1) return null;
+                                reads.UnionWith(found.Select(r => r.Identity));
+                                return new AccessorTerms(c.Snapshot.Terms, _ => null, (_, _) => null).Resize(values[0].Value, width);
+                            }
+                            var interpreter = new AccessorTerms(c.Snapshot.Terms, i => binding.GetValueOrDefault(i), Read, arrayLength: Length);
                             AccessorEvent? Instantiate(AccessorEvent effect) => effect switch
                             {
                                 AccessorFieldWrite w when interpreter.Instantiate(w.Receiver) is { } r && interpreter.Instantiate(w.Value) is { } v =>
                                     new AccessorFieldWrite(w.Field with { DeclaringType = selected.Concrete(w.Field.DeclaringType) }, r, v),
+                                AccessorArrayWrite w when interpreter.Instantiate(w.Array) is { } a && interpreter.Instantiate(w.Index) is { } i && interpreter.Instantiate(w.Value) is { } v => new AccessorArrayWrite(a, i, interpreter.Resize(v, types.StorageBits(selected.Concrete(w.ElementType))), selected.Concrete(w.ElementType)),
+                                AccessorCheck check => InstantiateCheck(check),
                                 AccessorInvocation call => InstantiateCall(call), _ => null,
                             };
+                            AccessorCheck? InstantiateCheck(AccessorCheck check)
+                            {
+                                var inputs = check.Inputs.Select(i => (i.Role, Value: interpreter.Instantiate(i.Value))).ToArray();
+                                return inputs.Any(i => i.Value is null) || interpreter.Instantiate(check.FailureCondition) is not { } condition ? null
+                                    : new(check.Kind, inputs.Select(i => new AccessorCheckInput(i.Role, i.Value!)).ToArray(), condition);
+                            }
                             AccessorInvocation? InstantiateCall(AccessorInvocation call)
                             {
                                 var args = call.Arguments.Select(interpreter.Instantiate).ToArray();
                                 var receiver = call.Receiver is null ? null : interpreter.Instantiate(call.Receiver);
                                 if (args.Any(a => a is null) || call.Receiver is not null && receiver is null) return null;
-                                return new(new(call.Method.Method, call.Method.TypeArguments.Select(selected.Concrete).ToArray(), call.Method.MethodArguments.Select(selected.Concrete).ToArray()),
-                                    call.Virtual, receiver, args.OfType<Term>().ToArray());
+                                var method = new MethodRef(call.Method.Method, call.Method.TypeArguments.Select(selected.Concrete).ToArray(), call.Method.MethodArguments.Select(selected.Concrete).ToArray());
+                                return new(method, call.Virtual, receiver, args.Select((a, i) => interpreter.Resize(a!, types.StorageBits(method.Concrete(method.Method.Parameters[i].Type)))).ToArray());
                             }
                             var expected = template.Paths.Select(p => (Conditions: p.Conditions.Select(g => (Value: interpreter.Instantiate(g.Value), g.Positive)).ToArray(),
-                                Events: p.Events.Select(Instantiate).ToArray())).ToArray();
-                            if (uncertain || expected.Any(p => p.Conditions.Any(g => g.Value is null) || p.Events.Any(e => e is null))) continue;
+                                Events: p.Events.Select(Instantiate).ToArray(), Reads: p.Reads.Select(r => (Value: interpreter.Instantiate(r.Value), r.BeforeEffect)).ToArray())).ToArray();
+                            if (uncertain || expected.Any(p => p.Conditions.Any(g => g.Value is null) || p.Events.Any(e => e is null))) { Unmatched(1, "字段、长度或事件纯项没有唯一定义"); continue; }
                             var used = new HashSet<int>(); bool matched = true;
                             foreach (var path in paths.Value)
                             {
@@ -116,42 +133,81 @@ public sealed partial class AccessorQuery
                                     conditions.Add(b.True == edge.Target ? condition.Value : c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Not), 1, condition.Value));
                                 }
                                 var candidates = Enumerable.Range(0, expected.Length).Where(i => expected[i].Conditions.Select(g => g.Positive ? g.Value! : c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Not), 1, g.Value!)).ToHashSet().SetEquals(conditions)).ToArray();
-                                if (!matched || candidates is not [var one] || !used.Add(one)) { matched = false; break; }
-                                bool called = false; var priorWrites = new List<MemoryWrite>();
+                                if (!matched || candidates is not [var one] || !used.Add(one)) { Unmatched(2, "路径条件没有唯一对应"); matched = false; break; }
+                                bool called = false; int beforeEffect = 0;
+                                var effects = path.Points.Select(p => blocks[p.Block].Statements[p.Before]).Where(s => s is MemoryWrite or Call).ToArray();
                                 foreach (var p in path.Points)
                                 {
                                     var statement = blocks[p.Block].Statements[p.Before];
-                                    if (statement is MemoryRead read)
+                                    if (statement is MemoryRead read && !AllocationConstructorQuery.PrivateAccess(c, state, locations, read))
                                     {
-                                        if (called) { matched = false; break; }
-                                        var readLocation = c.Get(state.Locations, new(read.Address, read.Width));
-                                        foreach (var write in priorWrites)
+                                        if (called || c.Get(state.Read, read.Identity) is not { IsSuccess: true } loaded) { matched = false; break; }
+                                        var readAddress = c.Get(state.Resolve, read.Address);
+                                        var readLocation = readAddress.IsSuccess ? c.Get(state.Locations, new(readAddress.Value, read.Width)) : readAddress.Propagate<Location>();
+                                        bool AtPosition(int expectedPosition)
                                         {
-                                            var writeLocation = c.Get(state.Locations, new(write.Address, write.Width));
-                                            if (!readLocation.IsSuccess || !writeLocation.IsSuccess
-                                                || c.Get(state.Alias, new(readLocation.Value, writeLocation.Value)) is not { IsSuccess: true, Value.Kind: AliasKind.Disjoint })
-                                            { matched = false; break; }
+                                            if (expectedPosition > effects.Length) return false;
+                                            // 读取跨越的每次写入都必须不相交；相同事件位置不需要别名假设。
+                                            for (int i = Math.Min(beforeEffect, expectedPosition); i < Math.Max(beforeEffect, expectedPosition); i++)
+                                            {
+                                                if (effects[i] is not MemoryWrite write) return false;
+                                                var writeAddress = c.Get(state.Resolve, write.Address);
+                                                var writeLocation = writeAddress.IsSuccess ? c.Get(state.Locations, new(writeAddress.Value, write.Width)) : writeAddress.Propagate<Location>();
+                                                if (!readLocation.IsSuccess || !writeLocation.IsSuccess
+                                                    || c.Get(state.Alias, new(readLocation.Value, writeLocation.Value)) is not { IsSuccess: true, Value.Kind: AliasKind.Disjoint }) return false;
+                                            }
+                                            return true;
                                         }
+                                        if (!expected[one].Reads.Any(r => r.Value == loaded.Value && AtPosition(r.BeforeEffect))) { Unmatched(3, "读取值或读取的事件位置不同：" + (read.Trace?.NativeAddress.ToString("x") ?? "无追溯")); matched = false; break; }
                                     }
-                                    if (statement is MemoryWrite writeAt) priorWrites.Add(writeAt);
                                     called |= statement is Call;
+                                    if (statement is MemoryWrite or Call) beforeEffect++;
                                 }
                                 if (!matched) break;
-                                var events = path.Points.Where(p => blocks[p.Block].Statements[p.Before] is not MemoryRead).ToArray();
-                                if (events.Length != expected[one].Events.Length) { matched = false; break; }
-                                for (int i = 0; i < events.Length; i++)
-                                    if (!EventEquals(c, blocks[events[i].Block].Statements[events[i].Before], events[i], expected[one].Events[i]!)) { matched = false; break; }
-                                if (!matched) break;
+                                var wanted = expected[one].Events; int next = 0;
+                                bool Implied(AccessorCheck check, Point at) => c.Get(new PathFactQuery(state), new(at, check.FailureCondition)) is { IsSuccess: true, Value: PathTruth.False };
+                                void SkipImplied(Point at)
+                                {
+                                    while (next < wanted.Length && wanted[next] is AccessorCheck check && Implied(check, at)) next++;
+                                }
+                                foreach (var edge in path.Edges)
+                                {
+                                    foreach (var p in path.Points.Where(p => p.Block == edge.Source))
+                                    {
+                                        var statement = blocks[p.Block].Statements[p.Before];
+                                        if (statement is MemoryRead) continue;
+                                        SkipImplied(p);
+                                        if (next >= wanted.Length || !EventEquals(c, statement, p, wanted[next]!)) { Unmatched(4 + next, "事件不相同：" + statement.GetType().Name + " / " + (next < wanted.Length ? wanted[next]!.GetType().Name : "模板已结束")); matched = false; break; }
+                                        next++;
+                                    }
+                                    if (!matched) break;
+                                    if (blocks[edge.Source].End is not Branch gate) continue;
+                                    var failureEdge = new FlowEdge(edge.Source, gate.True == edge.Target ? gate.False : gate.True);
+                                    SkipImplied(new(edge.Source, blocks[edge.Source].Statements.Length));
+                                    var check = regionChecks.SingleOrDefault(check => check.FailureEdge == failureEdge);
+                                    if (check is null) continue;
+                                    if (check.Kind == "ThrowNullReference" && check.Subject.Value == binding.GetValueOrDefault(-1)) continue;
+                                    if (next < wanted.Length && wanted[next] is AccessorCheck expectedCheck && CheckEquals(c, check, expectedCheck)) { next++; continue; }
+                                    if (!check.CanAbsorb) { Unmatched(4 + next, "检查种类、被检查值或事件位置不同：" + check.Kind); matched = false; break; }
+                                }
+                                var last = path.Edges[^1].Source;
+                                SkipImplied(new(last, blocks[last].Statements.Length));
+                                if (!matched || next != wanted.Length) { if (matched) Unmatched(4 + next, "模板仍有未对应事件或路径事实不足"); matched = false; break; }
+
                             }
                             if (!matched || used.Count != expected.Length || !window.Any(s => s.Identity == anchor.Identity)) continue;
                             // 所有读取必须是模板纯项；不能留下未解释的堆访问。
-                            if (points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryRead>().Any(r => !reads.Contains(r.Identity))) continue;
+                            if (points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryRead>().Any(r => !reads.Contains(r.Identity)
+                                && !AllocationConstructorQuery.PrivateAccess(c, state, locations, r))) { Unmatched(100, "区域含未对应的托管读取"); continue; }
+                            if (regionChecks.Where(check => check.CanAbsorb).Any(check => check.Accesses.Any(p => blocks[p.Block].Statements[p.Before] is MemoryRead r && !reads.Contains(r.Identity)))) continue;
                             if (points.Where(p => p.Block == entry.Identity).Any(p => blocks[p.Block].Statements[p.Before] is Call)) continue;
                             var symbolic = Symbols(c.Snapshot.Terms, selected, fixedArgs, binding, template.Anchors, out var free);
-                            var constraint = new AccessorTerms(c.Snapshot.Terms, i => symbolic.GetValueOrDefault(i), Read);
+                            var constraint = new AccessorTerms(c.Snapshot.Terms, i => symbolic.GetValueOrDefault(i), Read, arrayLength: Length);
                             IEnumerable<Term> Inputs(AccessorEvent effect) => effect switch
                             {
                                 AccessorFieldWrite w => [w.Receiver, w.Value],
+                                AccessorArrayWrite w => [w.Array, w.Index, w.Value],
+                                AccessorCheck check => check.Inputs.Select(i => i.Value).Append(check.FailureCondition),
                                 AccessorInvocation call => call.Arguments.Concat(call.Receiver is { } receiver ? [receiver] : []), _ => [],
                             };
                             var equations = template.Paths.SelectMany(p => p.Conditions.Select(g => g.Value).Concat(p.Events.SelectMany(Inputs)))
@@ -161,7 +217,8 @@ public sealed partial class AccessorQuery
                             var outside = blocks.Values.SelectMany(b => b.Statements.Select((s, i) => (s, p: new Point(b.Identity, i)))
                                 .Where(x => !points.Contains(x.p)).SelectMany(x => SnapshotRewrite.Uses(x.s))
                                 .Concat(area.Value.Order.Append(entry.Identity).Contains(b.Identity) ? [] : SnapshotRewrite.Uses(b.End)));
-                            var coveredValues = window.Where(s => !s.Write).Select(s => s.Value).ToHashSet();
+                            var coveredValues = points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<MemoryRead>().Where(r => reads.Contains(r.Identity))
+                                .Select(r => c.Get(state.Read, r.Identity)).Where(v => v.IsSuccess).Select(v => v.Value).ToHashSet();
                             var removedDefinitions = points.Select(p => blocks[p.Block].Statements[p.Before]).OfType<Call>().Select(call => (StableIdentity)call.Identity)
                                 .Concat(area.Value.Order.Append(join.Identity).SelectMany(id => blocks[id].Merges.Select(merge => merge.Identity))).ToHashSet();
                             var seen = new HashSet<Term>();
@@ -187,7 +244,16 @@ public sealed partial class AccessorQuery
                     }
                 }
             }
-            if (matches.Count == 0) shapes.Add("带事件条件模板未匹配：路径条件、事件、纯项覆盖或区域边界不成立");
+            if (matches.Count == 0) shapes.Add("带事件条件模板未匹配：" + (detail ?? "区域或路径数量不成立"));
+        }
+        private bool CheckEquals(QueryContext c, ConditionalCheck actual, AccessorCheck expected)
+        {
+            if (actual.Kind != expected.Kind) return false;
+            var inputs = new[] { ("value", actual.Subject.Value), ("index", actual.Subject.Index), ("length", actual.Subject.Length), ("array", actual.Subject.Array) }
+                .Where(i => i.Item2 is not null).Select(i => new AccessorCheckInput(i.Item1, i.Item2!)).ToArray();
+            if (inputs.Length == 0) return false;
+            return inputs.Length == expected.Inputs.Count && inputs.Zip(expected.Inputs).All(pair => pair.First.Role == pair.Second.Role
+                && c.Get(state.Resolve, pair.First.Value) is { IsSuccess: true } value && value.Value == pair.Second.Value);
         }
         private bool EventEquals(QueryContext c, Statement actual, Point point, AccessorEvent expected)
         {
@@ -197,6 +263,8 @@ public sealed partial class AccessorQuery
             {
                 var views = at.Value.Views.Where(v => v.Offset == 0 && types.Size(v.Type) * 8 == write.Width).ToArray();
                 if (views is not [var view]) return false;
+                if (expected is AccessorArrayWrite element) return view.Kind == ManagedLocationKind.ArrayElement && view.Path.IsEmpty
+                    && Resolve(view.Root) == element.Array && view.Index is { } index && Resolve(index) == element.Index && value == element.Value;
                 if (expected is AccessorFieldWrite field) return view.Kind == ManagedLocationKind.InstanceField && view.Path.Length == 1
                     && view.Path[0].Equals(field.Field) && Resolve(view.Root) == field.Receiver && value == field.Value;
             }

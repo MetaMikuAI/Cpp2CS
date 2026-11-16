@@ -110,7 +110,8 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
         var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));
         if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
-        bool runtimeOnly = runtimeField.IsSuccess && (runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
+        bool runtimeOnly = runtimeField.IsSuccess && (runtimeField.Value.Kind == ValueKind.RuntimePointer && runtimeField.Value.Name is EntityName
+            || runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
             specification.Field != spec.Layout.Field("Il2CppArray", "max_length").Path);
         // 对象头之外的规格字段也可能有真实的托管字段声明，例如字符串长度；保留两种查询视图。
         if (runtimeOnly && (location.Value.Offset is not { } runtimeOffset || runtimeOffset < spec.Layout.ObjectHeaderSize
