@@ -168,7 +168,8 @@ public sealed partial class IntegerLowering
             if (!structReads.TryGetValue(read, out var definitions)) structReads.Add(read, definitions = []);
             var definition = new ReadDefinition(native) { Value = value, Local = local };
             var usePosition = position; position = native.Trace?.NativeAddress ?? position;
-            definition.Accessor = FieldAccessor(value, false, definition);
+            definition.Accessor = FieldAccessor(ref value, false, definition);
+            definition.Value = value;
             position = usePosition;
             if (failure is not null) return null;
             definitions.Add(definition);

@@ -363,7 +363,7 @@ public sealed partial class IntegerLowering
             return frameObjects?.Accesses.ContainsKey(read.Identity) == true
                 ? Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "结构体帧读取不能作为跨字段标量使用：" + value.Type, code: "lowering.Frame.Struct")
                 : StructScalarFailure(value.Type);
-        definition.Accessor = FieldAccessor(value, false, definition);
+        definition.Accessor = FieldAccessor(ref value, false, definition);
         if (failure is not null) return null;
         position = usePosition;
         definition.Value = value;
@@ -455,8 +455,31 @@ public sealed partial class IntegerLowering
     }
 
     private MethodRef? FieldAccessor(ManagedValue storage, bool write, ReadDefinition? read = null, WriteIdentity? writeIdentity = null)
+        => FieldAccessor(ref storage, write, read, writeIdentity);
+
+    private MethodRef? FieldAccessor(ref ManagedValue storage, bool write, ReadDefinition? read = null, WriteIdentity? writeIdentity = null, bool nestedRead = false)
     {
         if (accessors is null) return null;
+        if (!write && storage is FieldValue nested && nested.Receiver is FieldValue or StaticFieldValue
+            && types.Kind(nested.Receiver.Type) == TypeKind.Struct && !GenericStruct(nested.Receiver.Type))
+        {
+            // 整字段 getter 给出结构体值，原读取在这个值上继续取同一条子路径。
+            var whole = nested.Receiver;
+            var getter = FieldAccessor(ref whole, false, read, nestedRead: true);
+            if (failure is not null) return null;
+            if (getter is not null)
+            {
+                var field = Cpp2CS.Managed.FieldAccessor.FieldOf(whole)!;
+                var proof = new Cpp2CS.Managed.FieldAccessor(getter, field, whole.Type, whole.Width, false);
+                whole = whole switch
+                {
+                    FieldValue instance => instance with { Accessor = proof },
+                    StaticFieldValue shared => shared with { Accessor = proof },
+                    _ => whole,
+                };
+            }
+            if (!ReferenceEquals(whole, nested.Receiver)) storage = nested with { Receiver = whole };
+        }
         foreach (var value in ManagedValues.Walk(storage))
         {
             var (field, receiver) = value switch
@@ -468,8 +491,8 @@ public sealed partial class IntegerLowering
             if (field is null || ManagedAccess.Field(types, method, field, receiver)) continue;
             if (!write && value is FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null })
             {
-                // getter 的等式不要求放置；已有读取局部仍须在全部使用之前定义。
-                if (ReferenceEquals(value, storage) && ReadPlacementFailure(read) is { } missing)
+                // getter 的等式不要求放置；原访问根上的读取局部仍须在全部使用之前定义。
+                if (!nestedRead && ReferenceEquals(value, storage) && ReadPlacementFailure(read) is { } missing)
                 {
                     Fail<object>(LoweringFailureKind.State, "读取局部的原定义未能支配全部同值读取", missing, "lowering.Access.ReadPlacement");
                     return null;
@@ -485,13 +508,18 @@ public sealed partial class IntegerLowering
                 return rejected.Method;
             }
             Reason? placementFailure = !ReferenceEquals(value, storage)
-                ? new("inline.Accessor.Placement.NestedAccess", "不可访问字段只是复合访问的内部位置")
+                ? new("inline.Accessor.Placement.NestedAccess", write ? "写入不可访问字段的内部，没有对应的 getter 写法" : "不可访问字段只是复合访问的内部位置")
                 : ManagedValues.Children(storage).Any(v => !AccessorReceiver(v))
                     ? new("inline.Accessor.Placement.Receiver", "接收者仍含字段访问或复合位置的取地址，不能保持单次访问的位置") : null;
             placementFailure ??= ReadPlacementFailure(read);
             var answer = accessors.Resolve(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter,
                 placementFailure is null, placementFailure));
-            if (answer.Failure is { } why) Fail<object>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
+            if (answer.Failure is { } why)
+            {
+                if (write && placementFailure is { Code: "inline.Accessor.Placement.NestedAccess" } nestedWrite
+                    && why.Code != "inline.Accessor.Placement") why = why with { Cause = nestedWrite with { Cause = why.Cause } };
+                Fail<object>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
+            }
             return answer.Method;
         }
         return null;

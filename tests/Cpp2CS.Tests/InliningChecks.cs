@@ -71,6 +71,7 @@ internal static partial class InliningChecks
         EventAccessorChecks(checks);
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
+        NestedStructAccessorChecks(checks);
         ValueAccessorChecks(checks);
         GenericAccessorChecks(checks);
         GenericStaticAccessorChecks(checks);
@@ -585,6 +586,7 @@ internal static partial class InliningChecks
         private readonly List<MethodDef> methods = [];
         public TypeDef Owner { get; }
         public TypeDef Caller { get; }
+        public TypeDef? ReceiverOwner { get; }
         public DefinitionRef OwnerType { get; }
         public TypeRef Integer { get; }
         public TypeRef Void { get; }
@@ -594,7 +596,7 @@ internal static partial class InliningChecks
         public ManagedTypes Types { get; }
         public MethodBinder Binder { get; }
         public CallNamingQuery Calls { get; }
-        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false, bool externalCaller = false, int fieldOffset = 16)
+        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false, bool externalCaller = false, int fieldOffset = 16, bool receiverOwner = false)
         {
             TypeDef Define(string name, string ns = "", bool value = false, TypeAttributes layout = 0, string? assembly = null) { var type = new TypeDef { Index = definitions.Count,
                 Assembly = assembly ?? (ns == "System" ? "mscorlib.dll" : "InliningChecks.dll"), Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
@@ -603,6 +605,7 @@ internal static partial class InliningChecks
                 Define(name, "System", name is not ("Object" or "String"));
             Integer = new DefinitionRef(definitions.Single(t => t.Name == "Int32"), []); Void = new DefinitionRef(definitions.Single(t => t.Name == "Void"), []);
             Owner = Define("Owner", value: valueOwner, layout: explicitOwner ? TypeAttributes.ExplicitLayout : 0); Caller = Define("Caller", assembly: externalCaller ? "InliningCallerChecks.dll" : null);
+            ReceiverOwner = receiverOwner ? Define("Receiver") : null;
             if (generic) Owner.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
             OwnerType = new(Owner, Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
             var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = fieldOffset, Token = 0x04000001 };

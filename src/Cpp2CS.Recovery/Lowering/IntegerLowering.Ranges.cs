@@ -102,7 +102,7 @@ public sealed partial class IntegerLowering
             if (!rangeReads.TryGetValue(key, out var snapshot))
             {
                 var storage = AccessView(view); if (storage is null) return null;
-                var accessor = FieldAccessor(storage, false, read); if (failure is not null) return null;
+                var accessor = FieldAccessor(ref storage, false, read); if (failure is not null) return null;
                 snapshot = new(read.Read) { Value = storage, Accessor = accessor, Local = new(new(nextLocal++), storage.Type, storage.Width) };
                 rangeReads.Add(key, snapshot);
                 if (!structReads.TryGetValue(read.Read.Identity, out var definitions)) structReads.Add(read.Read.Identity, definitions = []);
