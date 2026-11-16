@@ -16,10 +16,22 @@ public sealed class LocationQuery : Query<AddressRequest, Location>
         if (key.Width <= 0 || key.Address.Width != context.Snapshot.AddressWidth || key.Address.Kind == TermKind.Undefined)
             return Outcome<Location>.Failure(new("state.address", "地址或访问位宽不合法。"));
         var term = key.Address; BigInteger? offset = 0;
-        while (term.Operator is CoreOperator { Operation: CoreOperation.Add or CoreOperation.Subtract } op)
+        while (term.Operator is CoreOperator { Operation: CoreOperation.Add or CoreOperation.Subtract or CoreOperation.Or } op)
         {
             if (context.Step() is { } why) return Outcome<Location>.Failure(why);
             var a = term.Operands[0]; var b = term.Operands[1];
+            if (op.Operation == CoreOperation.Or)
+            {
+                // 帧基址按目标 ABI 对齐：内层是“帧根加常量”、被或上的常量只占内层为零的低位时，按位或等于加法。
+                int alignment = context.Snapshot.Frame.Alignment;
+                var inner = b.ConstantValue is not null ? a : a.ConstantValue is not null ? b : null;
+                if (inner is null || alignment <= 1 || (b.ConstantValue ?? a.ConstantValue) is not { } bits || bits <= 0 || bits >= alignment) break;
+                var located = context.Get(this, new(inner, key.Width));
+                if (!located.IsSuccess) return located;
+                if (located.Value is not { Region: Region.Frame, Offset: { } start } || located.Value.Root != context.Snapshot.Frame.Base
+                    || (((start % alignment + alignment) % alignment) & bits) != 0) break;
+                offset += bits; term = inner; continue;
+            }
             if (b.ConstantValue is { } n) { offset += op.Operation == CoreOperation.Add ? n : -n; term = a; }
             else if (op.Operation == CoreOperation.Add && a.ConstantValue is { } m) { offset += m; term = b; }
             else

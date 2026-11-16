@@ -27,7 +27,7 @@ internal static class StateChecks
     private static T Good<T>(Outcome<T> result) => result.IsSuccess ? result.Value : throw new InvalidOperationException(result.Why?.ToString());
     public static int Run()
     {
-        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); ReadAddresses(a); Branches(a); ExceptionEdges(a); Calls(a); Caller(a); Scale();
+        var a = new Assertions(); SourceSets(a); Alias(a); FrameAlignment(a); Forward(a); ReadAddresses(a); Branches(a); ExceptionEdges(a); Calls(a); Caller(a); Scale();
         return a.Finish("状态模型");
     }
     private static void ReadAddresses(Assertions a)
@@ -102,6 +102,24 @@ internal static class StateChecks
             a.True(x.IsSubsetOf(y) == left.IsSubsetOf(right) && x.Union(x).Same(x) &&
                 BitSourceSet.Empty.Union(x).Same(x) && x.IsSubsetOf(union) && y.IsSubsetOf(union), "位来源并集与偏序保持格性质");
         }
+    }
+    private static void FrameAlignment(Assertions a)
+    {
+        Location Locate(int alignment, long offset, ulong bits)
+        {
+            var terms = new TermTable(); var entry = new BlockIdentity(); var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var builder = new FunctionBuilder(terms, entry, 64, new(frame, alignment));
+            builder.Blocks.Add(new(entry, [], [], new Return([])));
+            var q = new StateQueries(); var c = q.CreateContext(builder.Freeze());
+            var inner = terms.Apply(new CoreOperator(CoreOperation.Add), 64, frame,
+                terms.Constant((new BigInteger(offset) + (BigInteger.One << 64)) % (BigInteger.One << 64), 64));
+            return Good(c.Get(q.Locations, new(terms.Apply(new CoreOperator(CoreOperation.Or), 64, inner, terms.Constant(bits, 64)), 64)));
+        }
+        a.True(Locate(16, -208, 8) is { Region: Region.Frame, Offset: { } at } && at == -200, "帧基址按 16 对齐时，对齐的帧地址或上低位常量等于加法");
+        a.True(Locate(16, -200, 4) is { Region: Region.Frame, Offset: { } next } && next == -196, "内层偏移的低位与常量不相交时成立");
+        a.True(Locate(16, -200, 8).Region != Region.Frame, "常量与内层偏移的低位相交时不是帧地址");
+        a.True(Locate(16, -208, 16).Region != Region.Frame, "常量超出对齐给出的低位时不是帧地址");
+        a.True(Locate(1, -208, 8).Region != Region.Frame, "没有对齐事实时按位或不是帧地址");
     }
     private static void Alias(Assertions a)
     {

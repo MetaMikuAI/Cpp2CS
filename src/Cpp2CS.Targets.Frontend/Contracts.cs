@@ -15,6 +15,8 @@ public sealed record RegisterConvention(
     long IncomingAreaOffset, long OutgoingAreaOffset,
     ImmutableArray<Register> CallerValues)
 {
+    /// <summary>入口处 SP 的对齐（字节，2 的幂）；1 表示目标不给出对齐事实。</summary>
+    public int EntryStackAlignment { get; init; } = 1;
     /// <summary>返回语义执行后的 SP 相对入口帧基址的偏移。</summary>
     public long ReturnStackOffset { get; init; }
     /// <summary>尾调用前的 SP 相对入口帧基址的偏移；不包含返回指令的弹栈。</summary>

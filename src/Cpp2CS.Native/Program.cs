@@ -55,7 +55,8 @@ public sealed record SelectorAtom(BlockIdentity Handler) : AtomIdentity
 public sealed record EntryInput(AbstractSlot Slot, Term Value, InputRole Role = InputRole.Argument);
 public sealed record SlotValue(AbstractSlot Slot, Term Value);
 /// <summary>仅给出入口帧基址；静态帧对象与生存期由状态模型划分。</summary>
-public sealed record FrameDescription(Term Base);
+/// <summary>Alignment 是帧基址的对齐（字节，2 的幂）；1 表示没有对齐事实。</summary>
+public sealed record FrameDescription(Term Base, int Alignment = 1);
 public sealed record Incoming(BlockIdentity Predecessor, Term Value);
 public sealed record Merge(MergeIdentity Identity, Term Result, ImmutableArray<Incoming> Inputs);
 /// <summary>Exception 和 Selector 都由本处理入口定义；Selector 表示匹配到的子句选择值。</summary>

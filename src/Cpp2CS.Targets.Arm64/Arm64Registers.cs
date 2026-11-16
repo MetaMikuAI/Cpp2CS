@@ -25,7 +25,9 @@ public static class Arm64Registers
         X.Skip(19).Take(11).ToImmutableHashSet(), Sp, 0, 0,
         [.. X.Skip(19).Take(11), .. V.Skip(8).Take(8), X[30]])
     {
-        PreservedParts = [.. V.Skip(8).Take(8).Select(r => new PreservedPart(r, 0, 64))]
+        PreservedParts = [.. V.Skip(8).Take(8).Select(r => new PreservedPart(r, 0, 64))],
+        // AAPCS64：公共接口处 SP 按 16 字节对齐。
+        EntryStackAlignment = 16,
     };
 }
 

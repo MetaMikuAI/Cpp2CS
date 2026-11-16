@@ -183,7 +183,7 @@ public static class FunctionLifter
                 initial.End = new Jump(drafts[entry].Identity);
                 drafts[entry].Predecessors.Insert(0, initial);
                 initial.State[convention.StackPointer] = frame;
-                var builder = new FunctionBuilder(terms, initial.Identity, frame.Width, new(frame))
+                var builder = new FunctionBuilder(terms, initial.Identity, frame.Width, new(frame, convention.EntryStackAlignment))
                 {
                     ImageBase = terms.Atom(new RootAtom(AddressRoot.Image), frame.Width),
                     ThreadPointer = terms.Atom(new RootAtom(AddressRoot.Thread), frame.Width),

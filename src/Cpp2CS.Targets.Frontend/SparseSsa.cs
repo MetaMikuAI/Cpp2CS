@@ -59,7 +59,7 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
                 phi.Inputs.Add(new(predecessor.Identity, value));
             }
         }
-        var control = new FunctionBuilder(terms, initial.Identity, convention.StackPointer.Width, new(initial.State[convention.StackPointer]));
+        var control = new FunctionBuilder(terms, initial.Identity, convention.StackPointer.Width, new(initial.State[convention.StackPointer], convention.EntryStackAlignment));
         control.Blocks.Add(new(initial.Identity, [], [], initial.End));
         control.Blocks.AddRange(prepared);
         var dominance = new Dominance(control.Freeze());
