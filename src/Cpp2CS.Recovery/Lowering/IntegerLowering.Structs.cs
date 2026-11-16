@@ -140,9 +140,11 @@ public sealed partial class IntegerLowering
                 : StructLeafValue(plan.Leaves[0].Value, representation.Type);
             return field is null ? null : new ComposedValue(type, [(representation.Path, field)]);
         }
-        foreach (var leaf in plan.Leaves) if (!WritableStructPath(leaf.Projection.Path)) return null;
+        // 组成从零值开始（initobj）：值是零的叶子不必写出，它的字段不可访问或只读也不妨碍组成。
+        var written = plan.Leaves.Where(l => l.Value.ConstantValue != 0 || CanWriteStructPath(l.Projection.Path)).ToArray();
+        foreach (var leaf in written) if (!WritableStructPath(leaf.Projection.Path)) return null;
         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        foreach (var leaf in plan.Leaves)
+        foreach (var leaf in written)
         {
             var value = StructLeafValue(leaf.Value, leaf.Projection.Type); if (value is null) return null;
             leaves.Add((leaf.Projection.Path, value));
