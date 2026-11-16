@@ -444,7 +444,9 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         if (names.Count == 1 && leaves.Count > 1 && names.Single().Name is FieldName or ArrayElementName
             && FixedName(names.Single().Name) is null)
             return Yes(NamedValue.Unknown("naming.merge", "同名可变位置的不同读取版本没有同值凭据。"));
-        return Yes(names.Count == 0 ? NameLattice.Pending : names.Count == 1 ? names.Single() : NamedValue.Unknown("naming.merge", "合流输入没有一致名字。"));
+        // 各输入的种类与名字的形式放在原因之后，同一种合流不因具体名字不同而分成多行。
+        return Yes(names.Count == 0 ? NameLattice.Pending : names.Count == 1 ? names.Single() : NamedValue.Unknown("naming.merge", "合流输入没有一致名字。",
+            new("naming.merge.inputs", "输入：" + string.Join("、", names.Select(n => n.Kind + (n.Name is { } name ? "/" + name.GetType().Name : "")).Order(StringComparer.Ordinal)))));
     }
     private Outcome<NamedValue> Read(QueryContext c, Term key, Location location, int low = 0)
     {

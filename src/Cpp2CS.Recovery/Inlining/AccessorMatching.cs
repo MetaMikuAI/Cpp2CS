@@ -270,7 +270,19 @@ public sealed partial class AccessorQuery
                 var closestReason = closest.Method is null ? "候选模板与完整项或写入组不匹配"
                     : closest.Reasons.Count == 0 ? "模板与完整项或区域不匹配" : string.Join("；", closest.Reasons.Order(StringComparer.Ordinal));
                 Reason? closestCause = closest.Method is null ? null : new("inline.candidate", "最接近的候选 " + closest.Method);
-                Reason? failure = best.Length > 1 ? new("inline.Accessor.Ambiguous", $"有 {best.Length} 个最大覆盖或不同实参代入，无法区分原调用")
+                // 歧义的种类与候选名放在首因之后：同一种歧义不因候选不同而分成多行。
+                Reason AmbiguityKind()
+                {
+                    var methods = best.Select(m => m.Replacement.Method).Distinct().ToArray();
+                    bool sameAccesses = best.All(m => m.Coverage.SetEquals(best[0].Coverage) && m.Accesses.SetEquals(best[0].Accesses));
+                    bool sameResult = best.All(m => m.Replacement.Result == best[0].Replacement.Result);
+                    string kind = methods.Length == 1 ? "同一个方法的不同实参代入"
+                        : !sameAccesses ? "不同的方法各自覆盖不同的访问"
+                        : sameResult ? "不同的方法解释同一组访问、给出同一个值" : "不同的方法解释同一组访问、给出的值不同";
+                    return new("inline.Accessor.Ambiguous.Kind", kind, new("inline.Accessor.Ambiguous.Candidates", "候选："
+                        + string.Join("、", methods.Select(m => m.Method.Owner.FullName + "." + m.Method.Name).Order(StringComparer.Ordinal).Take(4))));
+                }
+                Reason? failure = best.Length > 1 ? new("inline.Accessor.Ambiguous", $"有 {best.Length} 个最大覆盖或不同实参代入，无法区分原调用", AmbiguityKind())
                     : best.Length == 1 ? best[0].Placement
                     : new("inline.Accessor.None", candidates == 0 ? "没有候选" : incomplete.Count == candidates ? "候选未能完整恢复"
                         : closestReason,
