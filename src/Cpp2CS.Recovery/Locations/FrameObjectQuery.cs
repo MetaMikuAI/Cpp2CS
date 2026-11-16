@@ -198,9 +198,22 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
             var resolved = c.Get(state.Resolve, term); if (!resolved.IsSuccess) return resolved.Propagate<FrameObjects>();
             var addresses = c.Get(addressUses, term); if (!addresses.IsSuccess) return addresses.Propagate<FrameObjects>();
             foreach (var use in addresses.Value)
-                if (use.Term != resolved.Value || use.Location.Offset is not { } offset || element is null
-                    || !objects.TryGetValue(offset, out var item) || !item.Type.Equals(element))
-                    return Failure("Use", "帧地址用于写入内存、普通实参或运算：" + string.Join("、", objects.Values.Select(o => o.Type).Distinct()));
+            {
+                if (use.Term == resolved.Value && use.Location.Offset is { } offset && element is not null
+                    && objects.TryGetValue(offset, out var item) && item.Type.Equals(element)) continue;
+                // 首因只写种类；是哪一种用法、涉及哪些类型放在后面的原因里。
+                var owner = use.Location.Offset is { } at
+                    ? objects.Values.FirstOrDefault(o => o.Storage.Offset <= at && at < o.Storage.Offset + (o.Storage.Width + 7) / 8) : null;
+                string detail = use.Location.Offset is not { } position ? "地址的偏移不是常量"
+                    : owner is null ? "地址不在任何已认定的帧对象里"
+                    : position != owner.Storage.Offset ? (element is null ? "帧对象内部的地址用于写入内存、普通实参或运算" : "帧对象内部的地址用于按引用形参或接收者")
+                    : use.Term != resolved.Value ? "帧对象的地址参与运算后使用"
+                    : element is null ? "帧对象的地址用于写入内存或普通实参"
+                    : "帧对象的地址用于另一种类型的按引用形参或接收者";
+                return Failure("Use", "帧地址用于写入内存、普通实参或运算", new("lowering.Frame.Use.Detail", detail,
+                    new("lowering.Frame.Use.Types", "帧对象：" + string.Join("、", objects.Values.Select(o => o.Type).Distinct())
+                        + (owner is null ? "" : "；所在对象：" + owner.Type) + (element is null ? "" : "；使用类型：" + element))));
+            }
         }
         var list = objects.Values.OrderBy(v => v.Storage.Offset).ToImmutableArray();
         // 地址溢出只在私有的未定型槽里转送；写进托管对象内容仍是地址逃逸。
@@ -384,7 +397,8 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
         return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()) { Results = results.ToImmutable(), Copies = copies.ToImmutable(),
             CopyRemainders = remainders.ToImmutable(), AddressSpills = spills.Keys.ToImmutableHashSet(), Clears = cleared.ToImmutable() });
     }
-    private static Outcome<FrameObjects> Failure(string code, string message) => Outcome<FrameObjects>.Failure(new("lowering.Frame." + code, message));
+    private static Outcome<FrameObjects> Failure(string code, string message, Reason? cause = null) =>
+        Outcome<FrameObjects>.Failure(new("lowering.Frame." + code, message, cause));
     private static Outcome<FrameObjects> WideFailure(int low, int width, string message) =>
         Outcome<FrameObjects>.Failure(new("lowering.Wide.Layout", $"帧访问位段 [{low},{low + width})：{message}"));
 }
