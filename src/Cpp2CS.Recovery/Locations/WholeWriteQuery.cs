@@ -1,7 +1,7 @@
 using System.Collections.Immutable;
-using System.Reflection;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
+using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
@@ -15,10 +15,6 @@ internal sealed record WholeWrite(LocationView Target, BoundSource Source, Immut
 internal sealed class WholeWriteQuery(ManagedLocationQuery locations, ManagedTypes types, MethodRef method)
     : Query<Point, WholeWrite?>
 {
-    internal static bool RequiresWhole(FieldRef field, MethodRef method) =>
-        (field.Field.Attributes & FieldAttributes.InitOnly) != 0 &&
-        !(field.Field.Owner == method.Method.Owner && method.Method.Name == (field.Field.IsStatic ? ".cctor" : ".ctor"));
-
     public override Outcome<WholeWrite?> Compute(QueryContext c, Point key)
     {
         var state = locations.State;
@@ -26,7 +22,8 @@ internal sealed class WholeWriteQuery(ManagedLocationQuery locations, ManagedTyp
         if (!index.IsSuccess) return index.Propagate<WholeWrite?>();
         var statements = index.Value.Blocks[key.Block].Statements;
         var first = (MemoryWrite)statements[key.Before];
-        var located = c.Get(locations, new(first.Address, first.Width));
+        // 首字节用于寻找包含它的结构体；实际写入可能跨越多个字段，须另按全部宽度核对。
+        var located = c.Get(locations, new(first.Address, 8));
         if (!located.IsSuccess) return located.Propagate<WholeWrite?>();
         // 组可能从可写字段开始。以包含首段的值类型为候选，权限只决定是否需要整体视图。
         var seen = new HashSet<(DefinitionRef Type, int Offset)>();
@@ -35,7 +32,7 @@ internal sealed class WholeWriteQuery(ManagedLocationQuery locations, ManagedTyp
             {
                 var field = view.Path[depth];
                 if (field.DeclaringType is not DefinitionRef type || types.Kind(type) != TypeKind.Struct
-                    || !type.Definition.Fields.Any(f => !f.IsStatic && RequiresWhole(new(f, type), method))) continue;
+                    || !type.Definition.Fields.Any(f => !f.IsStatic && !ManagedAccess.WritableField(types, method, new(f, type)))) continue;
                 var path = view.Path.Skip(depth).ToArray();
                 var projection = types.Project(type, path);
                 if (projection is null || projection.Bit % 8 != 0 || view.Offset < 0 || view.Offset >= types.Size(type)) continue;
@@ -47,7 +44,7 @@ internal sealed class WholeWriteQuery(ManagedLocationQuery locations, ManagedTyp
                 if (!target.IsSuccess) return target.Propagate<WholeWrite?>();
                 var exact = target.Value.Views.Where(v => v.Type.Equals(type) && v.Offset == 0
                     && v.Root == view.Root && v.Index == view.Index && v.Path.SequenceEqual(view.Path.Take(depth))).ToArray();
-                if (exact.Length != 1 || exact[0].Path.Any(f => RequiresWhole(f, method))) continue;
+                if (exact.Length != 1 || exact[0].Path.Any(f => ManagedAccess.ReadonlyAt(f.Field, method.Method))) continue;
                 var group = Cover(c, statements, key.Before, baseAddress, exact[0]);
                 if (!group.IsSuccess || group.Value is not null) return group;
             }

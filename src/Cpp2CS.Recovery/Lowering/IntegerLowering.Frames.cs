@@ -122,9 +122,15 @@ public sealed partial class IntegerLowering
         var value = CallResult(callDefinitions[call.Identity]);
         return value is null ? null : new ManagedAssignment(position, FrameLocal(item), value);
     }
-    private IReadOnlyList<ManagedStatement> LowerStores(MemoryWrite write, Point point)
+    private IReadOnlyList<ManagedStatement> LowerStores(MemoryWrite write, Block block, ref int index)
     {
         if (frameObjects?.AddressSpills.Contains(write.Identity) == true) return [];
+        var point = new Point(block.Identity, index);
+        if (index + 1 < block.Statements.Length && block.Statements[index + 1] is MemoryWrite)
+        {
+            if (TryWholeStore(block, ref index) is { } whole) return [whole];
+            if (failure is not null) return [];
+        }
         if (frameObjects is null || !frameObjects.Accesses.TryGetValue(write.Identity, out var access))
         {
             var resolved = context.Get(state.Resolve, write.Address);
@@ -144,13 +150,13 @@ public sealed partial class IntegerLowering
         int start = (int)((access.Location.Offset!.Value - access.Object.Storage.Offset!.Value) * 8);
         var leaves = access.Parts.Select(part => new LocationPiece(new LocationView(ManagedLocationKind.FrameLocal,
             access.Object.Address, part.Type, [.. part.Path], 0, part.Width, null, null), part.Bit - start, 0, part.Width)).ToArray();
-        var aggregates = write.Width > 64 ? ManagedRangeQuery.WholeStructures(types, leaves, write.Width) : [];
-        foreach (var piece in WidePieces(write, point, leaves, aggregates))
+        var aggregates = ManagedRangeQuery.WholeStructures(types, leaves, write.Width);
+        foreach (var piece in StorePieces(write, point, leaves, aggregates))
         {
             var view = piece.View!;
             if (!WritableStructPath(view.Path)) return [];
             var target = AccessView(view, true); if (target is null) return [];
-            var value = types.Kind(view.Type) == TypeKind.Struct ? WideStructValue(write, point, piece)
+            var value = types.Kind(view.Type) == TypeKind.Struct ? StructPieceValue(write, point, piece)
                 : Part(write.Value, piece.AccessBit, piece.Width, IsFloat(view.Type)); if (value is null) return [];
             value = types.Kind(view.Type) == TypeKind.Struct ? value : ReferenceType(view.Type) ? Coerce(value, view.Type) : IsFloat(view.Type) ? FloatBits(value, piece.Width)
                 : new ConversionValue(ManagedTypes.IsSigned(view.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,

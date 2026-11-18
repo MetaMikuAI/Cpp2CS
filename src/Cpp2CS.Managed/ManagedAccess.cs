@@ -8,6 +8,15 @@ namespace Cpp2CS.Managed;
 /// </summary>
 public static class ManagedAccess
 {
+    /// <summary>initonly 字段的直接写入要求所属类型对应的构造函数上下文。</summary>
+    public static bool ReadonlyAt(FieldDef field, MethodDef method) =>
+        (field.Attributes & FieldAttributes.InitOnly) != 0 &&
+        !(method.Owner == field.Owner && method.Name == (field.IsStatic ? ".cctor" : ".ctor"));
+
+    /// <summary>结构体字段路径上的直接赋值同时要求成员可见和可写。</summary>
+    public static bool WritableField(ManagedTypes types, MethodRef caller, FieldRef field) =>
+        Field(types, caller, field, field.DeclaringType) && !ReadonlyAt(field.Field, caller.Method);
+
     /// <summary>泛型方法的封闭证据体仍可访问自身字段；实参的外部可见性不改变定义内的权限。</summary>
     public static bool Field(ManagedTypes types, MethodRef caller, FieldRef field, TypeRef? receiver) =>
         field.Field.Owner == caller.Method.Owner && field.DeclaringType.Equals(caller.DeclaringType)

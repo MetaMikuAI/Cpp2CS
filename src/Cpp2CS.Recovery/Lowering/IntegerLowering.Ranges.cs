@@ -22,10 +22,9 @@ public sealed partial class IntegerLowering
     private static bool WholeCopy(StructPlan plan) => plan.Origin is not null || plan.Location is not null
         || plan.Leaves.Length > 0 && plan.Leaves.All(l => l.Value.ConstantValue == 0);
 
-    private IReadOnlyList<LocationPiece> WidePieces(MemoryWrite write, Point point, IReadOnlyList<LocationPiece> leaves,
+    private IReadOnlyList<LocationPiece> StorePieces(MemoryWrite write, Point point, IReadOnlyList<LocationPiece> leaves,
         IEnumerable<LocationPiece> aggregates)
     {
-        if (write.Width <= 64) return leaves;
         var chosen = new List<LocationPiece>();
         foreach (var piece in aggregates.OrderByDescending(p => p.Width).ThenBy(p => p.AccessBit))
         {
@@ -39,7 +38,7 @@ public sealed partial class IntegerLowering
             .OrderBy(p => p.AccessBit).ToArray();
     }
 
-    private ManagedValue? WideStructValue(MemoryWrite write, Point point, LocationPiece piece)
+    private ManagedValue? StructPieceValue(MemoryWrite write, Point point, LocationPiece piece)
     {
         var source = context.Get(structs.Ranges, new(new TermSource(write.Value), point, piece.AccessBit, piece.Width));
         return source.IsSuccess ? StructValue(new TermSource(source.Value), piece.View!.Type, point)
@@ -60,7 +59,7 @@ public sealed partial class IntegerLowering
         if (view.Kind == ManagedLocationKind.ArrayLength)
         { Fail<object>(LoweringFailureKind.NonFrameWrite, "数组长度不可写", code: "lowering.Location.Readonly"); return false; }
         // 只读字段只允许在所属类型对应的实例或静态构造函数中写入。
-        if (view.Path.Any(field => WholeWriteQuery.RequiresWhole(field, method)))
+        if (view.Path.Any(field => ManagedAccess.ReadonlyAt(field.Field, method.Method)))
         { Fail<object>(LoweringFailureKind.NonFrameWrite, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly"); return false; }
         return true;
     }
@@ -174,7 +173,7 @@ public sealed partial class IntegerLowering
             && wholePiece.Width == types.Size(only.Type) * 8) return null;
         if (RejectAddressUse([write.Value], "写入内存")) return [];
         var statements = new List<ManagedStatement>();
-        foreach (var piece in WidePieces(write, point, range.Pieces, range.Aggregates))
+        foreach (var piece in StorePieces(write, point, range.Pieces, range.Aggregates))
         {
             if (piece.View is not { } view) continue;
             if (!Writable(view)) return [];
@@ -186,7 +185,7 @@ public sealed partial class IntegerLowering
             var setter = FieldAccessor(target, true); if (failure is not null) return [];
             if (types.Kind(view.Type) == TypeKind.Struct)
             {
-                var whole = WideStructValue(write, point, piece); if (whole is null) return [];
+                var whole = StructPieceValue(write, point, piece); if (whole is null) return [];
                 statements.Add(setter is null ? new ManagedStore(position, target, whole)
                     : new ManagedCall(position, AccessorInvocation(setter, target, [whole]), null) { Inlined = true });
                 continue;

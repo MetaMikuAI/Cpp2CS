@@ -182,18 +182,15 @@ public sealed partial class IntegerLowering
         }
         return local;
     }
-    private bool CanWriteStructPath(IReadOnlyList<FieldRef> path) => path.All(field =>
-        ManagedAccess.Field(types, method, field, field.DeclaringType)
-        && ((field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0
-            || method.Method.Name == ".ctor" && method.Method.Owner == field.Field.Owner));
+    private bool CanWriteStructPath(IReadOnlyList<FieldRef> path) =>
+        path.All(field => ManagedAccess.WritableField(types, method, field));
     private bool WritableStructPath(IReadOnlyList<FieldRef> path)
     {
         foreach (var field in path)
         {
             if (!ManagedAccess.Field(types, method, field, field.DeclaringType))
             { Fail<object>(LoweringFailureKind.UnsupportedType, "结构体组成需要不可访问的字段：" + field, code: "lowering.Struct.Inaccessible"); return false; }
-            if ((field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
-                && !(method.Method.Name == ".ctor" && method.Method.Owner == field.Field.Owner))
+            if (ManagedAccess.ReadonlyAt(field.Field, method.Method))
             { Fail<object>(LoweringFailureKind.UnsupportedType, "结构体组成需要在构造函数外写只读字段：" + field, code: "lowering.Struct.Readonly"); return false; }
         }
         return true;

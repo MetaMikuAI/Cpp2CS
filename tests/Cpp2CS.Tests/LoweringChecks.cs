@@ -1045,8 +1045,18 @@ internal static partial class LoweringChecks
         }
         var wrapped = Define("Wrapped", 4); var wrappedType = new DefinitionRef(wrapped, []);
         wrapped.Fields = [Field(wrapped, "Value", Primitive("Int32"), 0, FieldAttributes.Private)];
-        var box = Define("Box", 40, false); var boxType = new DefinitionRef(box, []);
-        box.Fields = [Field(box, "Data", pairType, (int)spec.Layout.ObjectHeaderSize), Field(box, "Wrapped", wrappedType, (int)spec.Layout.ObjectHeaderSize + 8)];
+        var carrier = Define("Carrier", 8); var carrierType = new DefinitionRef(carrier, []);
+        carrier.Fields = [Field(carrier, "Tag", Primitive("Int32"), 0), Field(carrier, "Item", wrappedType, 4)];
+        var box = Define("Box", 48, false); var boxType = new DefinitionRef(box, []);
+        var immutable = Define("ImmutablePair", 8); var immutableType = new DefinitionRef(immutable, []);
+        immutable.Fields = [Field(immutable, "A", Primitive("Int32"), 0),
+            Field(immutable, "B", Primitive("Int32"), 4, FieldAttributes.Public | FieldAttributes.InitOnly)];
+        var hidden = Define("PrivatePair", 8); var hiddenType = new DefinitionRef(hidden, []);
+        hidden.Fields = [Field(hidden, "A", Primitive("Int32"), 0, FieldAttributes.Private),
+            Field(hidden, "B", Primitive("Int32"), 4, FieldAttributes.Private)];
+        box.Fields = [Field(box, "Data", pairType, (int)spec.Layout.ObjectHeaderSize), Field(box, "Wrapped", wrappedType, (int)spec.Layout.ObjectHeaderSize + 8),
+            Field(box, "Immutable", immutableType, (int)spec.Layout.ObjectHeaderSize + 16),
+            Field(box, "Hidden", hiddenType, (int)spec.Layout.ObjectHeaderSize + 24)];
         var referenceWrapper = Define("ReferenceWrapper", 8); var referenceWrapperType = new DefinitionRef(referenceWrapper, []);
         referenceWrapper.Fields = [Field(referenceWrapper, "Object", boxType, 0)];
         var owner = Define("Cases", 16, false);
@@ -1061,6 +1071,7 @@ internal static partial class LoweringChecks
         }
         var target = Method("Identity", pairType, pairType);
         var refTarget = Method("TakeRef", Primitive("Void"), new ByRefRef(pairType));
+        var takeCarrier = Method("TakeCarrier", Primitive("Void"), new ByRefRef(carrierType));
         var createLarge = Method("CreateLarge", largeType);
         var refLarge = Method("TakeLargeRef", Primitive("Void"), new ByRefRef(largeType));
         var consumeLarge = Method("ConsumeLarge", Primitive("Void"), largeType);
@@ -1076,6 +1087,15 @@ internal static partial class LoweringChecks
             ["ProjectWide"] = Method("ProjectWide", otherPairType, boxType),
             ["FrameRef"] = Method("FrameRef", Primitive("Void")),
             ["FrameWhole"] = Method("FrameWhole", pairType, pairType),
+            ["FrameTwice"] = Method("FrameTwice", pairType, pairType),
+            ["FrameItem"] = Method("FrameItem", Primitive("Void"), wrappedType),
+            ["StorePair"] = Method("StorePair", Primitive("Void"), boxType, immutableType),
+            ["StorePairReverse"] = Method("StorePairReverse", Primitive("Void"), boxType, immutableType),
+            ["StorePrivate"] = Method("StorePrivate", Primitive("Void"), boxType, hiddenType),
+            ["StoreByRef"] = Method("StoreByRef", Primitive("Void"), new ByRefRef(immutableType), immutableType),
+            ["StoreElement"] = Method("StoreElement", Primitive("Void"), new ArrayRef(immutableType, 1), immutableType),
+            ["StoreOverlap"] = Method("StoreOverlap", Primitive("Void"), boxType, immutableType),
+            ["StoreSelfRead"] = Method("StoreSelfRead", Primitive("Void"), boxType, immutableType),
             ["FrameScattered"] = Method("FrameScattered", pairType, pairType),
             ["FrameIndirectResult"] = Method("FrameIndirectResult", Primitive("Int64")),
             ["FrameResultSnapshot"] = Method("FrameResultSnapshot", Primitive("Int64")),
@@ -1140,6 +1160,7 @@ internal static partial class LoweringChecks
                 AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
         var types = new ManagedTypes(program, layouts, 8);
         var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        var emittedCases = new HashSet<string>();
         foreach (var (mode, definition) in cases)
         {
             var terms = new TermTable(); var entry = new BlockIdentity();
@@ -1236,14 +1257,50 @@ internal static partial class LoweringChecks
                 secondResult = root;
                 result = terms.Concat(terms.Constant(3, 8), terms.Undefined(56));
             }
-            if (mode is "FrameWhole" or "FrameScattered")
+            if (mode is "StorePair" or "StorePairReverse" or "StorePrivate" or "StoreSelfRead" or "StoreByRef" or "StoreElement" or "StoreOverlap")
+            {
+                var address = mode switch
+                {
+                    "StoreByRef" => root,
+                    "StoreElement" => Add(root, spec.Layout.ArrayDataStart),
+                    "StorePrivate" => Add(root, box.Fields[3].Offset),
+                    _ => Add(root, box.Fields[2].Offset),
+                };
+                var input = Input(SlotKind.Integer, 1);
+                var low = new MemoryWrite(new(), address, 32, terms.Slice(input, 0, 32));
+                var high = new MemoryWrite(new(), Add(address, 4), 32, terms.Slice(input, 32, 32));
+                if (mode == "StoreSelfRead")
+                {
+                    statements.Add(high with { Value = terms.Constant(7, 32) });
+                    statements.Add(low with { Value = Read(address, 32) });
+                }
+                else if (mode == "StoreOverlap") statements.AddRange([high, high with { Identity = new() }]);
+                else if (mode == "StorePair") statements.AddRange([low, high]);
+                else statements.AddRange([high, low]);
+            }
+            if (mode is "FrameWhole" or "FrameScattered" or "FrameTwice")
             {
                 var address = Add(frame, -32);
+                if (mode == "FrameTwice")
+                {
+                    statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Constant(0, 32)));
+                    statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(0, 32)));
+                }
                 statements.Add(new MemoryWrite(new(), address, 32, terms.Slice(root, 0, 32)));
                 if (mode == "FrameScattered") statements.Add(new MemoryWrite(new(), Add(frame, -128), 64, terms.Constant(7, 64)));
                 statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Slice(root, 32, 32)));
                 statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
                 result = Read(address, 64);
+            }
+            if (mode == "FrameItem")
+            {
+                var address = Add(frame, -32);
+                Call UseCarrier() => new(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address),
+                    new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []);
+                statements.Add(new MemoryWrite(new(), address, 64, terms.Constant(0, 64)));
+                statements.Add(UseCarrier());
+                statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Slice(root, 0, 32)));
+                statements.Add(UseCarrier());
             }
             if (mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi")
             {
@@ -1299,10 +1356,17 @@ internal static partial class LoweringChecks
                 builder.Blocks.Add(new(bufferJoin!, [bufferMerge], [.. statements], returned));
             }
             else builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" or "LargeSplitForward" or "LargeResultCopy" ? new Return([]) : returned));
-            var selectedTarget = mode is "FrameRef" or "FrameWhole" or "FrameScattered" ? refTarget
+            var selectedTarget = mode is "FrameRef" or "FrameWhole" or "FrameScattered" or "FrameTwice" ? refTarget
+                : mode == "FrameItem" ? takeCarrier
                 : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" or "LargeResultCopy" ? createLarge : target;
             var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge, mode == "FieldGapThrow" ? noiseThrow : noise), new NamingChecks.RuntimeMap(), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: mode is "FieldGap" or "FieldGapThrow" ? new NoStructWrites() : new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            if (mode is "StoreSelfRead" or "StoreOverlap")
+            {
+                checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == "lowering.Location.Readonly",
+                    mode + " 中间读取或重复覆盖时保留只读字段的洞");
+                continue;
+            }
             if (mode is "IndirectPartialCopy" or "IndirectCopyReadAfter" or "IndirectCopyTwice" or "IndirectOther")
             {
                 checks.True(lowered.Failure?.Reason.Code == "lowering.IndirectArgument.Source", mode + " 缺少间接实参来源时报洞：" + lowered.Failure);
@@ -1331,6 +1395,17 @@ internal static partial class LoweringChecks
             }
             checks.True(lowered.Body is not null, mode + " 结构体下降：" + lowered.Failure);
             if (lowered.Body is not { } body) continue;
+            if (mode == "FrameTwice")
+                checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+                    .Count(a => a.Target.Type.Equals(pairType) && a.Value is ComposedValue { Leaves.Count: 0 } or ArgumentValue) == 2,
+                    "同一帧对象的两次连续整写各自按值求来源");
+            if (mode is "StorePair" or "StorePairReverse" or "StorePrivate" or "StoreByRef" or "StoreElement")
+                checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().SingleOrDefault()?.Value
+                    is ArgumentValue { Index: 1 }, "整写具有受限字段的结构体，保留按值参数");
+            if (mode == "FrameItem")
+                checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Any(s =>
+                    s.Target is FieldValue f && f.Type.Equals(wrappedType) && s.Value is ArgumentValue { Index: 0 }),
+                    "已取址局部的嵌套结构体字段按参数整体赋值");
             if (mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass")
             {
                 var loweredCalls = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().ToArray();
@@ -1350,6 +1425,7 @@ internal static partial class LoweringChecks
                 .Any(a => a.Value is ArgumentValue { Index: 0 } && a.Target.Type.Equals(pairType)), "连续叶子写入按同类型整体复制到帧局部");
             var problems = emitter.Emit([body]);
             checks.True(problems.Count == 0, mode + " 结构体 CIL 校验：" + string.Join(';', problems.Values));
+            if (problems.Count == 0) emittedCases.Add(mode);
             if (mode.EndsWith("Token", StringComparison.Ordinal)) checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is TypeHandleValue or FieldHandleValue or MethodHandleValue, mode + " 使用 ldtoken 值");
             if (mode == "ChangedField") checks.True(body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is ComposedValue,
                 "最早读取点不能给出全部叶子时保留原读与逐字段组成");
@@ -1366,7 +1442,11 @@ internal static partial class LoweringChecks
         }
         const string indirectSource = """
             public struct Pair { public int First, Second; }
-            public class Box { public Pair Data; }
+            public struct ImmutablePair { public int A; public readonly int B; }
+            public struct Wrapped { private int Value; }
+            public struct Carrier { public int Tag; public Wrapped Item; }
+            public struct PrivatePair { private int A,B; }
+            public class Box { public Pair Data; public Wrapped Wrapped; public ImmutablePair Immutable; public PrivatePair Hidden; }
             public struct Large { public long Part0, Part1, Part2; }
             public static class Cases {
                 public static void ConsumeLarge(Large p) { p.Part1 = 99; }
@@ -1380,7 +1460,15 @@ internal static partial class LoweringChecks
                 public static void Noise() {}
                 public static void NoiseThrow() => throw new System.InvalidOperationException();
                 public static void TakeRef(ref Pair p) {}
+                public static void TakeCarrier(ref Carrier p) {}
+                public static void FrameItem(Wrapped p) { Carrier c=default; TakeCarrier(ref c); c.Item=p; TakeCarrier(ref c); }
                 public static Pair FrameScattered(Pair p) { var copy=p; TakeRef(ref copy); return copy; }
+                public static Pair FrameTwice(Pair p) { Pair copy=default; copy=p; TakeRef(ref copy); return copy; }
+                public static void StorePair(Box box, ImmutablePair p) => box.Immutable=p;
+                public static void StorePairReverse(Box box, ImmutablePair p) => box.Immutable=p;
+                public static void StorePrivate(Box box, PrivatePair p) => box.Hidden=p;
+                public static void StoreByRef(ref ImmutablePair target, ImmutablePair p) => target=p;
+                public static void StoreElement(ImmutablePair[] target, ImmutablePair p) => target[0]=p;
                 public static Pair WideAcross(Box b) => b.Data;
                 public static Pair FieldGap(Box b) { var p=b.Data; Noise(); return p; }
                 public static Pair FieldGapThrow(Box b) { var p=b.Data; NoiseThrow(); return p; }
@@ -1391,11 +1479,11 @@ internal static partial class LoweringChecks
             """;
         using var indirectReference = new CompiledSource(indirectSource);
         using var indirectTested = new CompiledSource(indirectSource);
-        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge", "LargeSplitForward", "LargeResultCopy", "WideAcross", "FrameScattered", "FieldGap", "FieldGapThrow", "SnapshotField", "TwoFields" })
+        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge", "LargeSplitForward", "LargeResultCopy", "WideAcross", "FrameScattered", "FrameTwice", "FrameItem", "StorePair", "StorePairReverse", "StorePrivate", "StoreByRef", "StoreElement", "FieldGap", "FieldGapThrow", "SnapshotField", "TwoFields" })
         {
             var output = indirectTested.Method("Cases", mode);
             var emitted = skeleton.Method(cases[mode]);
-            if (!emitted.HasBody) continue;
+            if (!emittedCases.Contains(mode)) continue;
             output.Body = emitted.Body;
             Mono.Cecil.TypeReference MapType(Mono.Cecil.TypeReference type) => type is Mono.Cecil.ByReferenceType byref
                 ? new Mono.Cecil.ByReferenceType(MapType(byref.ElementType))

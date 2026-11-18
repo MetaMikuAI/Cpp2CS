@@ -39,7 +39,7 @@ public sealed class ManagedRangeQuery(ManagedLocationQuery locations, ManagedTyp
             { Pieces = [new(selected with { Offset = 0, Width = types.Size(selected.Type) * 8 },
                 0, (int)selected.Offset * 8, key.Width)] });
         var range = locations.Locate(c, key, false, types);
-        return !range.IsSuccess || key.Width <= 64 ? range
+        return !range.IsSuccess ? range
             : Outcome<LocationResult>.Success(range.Value with { Aggregates = WholeStructures(types, range.Value.Pieces, key.Width) });
     }
 
