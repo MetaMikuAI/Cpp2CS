@@ -7,6 +7,8 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Pipeline;
+using Cpp2CS.Output;
+using Cpp2CS.Tests.Execution;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using R = System.Reflection;
@@ -51,7 +53,66 @@ internal static class DecompileChecks
         checks.True(source.Contains("throw Unrecovered.Fail(20uL);", StringComparison.Ordinal), "洞导出地址标注与占位体");
         checks.True(report.Source is { Files: > 0, Types.Length: 0, Methods.Length: 0 }, "导出无失败");
         checks.True(source.Split(" + ").Length > DeepLevels, "嵌套很深的表达式导出成源码（反编译器按深度递归，不能栈溢出）");
+        ConstrainedReceiver(checks, output);
         return checks.Finish("C# 导出快速检查");
+    }
+
+    private static void ConstrainedReceiver(Assertions checks, string output)
+    {
+        using var fixture = new CompiledSource("""
+            public static class Sample
+            {
+                public interface IChange { int Change(ref int delta); int Level { get; set; } }
+                public struct Counter : IChange
+                {
+                    public int Value;
+                    int IChange.Change(ref int delta) { Value += delta; return ++delta; }
+                    public int Change(ref int delta) { Value = -1; return -1; }
+                    int IChange.Level { get => ++Value; set => Value = value + 1; }
+                }
+                static int Change<T>(ref T value, ref int delta) where T : IChange => value.Change(ref delta);
+                static int Read<T>(ref T value) where T : IChange => value.Level;
+                static void Write<T>(ref T value, int level) where T : IChange => value.Level = level;
+                public static int Run()
+                {
+                    var cells = new Counter[2];
+                    int index = 0, delta = 7;
+                    int result = Change(ref cells[index++], ref delta);
+                    Write(ref cells[1], 3);
+                    int level = Read(ref cells[1]);
+                    ((IChange)cells[0]).Change(ref delta);
+                    return cells[0].Value * 100000 + result * 10000 + delta * 1000 + level * 100 + cells[1].Value * 10 + index;
+                }
+            }
+            """);
+        var run = fixture.Method("Sample", "Run");
+        var il = run.Body.GetILProcessor();
+        // 将封闭泛型转发内联，保留 Roslyn 产生的实参求值、取址与独立装箱。
+        foreach (var call in run.Body.Instructions.Where(i => i.Operand is GenericInstanceMethod).ToArray())
+        {
+            var closed = (GenericInstanceMethod)call.Operand;
+            var target = closed.Resolve().Body.Instructions.Single(i => i.OpCode.Code == Code.Callvirt);
+            il.InsertBefore(call, il.Create(OpCodes.Constrained, closed.GenericArguments.Single()));
+            call.OpCode = OpCodes.Callvirt;
+            call.Operand = target.Operand;
+        }
+        var path = Path.Combine(output, "Constrained.local.dll");
+        fixture.Module.Write(path);
+        // 依赖从真实框架程序集解析。
+        var framework = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
+        var source = Decompilation.Decompile(path, framework, t => t.FullName == "Sample", false).Single();
+        using var exported = new CompiledSource(source.Source);
+        static int Execute(ModuleDefinition module)
+        {
+            using var image = new MemoryStream();
+            module.Write(image);
+            return (int)R.Assembly.Load(image.ToArray()).GetType("Sample")!.GetMethod("Run")!.Invoke(null, null)!;
+        }
+        const int expected = 789551;
+        var original = Execute(fixture.Module);
+        var actual = Execute(exported.Module);
+        checks.True(original == expected && actual == expected,
+            $"具体结构体接口调用保持槽位、原址、ref 实参、求值次数与独立装箱，预期 {expected}，CIL {original}，导出 {actual}");
     }
     private sealed class FakeFrontend : IMethodStage<CodeEntry, NativeFunction>
     {

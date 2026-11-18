@@ -12,7 +12,7 @@ namespace Cpp2CS.Output;
 public static partial class Decompilation
 {
     /// <summary>CIL 允许、C# 不允许的表达式形式，改写成语义相同的合法写法。</summary>
-    private sealed class ExpressionForms : IAstTransform
+    private sealed partial class ExpressionForms : IAstTransform
     {
         public void Run(AstNode rootNode, TransformContext context)
         {
@@ -21,6 +21,7 @@ public static partial class Decompilation
             // 这是 C# 10 的写法；这些特性只供调试器和反射读取，去掉不改变行为。
             foreach (var section in rootNode.Descendants.OfType<LambdaExpression>().SelectMany(l => l.Attributes).ToArray()) section.Remove();
             foreach (var type in rootNode.Descendants.OfType<SimpleType>().ToArray()) SharedSelfType(type);
+            foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) ConstrainedInterfaceCall(cast);
             // 改写时会复制子树：先处理内层，复制到的才是改好的节点。
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) SharedCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) GenericCast(cast);
@@ -148,12 +149,12 @@ public static partial class Decompilation
             node.DescendantsAndSelf.SelectMany(n => n.Annotations.OfType<ILInstruction>()).Where(i => !i.ILRangeIsEmpty).Select(i => (int?)i.StartILOffset).Max();
 
         /// <summary>
-        /// 反编译器把 constrained. 调用写成转换到接口，C# 会先装箱，调用落在副本上。
-        /// 结构体有同名的公开方法时直接调用，C# 编译成不装箱的调用，和 constrained. 选中的实现相同。
+        /// 对基类的受约束调用去掉反编译器插入的装箱。接口调用由接口槽决定目标。
         /// </summary>
         private static void ConstrainedCall(InvocationExpression call)
         {
             if (call.Target is not MemberReferenceExpression { Target: CastExpression cast } member) return;
+            if (cast.Type.Annotation<ResolveResult>()?.Type.Kind == TypeKind.Interface) return;
             if (!cast.TrailingTrivia.OfType<Comment>().Any(c => c.Content.Contains("constrained", StringComparison.Ordinal))) return;
             if (cast.Expression is not { } receiver || receiver.Annotation<ResolveResult>()?.Type.GetDefinition() is not { Kind: TypeKind.Struct } type) return;
             var count = call.Arguments.Count;
