@@ -55,7 +55,7 @@ internal static partial class LoweringChecks
         var echo = Method(caller, "Echo", pairType, MethodAttributes.Public | MethodAttributes.Static, pairType);
         var bodies = new Dictionary<MethodDef, ManagedBody>();
         var cases = new Dictionary<string, (MethodDef Caller, MethodDef Constructor, DefinitionRef Type)>();
-        foreach (var mode in new[] { "Parameter", "Call", "Field", "AfterWrite", "WriteParameter", "Escape", "Fields" })
+        foreach (var mode in new[] { "Parameter", "Call", "Field", "PartialField", "AfterWrite", "WriteParameter", "Escape", "Fields" })
         {
             var owner = Define("Ref" + mode); var type = new DefinitionRef(owner, []);
             var field = Field(owner, "p", pairType, 0, FieldAttributes.Private | FieldAttributes.InitOnly);
@@ -81,7 +81,7 @@ internal static partial class LoweringChecks
             }
             statements.Add(new ManagedReturn(0, null));
             bodies.Add(ctor, new(MethodRef.Open(ctor), [new(0, statements)]));
-            var test = Method(caller, mode, type, MethodAttributes.Public | MethodAttributes.Static, mode == "Field" ? boxType : pairType);
+            var test = Method(caller, mode, type, MethodAttributes.Public | MethodAttributes.Static, mode is "Field" or "PartialField" ? boxType : pairType);
             cases.Add(mode, (test, ctor, type));
         }
         var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = fields,
@@ -96,11 +96,14 @@ internal static partial class LoweringChecks
             public readonly struct RefPair { public readonly int x,y; public RefPair(int a,int b){x=a;y=b;} }
             public readonly struct RefParameter { private readonly RefPair p; public RefParameter(in RefPair x){p=x;} }
             public readonly struct RefCall { private readonly RefPair p; public RefCall(in RefPair x){p=x;} }
+            public class RefBox { public RefPair p; }
+            public readonly struct RefField { private readonly RefPair p; public RefField(in RefPair x){p=x;} }
             public readonly struct RefFields { private readonly RefPair p; public RefFields(in RefPair x){p=x;} }
             public static class RefCases {
                 public static RefPair Echo(RefPair p)=>p;
                 public static RefParameter Parameter(RefPair p)=>new RefParameter(in p);
                 public static RefCall Call(RefPair p){var x=Echo(p);return new RefCall(in x);}
+                public static RefField Field(RefBox b)=>new RefField(in b.p);
                 public static RefFields Fields(RefPair p)=>new RefFields(in p);
             }
             """;
@@ -116,29 +119,31 @@ internal static partial class LoweringChecks
                 var identity = new CallIdentity(); result = terms.Atom(new ResultAtom(identity), 64);
                 statements.Add(new Call(identity, new ImageFunction(10), [new(slot, input), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], [new(slot, result)]));
             }
-            if (mode == "Field")
+            if (mode is "Field" or "PartialField")
             {
                 var identity = new ReadIdentity(); result = terms.Atom(new ResultAtom(identity), 64);
                 var fieldAddress = terms.Apply(new CoreOperator(CoreOperation.Add), 64, input, terms.Constant(16, 64));
                 statements.Add(new MemoryRead(identity, fieldAddress, 64, result));
+                if (mode == "PartialField") result = terms.Concat(terms.Slice(result, 0, 32), terms.Constant(42, 32));
             }
             function.Blocks.Add(new(entry, [], [.. statements], new Return([new(slot, result)])));
             var calls = new CallNamingQuery(binder, new AddressMap(echo, echo, echo), new NamingChecks.RuntimeMap(), RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel));
             var lowered = new IntegerLowering(function.Freeze(), MethodRef.Open(item.Caller), binder, types,
                 calls: calls, effects: new NoStructWrites(), spec: spec, structConstructors: templates).Run();
-            if (mode is "AfterWrite" or "WriteParameter" or "Escape" or "Field")
+            if (mode is "AfterWrite" or "WriteParameter" or "Escape" or "PartialField")
             {
-                var expected = mode == "AfterWrite" ? "inline.StructConstructor.ReadAfterWrite" : mode == "Field" ? "inline.StructConstructor.Origin" : "inline.StructConstructor.Events";
+                var expected = mode == "AfterWrite" ? "inline.StructConstructor.ReadAfterWrite" : mode == "PartialField" ? "inline.StructConstructor.NoMatch" : "inline.StructConstructor.Events";
                 checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == expected, mode + " 保留洞：" + lowered.Failure);
                 continue;
             }
             checks.True(lowered.Body is not null, mode + " 按引用构造下降：" + lowered.Failure);
             if (lowered.Body is not { } body) continue;
             var returned = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value;
-            checks.True(returned is NewObjectValue { Arguments: [AddressValue address] } && (mode == "Call" ? address.Target is LocalValue : address.Target is ArgumentValue), mode + " 对整体来源取地址");
+            bool snapshotAddress = mode is "Call" or "Field";
+            checks.True(returned is NewObjectValue { Arguments: [AddressValue address] } && (snapshotAddress ? address.Target is LocalValue : address.Target is ArgumentValue), mode + " 对整体来源取地址");
             checks.True(emitter.Emit([body]).Count == 0, mode + " 按引用构造 CIL 校验");
             var emitted = skeleton.Method(item.Caller);
-            checks.True(emitted.Body.Instructions.Any(i => mode == "Call"
+            checks.True(emitted.Body.Instructions.Any(i => snapshotAddress
                 ? i.OpCode.Code is Mono.Cecil.Cil.Code.Ldloca or Mono.Cecil.Cil.Code.Ldloca_S
                 : i.OpCode.Code is Mono.Cecil.Cil.Code.Ldarga or Mono.Cecil.Cil.Code.Ldarga_S), mode + " 输出地址指令");
             if (mode == "Call") checks.True(returned is NewObjectValue { Arguments: [AddressValue { Target: LocalValue saved }] }

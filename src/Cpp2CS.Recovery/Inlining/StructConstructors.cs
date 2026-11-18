@@ -206,7 +206,7 @@ public readonly record struct StructConstructorRequest(MethodRef Caller, Definit
 
 /// <summary>实参只取现场项及其子项；每种代入逐叶子用公共纯项解释器复核，并保留所有成立的解。</summary>
 public sealed class StructConstructorQuery(ManagedTypes types, StructConstructorTemplates templates, StateQueries state,
-    IReadOnlyList<StructOrigin> origins) : Query<StructConstructorRequest, StructConstructorAnswer>
+    IReadOnlyList<StructOrigin> origins, StructValueQuery? structs = null) : Query<StructConstructorRequest, StructConstructorAnswer>
 {
     private readonly SourceRangeQuery ranges = new(state);
     private readonly FlowQueries flow = new();
@@ -214,7 +214,9 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
     {
         Outcome<StructConstructorAnswer> No(Reason? why) => Outcome<StructConstructorAnswer>.Success(new(null, [], why));
         if (StructConstructorTemplates.ContainsParameter(key.Type)) return No(new("inline.StructConstructor.Generic", "含类型参数的结构体不作候选。"));
-        var pool = SnapshotRewrite.Dependencies(key.Leaves.Select(l => l.Value)).Where(t => t.Width <= 64 && !t.ContainsUndefined).ToArray();
+        var dependencies = SnapshotRewrite.Dependencies(key.Leaves.Select(l => l.Value));
+        var pool = dependencies.Where(t => t.Width <= 64 && !t.ContainsUndefined).ToArray();
+        bool hasMemory = structs is not null && dependencies.Any(t => t.Identity is MemoryAtom or MemoryMerge);
         var matches = new List<StructConstructorAnswer>(); Reason? failure = null; int validTemplates = 0;
         foreach (var method in key.Type.Definition.Methods.Where(m => m is { Name: ".ctor", IsStatic: false }))
         {
@@ -223,10 +225,10 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
             if (method == key.Caller.Method && key.Type.Equals(key.Caller.DeclaringType)) continue;
             if (!ManagedAccess.Method(types, key.Caller.Method.Owner, selected, key.Type)) continue;
             if (method.Parameters.Any(p => selected.Concrete(p.Type) is ByRefRef byref && templates.StructParameter(byref) is { } element
-                && !origins.Any(o => o.Type.Equals(element))))
+                && !origins.Any(o => o.Type.Equals(element)) && !hasMemory))
             { failure ??= new("inline.StructConstructor.Origin", "按引用形参没有同类型的整体来源。"); continue; }
             if (method.Parameters.Any(p => templates.StructParameter(selected.Concrete(p.Type)) is { } structure
-                ? !origins.Any(o => o.Type.Equals(structure))
+                ? !origins.Any(o => o.Type.Equals(structure)) && !(selected.Concrete(p.Type) is ByRefRef && hasMemory)
                 : !pool.Any(t => t.Width == types.StorageBits(selected.Concrete(p.Type))))) continue;
             var result = templates.Get(selected);
             if (result.Template is not { } template) { failure ??= result.Failure; continue; }
@@ -235,6 +237,14 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
             if (Enumerable.Range(0, method.Parameters.Count).Any(i => !used.Contains(i))) continue;
             validTemplates++;
             var bindings = new StructConstructorArgument?[method.Parameters.Count];
+            var copies = new StructConstructorArgument?[method.Parameters.Count];
+            for (int i = 0; hasMemory && i < copies.Length; i++)
+            {
+                if (selected.Concrete(method.Parameters[i].Type) is not ByRefRef byref || templates.StructParameter(byref) is not { } structure
+                    || CopySource(template, i, structure, key.Leaves) is not { } copy) continue;
+                var plan = c.Get(structs!, new(structure, copy, key.Point));
+                if (plan.IsSuccess && plan.Value.Location is not null) copies[i] = new(copy, structure, key.Point);
+            }
             Term? Parameter(int i)
             {
                 if (bindings[i] is not { } bound || types.Kind(bound.Type) == TypeKind.Struct) return null;
@@ -277,6 +287,7 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
                     ? origins.Where(o => o.Type.Equals(type) && (o.Point == key.Point || c.Get(flow.PointDominates, new(o.Point, key.Point)) is { IsSuccess: true, Value: true }))
                         .Select(o => new StructConstructorArgument(o.Source, type, o.Parameter is not null ? key.Point : o.Point) { Origin = o })
                     : pool.Where(t => t.Width == types.StorageBits(type)).Select(t => new StructConstructorArgument(new TermSource(t), type, key.Point));
+                if (copies[i] is { } copy) choices = choices.Append(copy);
                 foreach (var choice in choices.Distinct())
                 {
                     bindings[i] = choice;
@@ -290,5 +301,24 @@ public sealed class StructConstructorQuery(ManagedTypes types, StructConstructor
         if (matches.Count > 1) return No(new("inline.StructConstructor.Ambiguous", $"{matches.Count} 个构造函数与实参代入成立。"));
         return matches.Count == 1 ? Outcome<StructConstructorAnswer>.Success(matches[0])
             : No(validTemplates > 0 ? new("inline.StructConstructor.NoMatch", $"{validTemplates} 个纯写入模板均不能由现场项代入成立。") : failure);
+    }
+    // 模板直接复制的各字段给出实参位片；是否来自同一托管位置、何时取快照，由整体查询证明。
+    private PiecesSource? CopySource(StructConstructorTemplate template, int parameter, DefinitionRef type, ImmutableArray<StructLeaf> actual)
+    {
+        var pieces = new Dictionary<int, BoundPiece>();
+        foreach (var (output, value) in template.Leaves)
+        {
+            if (value is not FieldValue) continue;
+            var path = StructConstructorTemplates.Path(value, out var root);
+            if (root is not ArgumentValue argument || argument.Index != parameter || types.Project(type, path) is not { } input
+                || input.Bit % 8 != 0 || input.Width % 8 != 0 || input.Width != output.Width) continue;
+            var leaf = actual.SingleOrDefault(l => l.Projection.Bit == output.Bit && l.Projection.Width == output.Width);
+            if (leaf is null) return null;
+            var piece = new BoundPiece(input.Bit / 8, input.Width / 8, new TermSource(leaf.Value));
+            if (pieces.TryGetValue(input.Bit, out var prior) && prior != piece) return null;
+            pieces[input.Bit] = piece;
+        }
+        return pieces.Count != 0 && types.Projections(type).All(p => pieces.ContainsKey(p.Bit))
+            ? new PiecesSource([.. pieces.Values.OrderBy(p => p.ValueOffset)]) : null;
     }
 }

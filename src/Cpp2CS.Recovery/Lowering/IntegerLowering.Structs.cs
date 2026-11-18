@@ -34,7 +34,7 @@ public sealed partial class IntegerLowering
                     && definition.Binding.Result.Source is { } source)
                     origins.Add(new(definition.Method.Concrete(definition.Method.Method.ReturnType), source, new(block.Identity, i + 1), Call: call.Identity));
         structs = new(types, state, locations, origins);
-        if (structConstructors is not null) structConstructorValues = new(types, structConstructors, state, origins);
+        if (structConstructors is not null) structConstructorValues = new(types, structConstructors, state, origins, structs);
         structMemoryParts = new(state, locations, types);
         if (types.Kind(method.Concrete(method.Method.ReturnType)) == TypeKind.Struct
             && binder.Return(new Return([]), signature, function.Terms, function.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), function.IncomingArgumentArea)
