@@ -17,7 +17,7 @@ public sealed record StructPlan(StructOrigin? Origin, LocationView? Location, Re
 {
     public ValueProjection? Representation { get; init; }
     public StructMerge? Merge { get; init; }
-    public bool IsZero => !Leaves.IsEmpty && Leaves.All(leaf => leaf.Value.ConstantValue == 0);
+    public bool IsZero { get; init; }
     public bool IsWhole => Origin is not null || Location is not null || IsZero || Merge is not null;
 }
 public sealed record StructMerge(BlockIdentity Block, Term Parts, ImmutableArray<Incoming> Inputs);
@@ -102,7 +102,7 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key) => c.Get(plans, new(key, []));
     private Outcome<StructPlan> Plan(QueryContext c, StructRequest key, ImmutableHashSet<BlockIdentity> active)
     {
-        if (key.Type is not DefinitionRef structure || types.Layouts.Of(structure) is null)
+        if (key.Type is not DefinitionRef structure || types.Layouts.Of(structure) is not { } layout)
             return Failure("Layout", "结构体缺少封闭实例布局。");
         // ABI 的间接按值输入读取整个对象；求值点就是原调用处，不把内容转发过其他调用。
         if (locations?.Frames is { } frames && key.Source is IndirectSource indirect && indirect.Length * 8 == types.StorageBits(structure))
@@ -115,7 +115,16 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
             if (view is not null) return Outcome<StructPlan>.Success(new(null, view, null, []));
         }
         var projections = types.Projections(structure).OrderBy(p => p.Bit).ToArray();
-        if (projections.Length == 0) return Failure("Layout", "结构体没有可证明的叶子字段。");
+        Term? storage = null;
+        if (projections.Length == 0)
+        {
+            if (layout.Fields.Count != 0 || layout.ValueSize is <= 0 or > int.MaxValue / 8)
+                return Failure("Layout", "结构体没有可证明的叶子字段。");
+            var bits = c.Get(ranges, new(key.Source, key.Point, 0, layout.ValueSize * 8));
+            if (!bits.IsSuccess) return bits.Propagate<StructPlan>();
+            if (Incomplete(bits.Value)) return Failure("Incomplete", "无实例字段的结构体含有未知存储位。");
+            storage = bits.Value;
+        }
         int end = 0;
         foreach (var field in projections)
         {
@@ -136,10 +145,12 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
         {
             if (origin.Point != key.Point && c.Get(flow.PointDominates, new(origin.Point, key.Point)) is not { IsSuccess: true, Value: true }) continue;
             var point = origin.Parameter is not null && origin.Source is IndirectSource ? key.Point : origin.Point;
-            if (!SameLeaves(c, origin.Source, point, parts)) continue;
+            if (storage is null ? !SameLeaves(c, origin.Source, point, parts) : !SameSource(c, origin.Source, point, 0, storage)) continue;
             return Outcome<StructPlan>.Success(new(origin with { Point = point }, null, null, parts));
         }
-        if (parts.All(leaf => leaf.Value.ConstantValue == 0)) return Outcome<StructPlan>.Success(new(null, null, null, parts));
+        if (storage is null ? parts.All(leaf => leaf.Value.ConstantValue == 0) : storage.ConstantValue == 0)
+            return Outcome<StructPlan>.Success(new(null, null, null, parts) { IsZero = true });
+        if (storage is not null) return Failure("Source", "无实例字段的结构体存储未归零，也没有同类型整体来源。");
         var copy = MemoryCopy(c, structure, parts, key.Point);
         if (!copy.IsSuccess || copy.Value is not null) return copy.IsSuccess
             ? Outcome<StructPlan>.Success(copy.Value!) : copy.Propagate<StructPlan>();

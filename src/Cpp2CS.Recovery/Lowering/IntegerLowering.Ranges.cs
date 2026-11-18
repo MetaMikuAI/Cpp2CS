@@ -19,8 +19,7 @@ public sealed partial class IntegerLowering
         Fail<T>(write ? LoweringFailureKind.NonFrameWrite : LoweringFailureKind.NonFrameRead,
             $"宽{(write ? "写入" : "读取")}位段 [{low},{low + width})：{detail}", cause, "lowering.Wide.Layout");
 
-    private static bool WholeCopy(StructPlan plan) => plan.Origin is not null || plan.Location is not null
-        || plan.Leaves.Length > 0 && plan.Leaves.All(l => l.Value.ConstantValue == 0);
+    private static bool WholeCopy(StructPlan plan) => plan.Origin is not null || plan.Location is not null || plan.IsZero;
 
     private IReadOnlyList<LocationPiece> StorePieces(MemoryWrite write, Point point, IReadOnlyList<LocationPiece> leaves,
         IEnumerable<LocationPiece> aggregates)

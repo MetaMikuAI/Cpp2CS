@@ -997,17 +997,18 @@ internal static partial class LoweringChecks
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
         TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
-        TypeDef Define(string name, int size, bool value = true)
+        TypeDef Define(string name, int size, bool value = true, bool defaultSize = true)
         {
             var type = new TypeDef { Index = definitions.Count, Assembly = "StructChecks.dll", Namespace = "", Name = name,
                 Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public,
-                IsValueType = value, IsEnum = false, Size = size, PackingSize = 0, ClassSizeIsDefault = true };
+                IsValueType = value, IsEnum = false, Size = size, PackingSize = 0, ClassSizeIsDefault = defaultSize };
             definitions.Add(type); return type;
         }
         int fieldIndex = 0;
         FieldDef Field(TypeDef owner, string name, TypeRef type, int offset, FieldAttributes attributes = FieldAttributes.Public) => new() {
             Index = fieldIndex++, Owner = owner, Name = name, Type = type, Offset = offset, Attributes = attributes };
         var pair = Define("Pair", 8); var pairType = new DefinitionRef(pair, []);
+        var emptyType = new DefinitionRef(Define("Empty", 1, defaultSize: false), []);
         pair.Fields = [Field(pair, "First", Primitive("Int32"), 0), Field(pair, "Second", Primitive("Int32"), 4)];
         var otherPair = Define("OtherPair", 8); var otherPairType = new DefinitionRef(otherPair, []);
         otherPair.Fields = [Field(otherPair, "First", Primitive("Int32"), 0), Field(otherPair, "Second", Primitive("Int32"), 4)];
@@ -1080,6 +1081,10 @@ internal static partial class LoweringChecks
         var noiseThrow = Method("NoiseThrow", Primitive("Void"));
         var cases = new Dictionary<string, MethodDef> {
             ["Forward"] = Method("Forward", pairType, pairType),
+            ["EmptyZero"] = Method("EmptyZero", emptyType),
+            ["EmptyForward"] = Method("EmptyForward", emptyType, emptyType),
+            ["EmptyNonzero"] = Method("EmptyNonzero", emptyType),
+            ["EmptyUnknown"] = Method("EmptyUnknown", emptyType),
             ["ReferenceRoot"] = Method("ReferenceRoot", Primitive("Int32"), new ByRefRef(referenceWrapperType)),
             ["Compose"] = Method("Compose", pairType, Primitive("Int32"), Primitive("Int32")),
             ["ComposeHfa"] = Method("ComposeHfa", hfaType, Primitive("Single"), Primitive("Single")),
@@ -1181,6 +1186,9 @@ internal static partial class LoweringChecks
                 statements.Add(new MemoryRead(id, address, width, term)); return term;
             }
             Term result = root;
+            if (mode == "EmptyZero") result = terms.Constant(0, 64);
+            if (mode == "EmptyNonzero") result = terms.Constant(128, 64);
+            if (mode == "EmptyUnknown") result = terms.Concat(terms.Undefined(1), terms.Constant(0, 63));
             var facts = NamingFacts.Empty;
             if (mode.EndsWith("Token", StringComparison.Ordinal))
             {
@@ -1362,6 +1370,12 @@ internal static partial class LoweringChecks
                 : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" or "LargeResultCopy" ? createLarge : target;
             var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge, mode == "FieldGapThrow" ? noiseThrow : noise), new NamingChecks.RuntimeMap(), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: mode is "FieldGap" or "FieldGapThrow" ? new NoStructWrites() : new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            if (mode is "EmptyNonzero" or "EmptyUnknown")
+            {
+                var reason = mode == "EmptyUnknown" ? "lowering.Struct.Incomplete" : "lowering.Struct.Source";
+                checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == reason, mode + " 保留没有整体写法的存储位：" + lowered.Failure);
+                continue;
+            }
             if (mode is "StoreSelfRead" or "StoreOverlap")
             {
                 checks.True(lowered.Body is null && lowered.Failure?.Reason.Code == "lowering.Location.Readonly",
@@ -1443,6 +1457,8 @@ internal static partial class LoweringChecks
         }
         const string indirectSource = """
             public struct Pair { public int First, Second; }
+            [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Size=1)]
+            public struct Empty {}
             public struct ImmutablePair { public int A; public readonly int B; }
             public struct Wrapped { private int Value; }
             public struct Carrier { public int Tag; public Wrapped Item; }
@@ -1450,6 +1466,8 @@ internal static partial class LoweringChecks
             public class Box { public Pair Data; public Wrapped Wrapped; public ImmutablePair Immutable; public PrivatePair Hidden; }
             public struct Large { public long Part0, Part1, Part2; }
             public static class Cases {
+                public static Empty EmptyZero() => default;
+                public static Empty EmptyForward(Empty value) => value;
                 public static void ConsumeLarge(Large p) { p.Part1 = 99; }
                 public static long IndirectWrite(Large p) { p.Part1 = 99; return p.Part1; }
                 public static long IndirectSnapshot(Large p) { long before = p.Part1; p.Part1 = 99; return before; }
@@ -1480,7 +1498,7 @@ internal static partial class LoweringChecks
             """;
         using var indirectReference = new CompiledSource(indirectSource);
         using var indirectTested = new CompiledSource(indirectSource);
-        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge", "LargeSplitForward", "LargeResultCopy", "WideAcross", "FrameScattered", "FrameTwice", "FrameItem", "StorePair", "StorePairReverse", "StorePrivate", "StoreByRef", "StoreElement", "FieldGap", "FieldGapThrow", "SnapshotField", "TwoFields" })
+        foreach (var mode in new[] { "EmptyZero", "EmptyForward", "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge", "LargeSplitForward", "LargeResultCopy", "WideAcross", "FrameScattered", "FrameTwice", "FrameItem", "StorePair", "StorePairReverse", "StorePrivate", "StoreByRef", "StoreElement", "FieldGap", "FieldGapThrow", "SnapshotField", "TwoFields" })
         {
             var output = indirectTested.Method("Cases", mode);
             var emitted = skeleton.Method(cases[mode]);
