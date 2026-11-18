@@ -45,6 +45,7 @@ public sealed partial class IntegerLowering
         { PrepareRegisteredCall(call, c, registered); return; }
         if (c.Operation?.Il.Name == "ThrowProfile") { PrepareProfileException(call, c); return; }
         if (c.Operation?.Il.Name == "GetTypeByName") { PrepareGetType(call, c); return; }
+        if (c.Operation?.Il.Name == "RunClassConstructor") { PrepareClassInitialization(call, c); return; }
         if (c.Operation?.Il.Name == "UnboxUnchecked") { PrepareUncheckedUnbox(call, c); return; }
         if (c.Operation?.Il.Name == "NullCheck") { PrepareNullCheck(call, c); return; }
         if (c.Operation?.Il.Name == "GenericVirtualDispatch") { PrepareGenericVirtual(call); return; }
@@ -210,6 +211,7 @@ public sealed partial class IntegerLowering
         if (accessorCallCalls.TryGetValue(call.Identity, out var recovered)) return recovered;
         if (throws.TryGetValue(call.Identity, out var constructor)) return LowerCheckThrow(call, constructor);
         if (nullChecks.ContainsKey(call.Identity)) return LowerNullCheck(call, point);
+        if (explicitInitializers.TryGetValue(call.Identity, out var initializer)) return new ManagedCall(position, initializer, null);
         if (typeChecks.ContainsKey(call.Identity)) return LowerTypeCheck(call, point);
         if (boxes.ContainsKey(call.Identity)) return LowerBox(call, point);
         if (unboxes.ContainsKey(call.Identity)) return LowerUnbox(call, point);

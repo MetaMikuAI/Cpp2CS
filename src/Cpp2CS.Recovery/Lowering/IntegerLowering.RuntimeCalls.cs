@@ -25,6 +25,22 @@ public sealed partial class IntegerLowering
     }
     private CheckQueries? runtimeChecks;
     private readonly Dictionary<CallIdentity, (BoundValue Value, MethodRef Exception)> nullChecks = [];
+    private readonly Dictionary<CallIdentity, ManagedInvocation> explicitInitializers = [];
+
+    private void PrepareClassInitialization(Call call, ClassifiedCall classified)
+    {
+        const string code = "lowering.RuntimeCall.InitializeClassPrecise";
+        var target = RuntimeClass(classified, code);
+        if (target is null) return;
+        if (call.DoesNotReturn || !ManagedAccess.Type(types, method.Method.Owner, target)
+            || target is DefinitionRef type && type.Arguments.Count != type.Definition.GenericParameters.Count)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "初始化位置不能按可返回调用引用该类型实例", code: code); return; }
+        var helper = types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", types.RuntimeTypeHandle);
+        if (helper is not { Method.IsStatic: true } || !ManagedTypes.IsVoid(helper.Method.ReturnType)
+            || !ManagedAccess.Method(types, method.Method.Owner, helper, null))
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "核心库没有可访问的 RunClassConstructor(RuntimeTypeHandle)", code: code); return; }
+        explicitInitializers.Add(call.Identity, new(helper, null, [new TypeHandleValue(target, types.RuntimeTypeHandle, 0)], false));
+    }
 
     private Dictionary<CallIdentity, List<ConditionalCheck>>? throwCheckOrigins;
     private ManagedThrow LowerCheckThrow(Call call, MethodRef constructor)

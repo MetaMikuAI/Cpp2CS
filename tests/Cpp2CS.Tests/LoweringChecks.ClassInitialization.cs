@@ -28,17 +28,18 @@ internal static partial class LoweringChecks
     {
         public RuntimeFunction? Find(CallTarget target) => target is ImageFunction { EntryOffset: 20 } ? initialize : null;
     }
-    private static void ProtectedInitializationExecution(Assertions checks, ProgramModel primitives)
+    private static void ProtectedInitializationExecution(Assertions checks, ProgramModel primitives, bool sameOwner)
     {
-        using var source = new CompiledSource("""
+        using var source = new CompiledSource($$"""
             public static class Control { public static bool Fail; public static int Count; }
             public static class Owner {
                 static Owner() { Control.Count++; if(Control.Fail) throw new System.Exception(); }
                 public static int Use() { Control.Count+=10; return 11; }
             }
             public static class Cases {
+                public static int Observe() { if (Control.Count != 1) return -1; return Control.Count += 10; }
                 public static int Reference() {
-                    try { System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(Owner).TypeHandle); return Owner.Use(); }
+                    try { System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(Owner).TypeHandle); return {{(sameOwner ? "Owner.Use()" : "Observe()")}}; }
                     catch { return 7; }
                 }
                 public static int Output() => 0;
@@ -46,9 +47,9 @@ internal static partial class LoweringChecks
             """);
         var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
         TypeRef Type(string name) => new DefinitionRef(definitions.Single(d => d.Name == name), []);
-        TypeDef Define(string name)
+        TypeDef Define(string name, string assembly = "Initialization.dll", string ns = "")
         {
-            var result = new TypeDef { Index = definitions.Count, Assembly = "Initialization.dll", Namespace = "", Name = name,
+            var result = new TypeDef { Index = definitions.Count, Assembly = assembly, Namespace = ns, Name = name,
                 Token = 0, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false, BaseType = Type("Object") };
             definitions.Add(result); return result;
         }
@@ -56,12 +57,17 @@ internal static partial class LoweringChecks
         var initializer = new MethodDef { Index = 0, Owner = owner, Name = ".cctor", Token = 0,
             Attributes = MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
             ImplAttributes = 0, Slot = -1, ReturnType = Type("Void"), Parameters = [] };
-        var use = new MethodDef { Index = 1, Owner = owner, Name = "Use", Token = 0,
+        var use = new MethodDef { Index = 1, Owner = sameOwner ? owner : caller, Name = sameOwner ? "Use" : "Observe", Token = 0,
             Attributes = MethodAttributes.Static | MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = Type("Int32"), Parameters = [] };
         var method = new MethodDef { Index = 2, Owner = caller, Name = "Output", Token = 0,
             Attributes = MethodAttributes.Static | MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = Type("Int32"), Parameters = [] };
-        owner.Methods = [initializer, use]; caller.Methods = [method];
-        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = [initializer, use, method], Fields = [],
+        var helpers = Define("RuntimeHelpers", "mscorlib.dll", "System.Runtime.CompilerServices");
+        var runClass = new MethodDef { Index = 3, Owner = helpers, Name = "RunClassConstructor", Token = 0,
+            Attributes = MethodAttributes.Static | MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = Type("Void"),
+            Parameters = [new("type", Type("RuntimeTypeHandle"), 0, null, false)] };
+        helpers.Methods = [runClass];
+        owner.Methods = sameOwner ? [initializer, use] : [initializer]; caller.Methods = sameOwner ? [method] : [use, method];
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = [initializer, use, method, runClass], Fields = [],
             RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
             Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
                 AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
@@ -92,22 +98,30 @@ internal static partial class LoweringChecks
         var regions = new ExceptionRegionQuery(state, calls, values, spec, types.Object, nested: true);
         var initialization = new ClassInitializationQuery(state, calls, values, locations, spec, regions);
         var transformed = new UnobservableEffects(state, calls, values, new InputMemoryImage(), new HashSet<AbstractSlot> { slot }, locations, initialization).Run(f.Freeze());
-        checks.True(!transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Identity == init.Identity), "同一区域的静态调用吸收初始化");
+        checks.True(transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Identity == init.Identity) == !sameOwner,
+            "同一区域同类调用吸收初始化，其他观察之前保留初始化");
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(method), binder, types, calls: calls,
             effects: new ManagedCallEffects(calls), spec: spec, names: names).Run();
-        checks.True(result.Body is not null, "受保护初始化吸收后下降：" + result.Failure);
+        checks.True(result.Body is not null, "受保护初始化下降：" + result.Failure);
         if (result.Body is null) return;
         var skeleton = new Skeleton(program, 16); var problems = new BodyEmitter(skeleton, types).Emit([result.Body]);
-        checks.True(problems.Count == 0, "受保护初始化输出契约");
+        checks.True(problems.Count == 0, "受保护初始化输出契约：" + string.Join(", ", problems));
         if (problems.Count != 0) return;
         var output = source.Method("Cases", "Output"); output.Body = skeleton.Method(method).Body;
+        var runtimeCall = source.Method("Cases", "Reference").Body.Instructions.Select(i => i.Operand)
+            .OfType<Mono.Cecil.MethodReference>().Single(m => m.Name == "RunClassConstructor");
         foreach (var instruction in output.Body.Instructions)
-            if (instruction.Operand is Mono.Cecil.MethodReference) instruction.Operand = source.Method("Owner", "Use");
+        {
+            if (instruction.Operand is Mono.Cecil.MethodReference callee)
+                instruction.Operand = callee.FullName == runtimeCall.FullName ? runtimeCall : source.Method(callee.DeclaringType.Name, callee.Name);
+            if (instruction.OpCode.Code == Mono.Cecil.Cil.Code.Ldtoken && instruction.Operand is Mono.Cecil.TypeReference token)
+                instruction.Operand = source.Module.GetType(token.FullName);
+        }
         foreach (var clause in output.Body.ExceptionHandlers) clause.CatchType = source.Module.TypeSystem.Object;
         foreach (var local in output.Body.Variables)
             local.VariableType = local.VariableType.FullName == "System.Object" ? source.Module.TypeSystem.Object : source.Module.TypeSystem.Int32;
         checks.True(output.Body.ExceptionHandlers.Count == 1 && output.Body.ExceptionHandlers[0].HandlerType == Mono.Cecil.Cil.ExceptionHandlerType.Catch,
-            "吸收后的静态调用仍在 catch 保护内");
+            "初始化和后续调用仍在 catch 保护内");
         using var bytes = new MemoryStream(); source.Module.Write(bytes);
         foreach (bool fail in new[] { false, true })
         foreach (var name in new[] { "Reference", "Output" })
