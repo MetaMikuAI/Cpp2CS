@@ -229,7 +229,9 @@ public sealed partial class IntegerLowering
                 {
                     if (constructorWrites.Contains(write.Identity)) continue;
                     if (exceptions?.PrivateWrites.Contains(write.Identity) == true) continue;
-                    statements.AddRange(LowerStores(write, new(b.Identity, i)));
+                    if (i + 1 < b.Statements.Length && b.Statements[i + 1] is MemoryWrite
+                        && TryWholeStore(b, ref i) is { } whole) statements.Add(whole);
+                    else if (failure is null) statements.AddRange(LowerStores(write, new(b.Identity, i)));
                     if (failure is not null) return new(null, failure);
                 }
                 else if (native is MemoryRead read)

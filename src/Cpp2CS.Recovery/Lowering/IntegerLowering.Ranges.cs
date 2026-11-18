@@ -12,6 +12,7 @@ namespace Cpp2CS.Recovery.Lowering;
 public sealed partial class IntegerLowering
 {
     private ManagedRangeQuery? ranges;
+    private readonly Dictionary<ManagedLocationQuery, WholeWriteQuery> wholeWrites = [];
     private readonly Dictionary<(ReadDefinition Read, LocationView View), ReadDefinition> rangeReads = [];
 
     private T? WideLayout<T>(bool write, int low, int width, string detail, Reason? cause = null) where T : class =>
@@ -59,11 +60,37 @@ public sealed partial class IntegerLowering
         if (view.Kind == ManagedLocationKind.ArrayLength)
         { Fail<object>(LoweringFailureKind.NonFrameWrite, "数组长度不可写", code: "lowering.Location.Readonly"); return false; }
         // 只读字段只允许在所属类型对应的实例或静态构造函数中写入。
-        foreach (var field in view.Path)
-            if ((field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
-                && !(method.Method.Name == (field.Field.IsStatic ? ".cctor" : ".ctor") && method.Method.Owner == field.Field.Owner))
-            { Fail<object>(LoweringFailureKind.NonFrameWrite, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly"); return false; }
+        if (view.Path.Any(field => WholeWriteQuery.RequiresWhole(field, method)))
+        { Fail<object>(LoweringFailureKind.NonFrameWrite, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly"); return false; }
         return true;
+    }
+
+    private ManagedStatement? TryWholeStore(Block block, ref int cursor)
+    {
+        if (locations is null) return null;
+        if (!wholeWrites.TryGetValue(locations, out var query))
+            wholeWrites.Add(locations, query = new(locations, types, method));
+        var before = new Point(block.Identity, cursor);
+        var answer = context.Get(query, before);
+        if (!answer.IsSuccess || answer.Value is not { } group || !CanWriteStructPath(group.Target.Path)) return null;
+        MaterializeAccessorProgram();
+        if (failure is not null) return null;
+        foreach (var write in group.Writes)
+            if (constructorWrites.Contains(write.Identity) || accessorWriteCalls.ContainsKey(write.Identity)
+                || exceptions?.PrivateWrites.Contains(write.Identity) == true || frameObjects?.AddressSpills.Contains(write.Identity) == true
+                || frameObjects?.Copies.ContainsKey(write.Identity) == true || frameObjects?.CopyRemainders.Contains(write.Identity) == true
+                || structReturnStores is not null && context.Get(structReturnStores, write.Identity) is not { IsSuccess: true, Value: false })
+                return null;
+        // 组内没有读取、调用或组外写入。各片取自原定义，整体的内存来源只允许在组前核对。
+        var plan = context.Get(structs, new(group.Target.Type, group.Source, before));
+        if (!plan.IsSuccess || !plan.Value.IsWhole) return null;
+        if (RejectAddressUse(group.Writes.Select(w => w.Value), "写入内存")) return null;
+        var source = StructValue(group.Source, group.Target.Type, before);
+        var target = AccessView(group.Target, write: true);
+        if (source is null || target is null) return null;
+        cursor += group.Writes.Length - 1;
+        position = group.Writes[^1].Trace?.NativeAddress ?? block.Trace?.NativeAddress ?? 0;
+        return target is LocalValue local ? new ManagedAssignment(position, local, source) : new ManagedStore(position, target, source);
     }
 
     private ManagedValue? RangeRead(ReadDefinition read, int low, int width)

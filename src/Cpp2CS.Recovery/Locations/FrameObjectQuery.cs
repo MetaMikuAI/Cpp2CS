@@ -393,9 +393,15 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 if (block.Statements[i] is not MemoryWrite first || remainders.Contains(first.Identity)
                     || !accesses.TryGetValue(first.Identity, out var access) || types.Kind(access.Object.Type) != TypeKind.Struct) continue;
                 var group = new List<(MemoryWrite Write, FrameAccess Access)>(); int j = i;
-                while (j < block.Statements.Length && block.Statements[j] is MemoryWrite write && write.Width % 8 == 0)
+                long bits = 0;
+                while (bits < access.Object.Storage.Width && j < block.Statements.Length
+                    && block.Statements[j] is MemoryWrite { Release: false } write && write.Width % 8 == 0)
                 {
-                    if (accesses.TryGetValue(write.Identity, out var next) && next.Object == access.Object) group.Add((write, next));
+                    if (accesses.TryGetValue(write.Identity, out var next) && next.Object == access.Object)
+                    {
+                        group.Add((write, next));
+                        bits += write.Width;
+                    }
                     else
                     {
                         var address = c.Get(state.Resolve, write.Address);
@@ -404,22 +410,13 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     }
                     j++;
                 }
-                var ordered = group.OrderBy(w => w.Access.Location.Offset).ToArray();
-                var cursor = access.Object.Storage.Offset!.Value; bool complete = ordered.Length > 0;
-                foreach (var part in ordered)
-                {
-                    if (part.Access.Location.Offset != cursor) { complete = false; break; }
-                    cursor += part.Write.Width / 8;
-                }
-                if (complete && cursor * 8 == access.Object.Storage.Offset * 8 + access.Object.Storage.Width)
-                {
-                    var source = new PiecesSource([.. ordered.Select(w => new BoundPiece(
-                        (int)(w.Access.Location.Offset!.Value - access.Object.Storage.Offset.Value), w.Write.Width / 8, new TermSource(w.Write.Value)))]);
-                    copies.Add(first.Identity, new(access.Object, source, new(block.Identity, i)));
-                    foreach (var rest in group.Skip(1)) remainders.Add(rest.Write.Identity);
-                }
-                else if (first.Width == access.Object.Storage.Width && access.Location.Offset == access.Object.Storage.Offset)
-                    copies.Add(first.Identity, new(access.Object, new TermSource(first.Value), new(block.Identity, i)));
+                if (bits != access.Object.Storage.Width) continue;
+                var source = WholeWriteSource.FromPieces(group.Select(w => new BoundPiece(
+                    (int)(w.Access.Location.Offset!.Value - access.Object.Storage.Offset!.Value),
+                    w.Write.Width / 8, new TermSource(w.Write.Value))), access.Object.Storage.Width / 8);
+                if (source is null) continue;
+                copies.Add(first.Identity, new(access.Object, source, new(block.Identity, i)));
+                foreach (var rest in group.Skip(1)) remainders.Add(rest.Write.Identity);
             }
         return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()) { Results = results.ToImmutable(), Copies = copies.ToImmutable(),
             CopyRemainders = remainders.ToImmutable(), AddressSpills = spills.Keys.ToImmutableHashSet(), Clears = cleared.ToImmutable() });
