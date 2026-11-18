@@ -23,7 +23,7 @@ internal static partial class InliningChecks
         {
             for (; why is not null; why = why.Cause) yield return why;
         }
-        foreach (var mode in new[] { "Public", "Private", "Static", "Ambiguous", "NoGetter", "Write", "Receiver", "Parts", "Accessible", "SplitReads" })
+        foreach (var mode in new[] { "Public", "Private", "Static", "Ambiguous", "NoGetter", "Write", "Receiver", "Parts", "Accessible", "SplitReads", "WholeSnapshot" })
         foreach (bool reverse in mode == "Ambiguous" ? new[] { false, true } : new[] { false })
         {
             var f = new Fixture(valueOwner: true, fieldOffset: 0, receiverOwner: mode == "Receiver");
@@ -94,7 +94,14 @@ internal static partial class InliningChecks
             else value = Read(address, mode == "Private" ? 64 : 32);
             if (mode == "Parts") value = terms.Apply(new CoreOperator(CoreOperation.Add), 32, value,
                 terms.Slice(Read(Add(root, field.Offset + b.Offset), 64), 0, 32));
-            if (mode == "SplitReads")
+            if (mode == "WholeSnapshot")
+            {
+                caller.ReturnType = f.OwnerType;
+                var high = Read(Add(root, field.Offset + b.Offset), 64);
+                builder.Blocks.Add(new(entry, [], [.. statements], new Return([
+                    new(new(SlotKind.Integer), terms.Concat(value, terms.Constant(0, 32))), new(new(SlotKind.Integer, 1), high)])));
+            }
+            else if (mode == "SplitReads")
             {
                 var yes = new BlockIdentity(); var no = new BlockIdentity();
                 var condition = terms.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
@@ -114,6 +121,13 @@ internal static partial class InliningChecks
             var accessors = new AccessorQuery(f.Types, new CachedAccessorTemplates(bodies.GetValueOrDefault), attempts.Add);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(caller), f.Binder, f.Types,
                 calls: f.Calls, spec: f.Spec, names: names, accessors: accessors).Run();
+            if (mode == "WholeSnapshot")
+            {
+                var callsAtReads = lowered.Body?.Blocks.SelectMany(block => block.Statements).OfType<ManagedCall>().ToArray();
+                checks.True(callsAtReads is [{ Address: 100, Result: not null } snapshot]
+                    && snapshot.Invocation.Method.Method == getter, "整体快照在首个原读取点调用结构体 getter：" + lowered.Failure);
+                continue;
+            }
             if (mode is "NoGetter" or "Write" or "Receiver" or "SplitReads")
             {
                 checks.True(lowered.Body is null, "结构体内部访问反例保留洞：" + mode);

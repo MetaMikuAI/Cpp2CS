@@ -89,11 +89,10 @@ public sealed partial class IntegerLowering
             var key = (read, location);
             if (structReadValues.TryGetValue(key, out var known)) return known;
             var value = AccessView(location, wholeValue: true); if (value is null) return null;
-            var native = function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single(r => r.Identity == read);
-            var definition = new ReadDefinition(native) { Value = value, Local = new(new(nextLocal++), type, 0) };
-            if (!structReads.TryGetValue(read, out var reads)) structReads.Add(read, reads = []);
-            reads.Add(definition); structReadValues.Add(key, definition.Local);
-            return definition.Local;
+            var snapshot = new LocalValue(new(nextLocal++), type, 0);
+            if (!RegisterStructRead(read, value, snapshot)) return null;
+            structReadValues.Add(key, snapshot);
+            return snapshot;
         }
         if (plan.IsZero) return new ComposedValue(type, []);
         if (plan.Merge is { } merge)
@@ -167,20 +166,24 @@ public sealed partial class IntegerLowering
         if (structMemoryValues.TryGetValue(key, out var known)) return known;
         var value = AccessView(projection.View); if (value is null) return null;
         var local = new LocalValue(new(nextLocal++), value.Type, value.Width);
-        structMemoryValues.Add(key, local);
         foreach (var read in projection.Reads)
-        {
-            var native = function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single(r => r.Identity == read);
-            if (!structReads.TryGetValue(read, out var definitions)) structReads.Add(read, definitions = []);
-            var definition = new ReadDefinition(native) { Value = value, Local = local };
-            var usePosition = position; position = native.Trace?.NativeAddress ?? position;
-            definition.Accessor = FieldAccessor(ref value, false, definition);
-            definition.Value = value;
-            position = usePosition;
-            if (failure is not null) return null;
-            definitions.Add(definition);
-        }
+            if (!RegisterStructRead(read, value, local)) return null;
+        structMemoryValues.Add(key, local);
         return local;
+    }
+    // 整体与字段投影的快照都在原读取点取值，使用同一访问器和放置证明。
+    private bool RegisterStructRead(ReadIdentity read, ManagedValue value, LocalValue local)
+    {
+        var native = function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single(r => r.Identity == read);
+        var definition = new ReadDefinition(native) { Local = local };
+        var usePosition = position; position = native.Trace?.NativeAddress ?? position;
+        definition.Accessor = FieldAccessor(ref value, false, definition);
+        definition.Value = value;
+        position = usePosition;
+        if (failure is not null) return false;
+        if (!structReads.TryGetValue(read, out var definitions)) structReads.Add(read, definitions = []);
+        definitions.Add(definition);
+        return true;
     }
     private bool CanWriteStructPath(IReadOnlyList<FieldRef> path) =>
         path.All(field => ManagedAccess.WritableField(types, method, field));
