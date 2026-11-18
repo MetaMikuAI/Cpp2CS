@@ -244,18 +244,9 @@ internal sealed partial class CilBodyWriter
         };
         var method = invocation.Method.Method;
         if (parameter?.Parameter is null || method.IsStatic || !method.Owner.IsValueType) return null;
-        var owner = method.Owner;
-        for (var slot = 0; slot < owner.VTable.Count; slot++)
-        {
-            if (owner.VTable[slot]?.Method != method) continue;
-            foreach (var (implemented, offset) in owner.InterfaceOffsets)
-            {
-                if (implemented is not DefinitionRef itf || slot < offset) continue;
-                if (itf.Definition.Methods.FirstOrDefault(m => m.Slot == slot - offset && !m.IsStatic) is not { } declared) continue;
-                var constraint = parameter.Parameter.Constraints.OfType<DefinitionRef>().FirstOrDefault(c => c.Definition == itf.Definition && c.Arguments.SequenceEqual(itf.Arguments));
-                if (constraint is not null) return (parameter, new MethodRef(declared, constraint.Arguments, []));
-            }
-        }
+        foreach (var (_, declaration, implementation) in method.Owner.InterfaceSlots().OrderBy(s => s.Slot))
+            if (implementation == method && !declaration.Method.IsStatic && parameter.Parameter.Constraints.Contains(declaration.DeclaringType))
+                return (parameter, declaration);
         return null;
     }
 

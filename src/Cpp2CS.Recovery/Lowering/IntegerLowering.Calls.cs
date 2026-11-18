@@ -254,9 +254,34 @@ public sealed partial class IntegerLowering
         if (failure is not null || d.Binding.This is not null && receiver is null) return null;
         bool virtualCall = d.Virtual || unreadCheckedCalls.Contains(call.Identity) || runtimeChecks is not null
             && context.Get(runtimeChecks.NullCheckedCalls, 0) is { IsSuccess: true } nullChecked && nullChecked.Value.Contains(call.Identity);
-        var statement = new ManagedCall(position, new(d.Method, receiver, args, virtualCall), null);
+        var invocation = new ManagedInvocation(d.Method, receiver, args, virtualCall);
+        if (!virtualCall && receiver?.Type is ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } exact }
+            && exact.Equals(d.Method.DeclaringType) && !ManagedAccess.Method(types, method.Method.Owner, d.Method, receiver.Type)
+            && InterfaceDeclaration(d.Method, exact) is { } declaration)
+            invocation = invocation with { Method = declaration, Virtual = true, Constraint = exact };
+        var statement = new ManagedCall(position, invocation, null);
         callStatements.Add(statement, d);
         return statement;
+    }
+
+    // 虚表把接口槽绑定到原生直接调用的具体实现。多个不同的可见声明指向它时保留访问洞。
+    private MethodRef? InterfaceDeclaration(MethodRef implementation, DefinitionRef receiver)
+    {
+        MethodRef? found = null;
+        foreach (var (_, open, target) in receiver.Definition.InterfaceSlots())
+        {
+            if (target != implementation.Method || open.Method.IsStatic
+                || open.Method.GenericParameters.Count != implementation.MethodArguments.Count) continue;
+            var declaration = new MethodRef(open.Method, open.TypeArguments.Select(t => t.Substitute(receiver.Arguments, [])).ToArray(),
+                implementation.MethodArguments);
+            if (!ManagedAccess.Method(types, method.Method.Owner, declaration, receiver)
+                || !declaration.Concrete(open.Method.ReturnType).Equals(implementation.Concrete(target.ReturnType))
+                || !open.Method.Parameters.Select(p => declaration.Concrete(p.Type))
+                    .SequenceEqual(target.Parameters.Select(p => implementation.Concrete(p.Type)))) continue;
+            if (found is not null && !found.Equals(declaration)) return null;
+            found = declaration;
+        }
+        return found;
     }
 
     private ManagedValue? CallArgument(BoundValue bound, TypeRef type, Point point, bool receiver = false)

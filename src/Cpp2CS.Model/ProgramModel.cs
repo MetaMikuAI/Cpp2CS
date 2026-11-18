@@ -163,6 +163,22 @@ public sealed class TypeDef
     /// <summary>(接口, 起始槽位)。</summary>
     public IReadOnlyList<(TypeRef Interface, int Offset)> InterfaceOffsets { get; internal set; } = [];
 
+    /// <summary>接口方法在本类型虚表上的绝对槽位、声明与实际实现。声明的类型实参处于本类型定义的上下文。</summary>
+    public IEnumerable<(int Slot, MethodRef Declaration, MethodDef Implementation)> InterfaceSlots()
+    {
+        foreach (var (implemented, offset) in InterfaceOffsets)
+        {
+            if (implemented is not DefinitionRef instance)
+                throw new InvalidDataException($"{this} 的接口偏移项不是类型定义：{implemented}");
+            foreach (var declaration in instance.Definition.Methods)
+            {
+                var slot = (long)offset + declaration.Slot;
+                if (declaration.Slot >= 0 && slot >= 0 && slot < VTable.Count && VTable[(int)slot] is { } target)
+                    yield return ((int)slot, new(declaration, instance.Arguments, []), target.Method);
+            }
+        }
+    }
+
     public bool IsInterface => (Attributes & TypeAttributes.Interface) != 0;
     /// <summary>C# 内建类型关键字（int、string……），其余为 null。</summary>
     public string? Keyword => Namespace != "System" || DeclaringType is not null ? null : Name switch

@@ -264,21 +264,14 @@ public sealed class Skeleton
     private void DefineOverrides(TypeDef type)
     {
         var created = types[type.Index];
-        foreach (var (@interface, offset) in type.InterfaceOffsets)
+        foreach (var (_, declaration, implementation) in type.InterfaceSlots())
         {
-            if (@interface is not DefinitionRef { Definition: var definition } instance)
-                throw new InvalidDataException($"{type} 的接口偏移项不是类型定义：{@interface}");
-            foreach (var interfaceMethod in definition.Methods)
-            {
-                if (interfaceMethod.Slot < 0 || offset + interfaceMethod.Slot >= type.VTable.Count) continue;
-                if (type.VTable[offset + interfaceMethod.Slot] is not { Method: var implementation }) continue;
-                if (implementation.Owner != type) continue;
-                var isPublic = (implementation.Attributes & SR.MethodAttributes.MemberAccessMask) == SR.MethodAttributes.Public;
-                if (isPublic && implementation.Name == interfaceMethod.Name) continue;
-                var target = methods[implementation.Index];
-                var reference = Reference(created.Module, new MethodRef(interfaceMethod, instance.Arguments, []), created, target);
-                if (!target.Overrides.Any(o => o.FullName == reference.FullName)) target.Overrides.Add(reference);
-            }
+            if (implementation.Owner != type) continue;
+            var isPublic = (implementation.Attributes & SR.MethodAttributes.MemberAccessMask) == SR.MethodAttributes.Public;
+            if (isPublic && implementation.Name == declaration.Method.Name) continue;
+            var target = methods[implementation.Index];
+            var reference = Reference(created.Module, declaration, created, target);
+            if (!target.Overrides.Any(o => o.FullName == reference.FullName)) target.Overrides.Add(reference);
         }
     }
 
