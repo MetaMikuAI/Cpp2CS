@@ -50,6 +50,8 @@ public enum VariantCondition : byte
     ReturnsVoid,
     /// <summary>返回类型不是 void。</summary>
     ReturnsValue,
+    /// <summary>没有 this 的方法，所属的类有静态构造函数：调用点先确保该类已初始化（ECMA-335 I.8.9.5）。</summary>
+    StaticMethodWithInitializer,
 }
 
 /// <summary>模板抛出的异常。</summary>
@@ -160,8 +162,10 @@ public enum StepKind : byte
     Call,
     /// <summary>调用运行时操作。</summary>
     RuntimeCall,
-    /// <summary>确保字段所属的类已初始化。</summary>
+    /// <summary>确保字段所属的类、被调方法所属的类已初始化。</summary>
     ClassInitialize,
+    /// <summary>有定义条件：翻译只在条件成立时有定义（设计 9.1）。它不是效果；共同执行在这一步之后把条件并入路径条件。</summary>
+    Require,
     /// <summary>写指令指定的局部变量、形参。</summary>
     StoreLocal, StoreArgument,
     /// <summary>条件成立时去指令的目标，否则去下一条指令。</summary>
@@ -186,6 +190,12 @@ public enum ResultKind : byte
     Subject,
 }
 
+/// <summary>
+/// 目录项上登记的实现偏差：有定义条件不成立的输入上，标准另有规定。ImplementationDefined 为真表示标准把行为留给实现
+/// （不算偏差，单独计数）；为假表示标准规定了与翻译不同的行为。
+/// </summary>
+public sealed record Deviation(string Condition, string Standard, bool ImplementationDefined);
+
 /// <summary>出处：il2cpp 对这条指令的翻译、运行时头文件里的位置、标准里的条目。</summary>
 public sealed record Provenance(string Translation, string Runtime, string Standard);
 
@@ -201,4 +211,6 @@ public sealed record CatalogEntry(string Id, string Il, string Summary, Immutabl
     public bool OperandsFromSignature { get; init; }
     /// <summary>助记符里写明的元素类型的存储位宽（ldelem.i4 的 32）；没有则为 0。</summary>
     public int ImpliedBits { get; init; }
+    /// <summary>登记的实现偏差，与模板里的有定义条件对应。</summary>
+    public ImmutableArray<Deviation> Deviations { get; init; } = [];
 }

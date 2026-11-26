@@ -9,5 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Target/Cpp2CS.Target.csproj" />
   </ItemGroup>
 </Project>

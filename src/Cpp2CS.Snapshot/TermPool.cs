@@ -87,6 +87,16 @@ public sealed class TermPool
         return Make(TermKind.Undefined, width, []);
     }
 
+    /// <summary>
+    /// 任意值：在给定位置取定的未定义位（设计 7.2）。row 不小于 0 是出现的序号，−1 是终结的条件，−2−e 是第 e 个出口；
+    /// 模板一侧的 row 是产生它的指令的偏移。由内核与模板的展开使用，前端不构造。
+    /// </summary>
+    public Term Arbitrary(int graph, BlockId block, int row, int index, long leaf, int width)
+    {
+        Require(width > 0 && block.Index >= 0 && leaf >= 0, "任意值的位宽、位置无效");
+        return Make(TermKind.Arbitrary, width, [], payload: (ulong)leaf, a: graph, b: block.Index, c: row, d: index);
+    }
+
     public Term EntryParameter(int graph, Slot slot, int width)
     {
         Require(width > 0, "位宽须为正");
@@ -217,7 +227,7 @@ public sealed class TermPool
                 }
                 // 同一个项上相邻的两段切片合成一段。
                 if (last.Kind == TermKind.Slice && part.Kind == TermKind.Slice && ReferenceEquals(last.Operands[0], part.Operands[0])
-                    && last.A + last.Width == part.A)
+                    && !last.Operands[0].HasUndefined && last.A + last.Width == part.A)
                 {
                     merged.RemoveAt(merged.Count - 1);
                     Push(Slice(last.Operands[0], last.A, last.Width + part.Width));
@@ -688,6 +698,28 @@ public sealed class TermPool
     {
         Own(t); Own(operands);
         Require(operands.Length == t.Operands.Length, "操作数个数须相同");
+        return Construct(t, operands);
+    }
+
+    /// <summary>
+    /// 照另一个项池里的项的形状，用本池的操作数构造同样的项，经过同样的规范化。常量与实体没有操作数，照值构造；
+    /// 带标记的叶子与未定义占位的含义取决于所在的图，须由调用方另行给出。
+    /// </summary>
+    public Term Transplant(Term shape, ReadOnlySpan<Term> operands)
+    {
+        Own(operands);
+        Require(operands.Length == shape.Operands.Length, "操作数个数须相同");
+        return shape.Kind switch
+        {
+            TermKind.Constant => Constant(shape.Value, shape.Width),
+            TermKind.Entity => Entity(shape.Entity, shape.Width),
+            _ when operands.Length == 0 => throw new ArgumentException($"叶子 {shape} 须由调用方给出"),
+            _ => Construct(shape, operands),
+        };
+    }
+
+    private Term Construct(Term t, ReadOnlySpan<Term> operands)
+    {
         switch (t.Kind)
         {
             case TermKind.Slice: return Slice(operands[0], t.A, t.Width);

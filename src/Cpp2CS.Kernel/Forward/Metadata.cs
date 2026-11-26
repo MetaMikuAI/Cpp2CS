@@ -12,10 +12,20 @@ public sealed record TypeShape(StackKind Kind, int StorageBits, bool Signed, Ent
 {
     /// <summary>在求值栈上的位宽。</summary>
     public int StackBits => Kind == StackKind.Int32 ? 32 : StorageBits;
+    /// <summary>存储只取 0 与 1：生成代码把 System.Boolean 写成 C++ 的 bool，调用约定规定它的取值只有这两个（设计 16.2）。</summary>
+    public bool TwoValued { get; init; }
 }
 
 /// <summary>方法的形状。Parameters 含 this（实例方法的第 0 个）；Return 为空表示 void。</summary>
-public sealed record MethodShape(EntityRef Entity, bool HasThis, ImmutableArray<TypeShape> Parameters, TypeShape? Return, VariantCondition Dispatch);
+public sealed record MethodShape(EntityRef Entity, bool HasThis, ImmutableArray<TypeShape> Parameters, TypeShape? Return, VariantCondition Dispatch)
+{
+    /// <summary>所属的类。</summary>
+    public EntityRef DeclaringType { get; init; }
+    /// <summary>所属的类有静态构造函数。</summary>
+    public bool HasInitializer { get; init; }
+    /// <summary>所属的类的初始化时机是精确的（没有 beforefieldinit）。</summary>
+    public bool PreciseInitialization { get; init; }
+}
 
 /// <summary>
 /// 字段的形状。HasInitializer：所属的类有静态构造函数；PreciseInitialization：初始化的时机是精确的（没有 beforefieldinit）。
@@ -27,7 +37,11 @@ public sealed record FieldShape(EntityRef Entity, EntityRef DeclaringType, TypeS
 /// <summary>
 /// 方法体：签名、局部变量、IL 字节、异常处理区域的个数，以及方法头是否设置了 InitLocals（局部变量在进入时清零，ECMA-335 II.25.4.4）。
 /// </summary>
-public sealed record MethodBody(MethodShape Method, ImmutableArray<TypeShape> Locals, ImmutableArray<byte> Code, int ExceptionRegions, bool InitLocals);
+public sealed record MethodBody(MethodShape Method, ImmutableArray<TypeShape> Locals, ImmutableArray<byte> Code, int ExceptionRegions, bool InitLocals)
+{
+    /// <summary>这个方法是某个类的类型初始化器（.cctor）时，是那个类；入口处“该类的初始化已触发”成立（设计 7.7）。</summary>
+    public EntityRef? InitializerOf { get; init; }
+}
 
 /// <summary>
 /// 展开时对元数据的全部需求。记号是方法体里的元数据记号；解析不了时抛出 <see cref="ExpansionException"/>。

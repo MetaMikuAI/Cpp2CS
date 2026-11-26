@@ -63,16 +63,26 @@ public sealed class CallOccurrence : Occurrence
     public int? Primitive { get; }
     public ImmutableArray<Slot> ArgumentSlots { get; }
     public ImmutableArray<Slot> ResultSlots { get; }
+    /// <summary>
+    /// 由跳转完成：控制经一条离开本函数的跳转指令到达目标，随后的返回出口取跳转那一刻的返回地址、栈指针与保存寄存器。
+    /// 把它读成“调用后返回”的前提（目标是函数入口，返回行等于入口值）由内核核对（设计 7.1）。
+    /// </summary>
+    public bool ByJump { get; }
     public ReadOnlySpan<Term> Arguments => Operands.AsSpan()[(Target is null ? 0 : 1)..];
 
     private CallOccurrence(Term? target, int? primitive, ImmutableArray<Term> operands, ImmutableArray<Slot> argumentSlots,
-        ImmutableArray<Slot> resultSlots, ImmutableArray<int> resultWidths, ulong address) : base(operands, resultWidths, address)
+        ImmutableArray<Slot> resultSlots, ImmutableArray<int> resultWidths, ulong address, bool byJump) : base(operands, resultWidths, address)
     {
         Target = target;
         Primitive = primitive;
         ArgumentSlots = argumentSlots;
         ResultSlots = resultSlots;
+        ByJump = byJump;
     }
+
+    /// <summary>由跳转完成的调用，见 <see cref="ByJump"/>。</summary>
+    public static CallOccurrence ByJumpTo(Term target, ReadOnlySpan<(Slot Slot, Term Value)> arguments,
+        ReadOnlySpan<(Slot Slot, int Width)> results, ulong address = 0) => Create(target, null, arguments, results, address, true);
 
     public static CallOccurrence To(Term target, ReadOnlySpan<(Slot Slot, Term Value)> arguments,
         ReadOnlySpan<(Slot Slot, int Width)> results, ulong address = 0) => Create(target, null, arguments, results, address);
@@ -81,7 +91,7 @@ public sealed class CallOccurrence : Occurrence
         ReadOnlySpan<(Slot Slot, int Width)> results, ulong address = 0) => Create(null, primitive, arguments, results, address);
 
     private static CallOccurrence Create(Term? target, int? primitive, ReadOnlySpan<(Slot Slot, Term Value)> arguments,
-        ReadOnlySpan<(Slot Slot, int Width)> results, ulong address)
+        ReadOnlySpan<(Slot Slot, int Width)> results, ulong address, bool byJump = false)
     {
         var operands = ImmutableArray.CreateBuilder<Term>(arguments.Length + 1);
         if (target is not null) operands.Add(target);
@@ -90,7 +100,7 @@ public sealed class CallOccurrence : Occurrence
         var resultSlots = ImmutableArray.CreateBuilder<Slot>(results.Length);
         var widths = ImmutableArray.CreateBuilder<int>(results.Length);
         foreach (var (slot, width) in results) { resultSlots.Add(slot); widths.Add(width); }
-        return new(target, primitive, operands.ToImmutable(), argumentSlots.ToImmutable(), resultSlots.ToImmutable(), widths.ToImmutable(), address);
+        return new(target, primitive, operands.ToImmutable(), argumentSlots.ToImmutable(), resultSlots.ToImmutable(), widths.ToImmutable(), address, byJump);
     }
 
     public override void WriteContent(DigestWriter writer)
@@ -102,17 +112,25 @@ public sealed class CallOccurrence : Occurrence
         foreach (var slot in ArgumentSlots) { writer.Write((int)slot.Kind); writer.Write(slot.Index); }
         writer.Write(ResultSlots.Length);
         foreach (var slot in ResultSlots) { writer.Write((int)slot.Kind); writer.Write(slot.Index); }
+        // 标记只在设置时写入：没有标记的调用，摘要与引入标记之前相同。
+        if (ByJump) writer.Write(-2);
     }
 }
 
-/// <summary>动态栈分配：分配 Size 字节，结果是这块存储的地址。</summary>
+/// <summary>
+/// 动态栈分配。带基址时：栈指针从 Base 改为 Base − Size，结果是新的栈指针，恒等于 Base − Size；
+/// 前端只陈述这次改写，不判断方向（设计 7.1）。不带基址时：分配 Size 字节，结果是这块存储的地址，与栈指针没有关系。
+/// </summary>
 public sealed class StackAllocateOccurrence : Occurrence
 {
     public override OccurrenceKind Kind => OccurrenceKind.StackAllocate;
     public override bool DefinesMemory => false;
     public Term Size => Operands[0];
+    /// <summary>改写前的栈指针；没有给出时为空。</summary>
+    public Term? Base => Operands.Length > 1 ? Operands[1] : null;
 
     public StackAllocateOccurrence(Term size, int pointerBits, ulong address = 0) : base([size], [pointerBits], address) { }
+    public StackAllocateOccurrence(Term @base, Term size, int pointerBits, ulong address = 0) : base([size, @base], [pointerBits], address) { }
 }
 
 /// <summary>
@@ -214,9 +232,20 @@ public sealed class SnapshotBuilder
         ReadOnlySpan<(Slot Slot, int Width)> results, ulong address = 0) =>
         flow.Append(block, CallOccurrence.OfPrimitive(primitive, arguments, results, address));
 
+    /// <summary>
+    /// 由跳转完成的调用（docs/前端.md 第 4 节“离开本函数的跳转”）：返回各结果槽的值；随后块须以单独的返回出口结束。
+    /// </summary>
+    public ImmutableArray<Term> TailCall(BlockId block, Term target, ReadOnlySpan<(Slot Slot, Term Value)> arguments,
+        ReadOnlySpan<(Slot Slot, int Width)> results, ulong address = 0) =>
+        flow.Append(block, CallOccurrence.ByJumpTo(target, arguments, results, address));
+
     /// <summary>动态栈分配，返回存储的地址。</summary>
     public Term StackAllocate(BlockId block, Term size, ulong address = 0) =>
         flow.Append(block, new StackAllocateOccurrence(size, PointerBits, address))[0];
+
+    /// <summary>带基址的动态栈分配：栈指针从 base 改为 base − size，返回新的栈指针。</summary>
+    public Term StackAllocate(BlockId block, Term @base, Term size, ulong address = 0) =>
+        flow.Append(block, new StackAllocateOccurrence(@base, size, PointerBits, address))[0];
 
     public void Terminate(BlockId block, Terminator terminator) => flow.Terminate(block, terminator);
     public void Jump(BlockId block, BlockId target, params ReadOnlySpan<Term> arguments) =>
@@ -269,7 +298,13 @@ public sealed class SnapshotBuilder
                 };
                 if (location is not null && location.Width != pointerBits)
                     draft.Report($"{where}：地址是 {location.Width} 位，指针是 {pointerBits} 位");
+                if (occurrence is StackAllocateOccurrence { Base: { } stackBase } && stackBase.Width != pointerBits)
+                    draft.Report($"{where}：栈基址是 {stackBase.Width} 位，指针是 {pointerBits} 位");
                 if (occurrence is not CallOccurrence call) continue;
+                // 由跳转完成的调用是块的最后一个出现，块以单独的返回出口结束。
+                if (call.ByJump && (i != occurrences.Length - 1
+                    || terminator is not { Kind: TerminatorKind.Single } || terminator.Exits[0].Kind != ExitKind.Return))
+                    draft.Report($"{where}：由跳转完成的调用须是块的最后一个出现，块以单独的返回出口结束");
                 if (call.Target is null == call.Primitive is null)
                     draft.Report($"{where}：调用须恰好给出代码地址与原语之一");
                 Slots(draft, $"{where} 的实参", call.ArgumentSlots, allowUnwind: false);
@@ -318,7 +353,9 @@ public sealed class SnapshotBuilder
                 foreach (var exit in terminator.Exits) terms.AddRange(exit.Arguments);
             }
             foreach (var term in terms)
-                if (Named(term, seen) is { } named) draft.Report($"B{b} 使用了实体或运行时属性 {named}；快照里不含事实层的项");
+                if (Named(term, seen) is { } named)
+                    draft.Report(named.Kind == TermKind.Arbitrary ? $"B{b} 使用了任意值 {named}；任意值由内核引入，前端不构造"
+                        : $"B{b} 使用了实体或运行时属性 {named}；快照里不含事实层的项");
         }
     }
 
@@ -356,7 +393,7 @@ public sealed class SnapshotBuilder
     private static Term? Named(Term term, HashSet<Term> seen)
     {
         if (!seen.Add(term)) return null;
-        if (term.Kind is TermKind.Entity or TermKind.Attribute) return term;
+        if (term.Kind is TermKind.Entity or TermKind.Attribute or TermKind.Arbitrary) return term;
         foreach (var operand in term.Operands)
             if (Named(operand, seen) is { } found) return found;
         return null;

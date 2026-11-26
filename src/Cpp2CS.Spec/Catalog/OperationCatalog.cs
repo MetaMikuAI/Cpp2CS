@@ -43,11 +43,17 @@ public static class OperationCatalog
             V(ValueOp.Select, V(ValueOp.ShiftInRange, P1, P0), V(op, P0, P1), V(ValueOp.Undefined, P0)), ResultKind.SameAsOperand,
             $"a {symbol} b（移位量由 C# 编译器先与 31 或 63 相与；生成代码不再检查）", "—", standard);
 
-    private static CatalogEntry Divide(string il, ValueOp op, string symbol, string standard) =>
-        E(il + ".int", il, "除数为零时抛出；被除数为最小值且除数为 −1 时结果未定义（生成代码是 C++ 的运算，没有溢出检查）", Integers,
-            [ThrowIf(V(ValueOp.IsZero, P1), ExceptionKind.DivideByZero)],
-            V(ValueOp.Select, V(ValueOp.Both, V(ValueOp.IsMinimum, P0), V(ValueOp.IsAllOnes, P1)), V(ValueOp.Undefined, P0), V(op, P0, P1)),
-            ResultKind.SameAsOperand, $"DivideByZeroCheck(b); a {symbol} b", $"{Codegen}: DivideByZeroCheck", standard, sameKind: true);
+    /// <summary>
+    /// 整数的除与余。翻译是 C++ 的运算：被除数为最小值且除数为 −1 时商不可表示，C++ 里除与余都没有定义，
+    /// 模板在这里带有定义条件；标准在这个输入上的规定登记为偏差（设计 9.1、16.2）。
+    /// </summary>
+    private static CatalogEntry Divide(string il, ValueOp op, string symbol, string standard, Deviation deviation) =>
+        E(il + ".int", il, "除数为零时抛出；被除数为最小值且除数为 −1 时翻译没有定义（生成代码是 C++ 的运算，没有溢出检查）", Integers,
+            [ThrowIf(V(ValueOp.IsZero, P1), ExceptionKind.DivideByZero),
+                Do(StepKind.Require, V(ValueOp.Not, V(ValueOp.Both, V(ValueOp.IsMinimum, P0), V(ValueOp.IsAllOnes, P1))))],
+            V(op, P0, P1),
+            ResultKind.SameAsOperand, $"DivideByZeroCheck(b); a {symbol} b", $"{Codegen}: DivideByZeroCheck", standard, sameKind: true)
+            with { Deviations = [deviation] };
 
     private static CatalogEntry Compare(string il, TemplateValue condition, string symbol, string standard) =>
         E(il + ".int", il, "有符号整数比较后分支", Integers, [Do(StepKind.Branch, condition)], null, ResultKind.None,
@@ -79,10 +85,12 @@ public static class OperationCatalog
             "il2cpp_codegen_multiply(a, b)", $"{Common}: il2cpp_codegen_multiply", "III.3.48 mul", sameKind: true),
         E("mul.float", "mul", "浮点乘", Floats, [], V(ValueOp.FloatMultiply, P0, P1), ResultKind.SameAsOperand,
             "il2cpp_codegen_multiply(a, b)", $"{Common}: il2cpp_codegen_multiply", "III.3.48 mul", sameKind: true),
-        Divide("div", ValueOp.SignedDivide, "/", "III.3.31 div"),
+        Divide("div", ValueOp.SignedDivide, "/", "III.3.31 div",
+            new("被除数是最小值且除数是 −1", "ECMA-335 III.3.31：结果不能表示时抛出 ArithmeticException", ImplementationDefined: false)),
         E("div.float", "div", "浮点除，不抛出", Floats, [], V(ValueOp.FloatDivide, P0, P1), ResultKind.SameAsOperand,
             "a / b", "—", "III.3.31 div", sameKind: true),
-        Divide("rem", ValueOp.SignedRemainder, "%", "III.3.55 rem"),
+        Divide("rem", ValueOp.SignedRemainder, "%", "III.3.55 rem",
+            new("被除数是最小值且除数是 −1", "ECMA-335 III.3.55：可以抛出 ArithmeticException，也可以不抛出", ImplementationDefined: true)),
         E("and", "and", "按位与", Integers, [], V(ValueOp.And, P0, P1), ResultKind.SameAsOperand, "a & b", "—", "III.3.3 and", sameKind: true),
         E("xor", "xor", "按位异或", Integers, [], V(ValueOp.Xor, P0, P1), ResultKind.SameAsOperand, "a ^ b", "—", "III.3.67 xor", sameKind: true),
         E("neg.int", "neg", "整数取负，回绕", [StackClass.Integer], [], V(ValueOp.Negate, P0), ResultKind.SameAsOperand, "-a", "—", "III.3.50 neg"),
@@ -165,8 +173,13 @@ public static class OperationCatalog
             "return v", "—", "III.3.57 ret；III.1.6", condition: VariantCondition.ReturnsValue),
 
         // ---- 调用 ----
-        E("call.static", "call", "调用没有 this 的方法", None, [new(StepKind.Call, [])], Loaded(S(0)), ResultKind.Subject,
+        E("call.static", "call", "调用没有 this 的方法，所属的类没有静态构造函数", None, [new(StepKind.Call, [])], Loaded(S(0)), ResultKind.Subject,
             "M(x…, method)", "—", "III.3.19 call", condition: VariantCondition.StaticMethod, fromSignature: true),
+        E("call.static.init", "call", "调用没有 this 的方法，先确保所属的类已初始化", None,
+            [Do(StepKind.ClassInitialize), new(StepKind.Call, [])], Loaded(S(1)), ResultKind.Subject,
+            "il2cpp_codegen_runtime_class_init_inline(T_il2cpp_TypeInfo_var); M(x…, method)",
+            $"{Codegen}: il2cpp_codegen_runtime_class_init_inline", "III.3.19 call；I.8.9.5",
+            condition: VariantCondition.StaticMethodWithInitializer, fromSignature: true),
         E("callvirt.unique", "callvirt", "调用目标唯一的实例方法", None, [ThrowIfNull(P0), new(StepKind.Call, [])], Loaded(S(1)), ResultKind.Subject,
             "NullCheck(o); M(o, x…, method)", $"{Codegen}: NullCheck", "III.4.2 callvirt", condition: VariantCondition.UniqueTarget, fromSignature: true),
         E("callvirt.virtual", "callvirt", "经虚表调用类上的虚方法", None,

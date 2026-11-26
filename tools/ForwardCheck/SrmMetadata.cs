@@ -63,6 +63,10 @@ internal sealed class SrmMetadata : IDisposable
     private readonly Dictionary<(Module, TypeDefinitionHandle), (int Size, int Alignment, Dictionary<FieldDefinitionHandle, int> Offsets)> layouts = [];
     private readonly HashSet<(Module, TypeDefinitionHandle)> layingOut = [];
 
+    /// <summary>实体到定义的坐标：方法是（模块，方法定义的记号）；字段是（模块，所属类型的名字，在类型里的序号，字段名）。供原生一侧的核对把实体对到元数据模型上。</summary>
+    public Dictionary<EntityRef, (string Module, int Token)> MethodDefinitions { get; } = [];
+    public Dictionary<EntityRef, (string Module, string Type, int Ordinal, string Name)> FieldDefinitions { get; } = [];
+
     public SrmMetadata(string directory, int pointerBits)
     {
         this.directory = directory;
@@ -146,6 +150,15 @@ internal sealed class SrmMetadata : IDisposable
         return "";
     }
 
+    /// <summary>按（模块，类型的全名）取类型的实体；全名的写法同 TypeName（嵌套类型用斜线）。找不到时为空。</summary>
+    public EntityRef? TypeEntity(string moduleName, string typeName)
+    {
+        if (Load(moduleName) is not { } module) return null;
+        foreach (var handle in module.Md.TypeDefinitions)
+            if (TypeName(module, handle) == typeName) return new(EntityKind.Type, Hash(TypeIdentity(module, handle)));
+        return null;
+    }
+
     public (Module Module, TypeDefinitionHandle Handle) Resolve(Module module, TypeReferenceHandle handle)
     {
         var reference = module.Md.GetTypeReference(handle);
@@ -210,7 +223,7 @@ internal sealed class SrmMetadata : IDisposable
 
     private TypeShape? Primitive(string name) => name switch
     {
-        "Boolean" => new(StackKind.Int32, 8, false, default),
+        "Boolean" => new(StackKind.Int32, 8, false, default) { TwoValued = true },
         "Char" => new(StackKind.Int32, 16, false, default),
         "SByte" => new(StackKind.Int32, 8, true, default),
         "Byte" => new(StackKind.Int32, 8, false, default),
@@ -320,8 +333,11 @@ internal sealed class SrmMetadata : IDisposable
         var owner = definition.GetDeclaringType();
         var ownerDefinition = module.Md.GetTypeDefinition(owner);
         var signature = definition.DecodeSignature(new Provider(this, module), arguments);
-        return Shape(module, owner, ownerDefinition, definition.Attributes, module.Md.GetString(definition.Name), signature,
+        var shape = Shape(module, owner, ownerDefinition, definition.Attributes, module.Md.GetString(definition.Name), signature,
             Convert.ToHexString(module.Md.GetBlobBytes(definition.Signature)) + suffix);
+        if (suffix.Length == 0 && ownerDefinition.GetGenericParameters().Count == 0)
+            MethodDefinitions[shape.Entity] = (module.Name, MetadataTokens.GetToken(handle));
+        return shape;
     }
 
     private MethodShape Shape(Module module, TypeDefinitionHandle owner, TypeDefinition ownerDefinition, MethodAttributes attributes,
@@ -344,7 +360,15 @@ internal sealed class SrmMetadata : IDisposable
                 && (ownerDefinition.Attributes & TypeAttributes.Sealed) == 0 && !isValue ? VariantCondition.ClassVirtual
             : VariantCondition.UniqueTarget;
         var entity = new EntityRef(EntityKind.Method, Hash($"M:{TypeIdentity(module, owner)}::{name}:{signatureText}"));
-        return new MethodShape(entity, instance, parameters.ToImmutable(), signature.ReturnType, dispatch);
+        bool hasInitializer = false;
+        foreach (var methodHandle in ownerDefinition.GetMethods())
+            hasInitializer |= module.Md.GetString(module.Md.GetMethodDefinition(methodHandle).Name) == ".cctor";
+        return new MethodShape(entity, instance, parameters.ToImmutable(), signature.ReturnType, dispatch)
+        {
+            DeclaringType = new(EntityKind.Type, Hash(TypeIdentity(module, owner))),
+            HasInitializer = hasInitializer,
+            PreciseInitialization = (ownerDefinition.Attributes & TypeAttributes.BeforeFieldInit) == 0,
+        };
     }
 
     /// <summary>成员引用的所属类型：定义所在的模块与句柄，以及类型的泛型实参。</summary>
@@ -403,6 +427,7 @@ internal sealed class SrmMetadata : IDisposable
                 // 在定义里按名称与形参个数找到方法，取它的属性。
                 var ownerDefinition = target.Md.GetTypeDefinition(owner);
                 MethodAttributes? attributes = null;
+                var matched = new List<MethodDefinitionHandle>();
                 foreach (var candidateHandle in ownerDefinition.GetMethods())
                 {
                     var candidate = target.Md.GetMethodDefinition(candidateHandle);
@@ -413,10 +438,15 @@ internal sealed class SrmMetadata : IDisposable
                     if (blob.ReadCompressedInteger() != signature.ParameterTypes.Length || header.IsInstance != signature.Header.IsInstance) continue;
                     if (attributes is not null && attributes != candidate.Attributes) throw Unresolved($"方法 {name} 有属性不同的重载，按个数分不开");
                     attributes = candidate.Attributes;
+                    matched.Add(candidateHandle);
                 }
                 if (attributes is null) throw Unresolved($"方法 {name}");
-                return Shape(target, owner, ownerDefinition, attributes.Value, name, signature,
+                var resolved = Shape(target, owner, ownerDefinition, attributes.Value, name, signature,
                     Convert.ToHexString(module.Md.GetBlobBytes(reference.Signature)) + typeSuffix + suffix);
+                // 只在名称与形参个数定出唯一的定义、且不涉及泛型实参时记下坐标。
+                if (matched.Count == 1 && typeSuffix.Length == 0 && suffix.Length == 0)
+                    MethodDefinitions[resolved.Entity] = (target.Name, MetadataTokens.GetToken(matched[0]));
+                return resolved;
             }
             default:
                 throw Unresolved($"方法记号 {handle.Kind}");
@@ -455,6 +485,13 @@ internal sealed class SrmMetadata : IDisposable
         if (!isStatic && BaseName(target, declaringDefinition) == "System.ValueType" && declaringDefinition.GetGenericParameters().Count == 0)
             offset = Layout(target, declaring).Offsets[fieldHandle];
         string identity = $"F:{TypeIdentity(target, declaring)}::{target.Md.GetString(field.Name)}";
+        int ordinal = 0;
+        foreach (var other in declaringDefinition.GetFields())
+        {
+            if (other == fieldHandle) break;
+            ordinal++;
+        }
+        FieldDefinitions[new(EntityKind.Field, Hash(identity))] = (target.Name, TypeName(target, declaring), ordinal, target.Md.GetString(field.Name));
         return new FieldShape(new(EntityKind.Field, Hash(identity)), new(EntityKind.Type, Hash(TypeIdentity(target, declaring))), type, isStatic,
             hasInitializer, (declaringDefinition.Attributes & TypeAttributes.BeforeFieldInit) == 0, offset);
     }
@@ -487,7 +524,10 @@ internal sealed class SrmMetadata : IDisposable
             locals = [.. decoded.Select(local => local ?? throw Unresolved("void 局部变量"))];
         }
         var code = block.GetILContent();
-        return new MethodBody(Method(module, token), locals, code, block.ExceptionRegions.Length, block.LocalVariablesInitialized);
+        var shape = Method(module, token);
+        bool initializer = module.Md.GetString(definition.Name) == ".cctor" && (definition.Attributes & MethodAttributes.Static) != 0;
+        return new MethodBody(shape, locals, code, block.ExceptionRegions.Length, block.LocalVariablesInitialized)
+            { InitializerOf = initializer ? shape.DeclaringType : null };
     }
 
     /// <summary>某个模块上的元数据视图。</summary>

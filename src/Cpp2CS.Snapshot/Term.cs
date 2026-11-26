@@ -28,6 +28,11 @@ public enum TermKind : byte
     Entity,
     /// <summary>规格登记的具名纯函数（运行时属性）。由事实层引入。</summary>
     Attribute,
+    /// <summary>
+    /// 任意值：取定了身份的未定义位，任意但在所在路径上固定。身份是位置（图，块，行，行内序号，第几处）。
+    /// 快照一侧由内核在读取图的各行时引入；模板一侧在产生“结果未规定”的那一步引入。前端不构造。
+    /// </summary>
+    Arbitrary,
 }
 
 /// <summary>运算符。整数运算按位型定义，对有无符号的解释写在运算符里；浮点运算作用在 IEEE 754 位型上。</summary>
@@ -129,7 +134,9 @@ public sealed class Term
     /// <summary>切片的起始位。</summary>
     public int Offset => Kind == TermKind.Slice ? A : throw Wrong(TermKind.Slice);
     /// <summary>所属的图号：0 是被恢复方法的快照，其余由模板一侧的图使用。</summary>
-    public int Graph => Kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result ? A : throw Wrong(TermKind.BlockParameter);
+    public int Graph => Tagged ? A : throw Wrong(TermKind.BlockParameter);
+    /// <summary>任意值的位置：块、行（不小于 0 是出现的序号，−1 是终结的条件，−2−e 是第 e 个出口；模板一侧是指令的偏移）、行内序号、第几处。</summary>
+    public (BlockId Block, int Row, int Index, long Leaf) Site => Kind == TermKind.Arbitrary ? (new(B), C, D, unchecked((long)(ulong)Payload)) : throw Wrong(TermKind.Arbitrary);
     /// <summary>入口参数的槽位。</summary>
     public Slot Slot => Kind == TermKind.EntryParameter ? new((SlotKind)B, C) : throw Wrong(TermKind.EntryParameter);
     /// <summary>块参数所属的块，或出现的结果所属的块。</summary>
@@ -148,7 +155,7 @@ public sealed class Term
     private InvalidOperationException Wrong(TermKind expected) => new($"项的种类是 {Kind}，不是 {expected}");
 
     /// <summary>项是否带图号：入口参数、块参数与出现的结果。图号不进入结构散列与摘要。</summary>
-    internal bool Tagged => Kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result;
+    internal bool Tagged => Kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result or TermKind.Arbitrary;
 
     /// <summary>
     /// 结构上的全序：先比结构散列，散列相同时依次比种类、位宽、运算、负载、各整数字段与操作数，图号最后比。
@@ -201,6 +208,7 @@ public sealed class Term
             case TermKind.BlockParameter: text.Append(Block).Append(".参").Append(ParameterIndex).Append(':').Append(Width); return;
             case TermKind.Result: text.Append("结果(").Append(Occurrence).Append('#').Append(ResultIndex).Append("):").Append(Width); return;
             case TermKind.Entity: text.Append(Entity); return;
+            case TermKind.Arbitrary: text.Append("任意@B").Append(B).Append('.').Append(C).Append('.').Append(D).Append('#').Append((ulong)Payload).Append(':').Append(Width); return;
             case TermKind.Slice: Operands[0].Print(text, depth + 1); text.Append('[').Append(A).Append("+:").Append(Width).Append(']'); return;
         }
         text.Append(Kind switch

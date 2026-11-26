@@ -5,7 +5,12 @@ using Cpp2CS.Spec.Catalog;
 namespace Cpp2CS.Kernel.Forward;
 
 /// <summary>模板一侧的效果的种类。</summary>
-public enum EffectKind : byte { Read, Write, Call, RuntimeCall, ClassInitialize, ThrowIf }
+public enum EffectKind : byte
+{
+    Read, Write, Call, RuntimeCall, ClassInitialize, ThrowIf,
+    /// <summary>有定义条件（设计 9.1）：不是效果，操作数是条件。</summary>
+    Require,
+}
 
 /// <summary>
 /// 模板一侧的一个效果：目录项的效果模板里的一步，形参已经换成实参。
@@ -26,6 +31,10 @@ public sealed class TemplateEffect : IFlowOccurrence
     public bool Indirect { get; init; }
     /// <summary>类初始化的时机是精确的。</summary>
     public bool Precise { get; init; }
+    /// <summary>读写字段：字段所属的类。</summary>
+    public EntityRef? Owner { get; init; }
+    /// <summary>调用：被调方法的形状（各形参与返回值的类别与存储位宽）。追溯与对照用，身份仍是 Entity。</summary>
+    public MethodShape? Signature { get; init; }
     /// <summary>产生这个效果的目录项。</summary>
     public string Entry { get; }
     /// <summary>产生这个效果的指令在方法体里的偏移。</summary>

@@ -244,8 +244,7 @@ public sealed class DigestWriter
         Write((int)term.Op);
         Write(term.Payload);
         // 图号不进入摘要：同一段代码在不同的图号下摘要相同。
-        bool tagged = term.Kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result;
-        Write(tagged ? 0 : term.A);
+        Write(term.Tagged ? 0 : term.A);
         Write(term.B);
         Write(term.C);
         Write(term.D);

@@ -210,6 +210,9 @@ public sealed class IlExpander
         public TypeShape? Subject;
         public StackValue[] Operands = [];
         public Term?[] Steps = [];
+        public BlockId Block;
+        /// <summary>这条指令已经产生的“结果未规定”的个数：任意值按产生的位置区分（设计 7.2）。</summary>
+        public int Unspecified;
     }
 
     /// <summary>应用一条指令。返回真表示块已经终结。</summary>
@@ -222,7 +225,7 @@ public sealed class IlExpander
         if (candidates.Count == 0)
             throw new ExpansionException("目录里没有这条指令", opcode.Canonical, instruction.Offset);
 
-        var context = new Context { Instruction = instruction };
+        var context = new Context { Instruction = instruction, Block = block };
         int token = unchecked((int)instruction.Operand);
         switch (opcode.Operand)
         {
@@ -286,12 +289,12 @@ public sealed class IlExpander
                 {
                     int width = context.Subject?.StorageBits ?? throw Missing(instruction, "被读位置的类型");
                     context.Steps[s] = Emit(block, new(EffectKind.Read, [.. values], [width], chosen.Id, instruction.Offset)
-                        { Location = step.Location, Entity = context.Field?.Entity })[0];
+                        { Location = step.Location, Entity = context.Field?.Entity, Owner = context.Field?.DeclaringType })[0];
                     break;
                 }
                 case StepKind.Write:
                     Emit(block, new(EffectKind.Write, [.. values], [], chosen.Id, instruction.Offset)
-                        { Location = step.Location, Entity = context.Field?.Entity });
+                        { Location = step.Location, Entity = context.Field?.Entity, Owner = context.Field?.DeclaringType });
                     break;
                 case StepKind.Call:
                 {
@@ -300,7 +303,7 @@ public sealed class IlExpander
                     for (int i = 0; i < context.Operands.Length; i++) operands.Add(Store(context.Operands[i].Value, method.Parameters[i], instruction));
                     ImmutableArray<int> results = method.Return is { } returned ? [returned.StorageBits] : [];
                     var produced = Emit(block, new(EffectKind.Call, [.. operands], results, chosen.Id, instruction.Offset)
-                        { Entity = method.Entity, Indirect = step.Indirect });
+                        { Entity = method.Entity, Indirect = step.Indirect, Signature = method });
                     if (produced.Length > 0) context.Steps[s] = produced[0];
                     break;
                 }
@@ -310,11 +313,18 @@ public sealed class IlExpander
                     break;
                 case StepKind.ClassInitialize:
                 {
-                    var field = context.Field ?? throw Missing(instruction, "字段");
+                    // 被初始化的类：字段所属的类，或被调方法所属的类。
+                    if (context.Field is null && context.Method is null) throw Missing(instruction, "字段或方法");
                     Emit(block, new(EffectKind.ClassInitialize, [], [], chosen.Id, instruction.Offset)
-                        { Entity = field.DeclaringType, Precise = field.PreciseInitialization });
+                    {
+                        Entity = context.Field?.DeclaringType ?? context.Method!.DeclaringType,
+                        Precise = context.Field?.PreciseInitialization ?? context.Method!.PreciseInitialization,
+                    });
                     break;
                 }
+                case StepKind.Require:
+                    Emit(block, new(EffectKind.Require, [values[0]], [], chosen.Id, instruction.Offset));
+                    break;
                 case StepKind.StoreLocal: state.Locals[instruction.Operand] = values[0]; break;
                 case StepKind.StoreArgument: state.Arguments[instruction.Operand] = values[0]; break;
                 case StepKind.Jump:
@@ -383,6 +393,8 @@ public sealed class IlExpander
         VariantCondition.InstanceField => context.Field is { IsStatic: false },
         VariantCondition.ReturnsVoid => context.Subject is null,
         VariantCondition.ReturnsValue => context.Subject is not null,
+        VariantCondition.StaticMethod => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: false },
+        VariantCondition.StaticMethodWithInitializer => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: true },
         _ => context.Method?.Dispatch == condition,
     };
 
@@ -423,7 +435,8 @@ public sealed class IlExpander
             case ValueOp.Argument: return state.Arguments[instruction.Operand];
             case ValueOp.Local: return state.Locals[instruction.Operand];
             case ValueOp.Null: return terms.Zero(pointerBits);
-            case ValueOp.Undefined: return terms.Undefined(X(0).Width);
+            // 结果未规定：在产生它的这一步取得身份（图，块，指令偏移，第几个）。
+            case ValueOp.Undefined: return terms.Arbitrary(flow.Graph, context.Block, instruction.Offset, 0, context.Unspecified++, X(0).Width);
             case ValueOp.Add: return terms.Add(X(0), X(1));
             case ValueOp.Sub: return terms.Sub(X(0), X(1));
             case ValueOp.Mul: return terms.Mul(X(0), X(1));

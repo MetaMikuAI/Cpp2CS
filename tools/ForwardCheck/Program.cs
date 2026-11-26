@@ -13,6 +13,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 ///   snapshot                                            按前端约定抄写一个语料用例的原生代码，构造快照
 ///   il --cases 用例清单.json --assemblies 程序集目录     读语料的真实 IL，按操作目录展开，并在展开的图上核对合流的三个操作
 ///   counterexamples --assemblies 程序集目录              逐项核对有出处的反例（核心库取自程序集目录）
+///   native --cases … --assemblies … --binary … --metadata … --symbols …   原生一侧的正向核对：真实 IL 的展开与原生快照共同执行
 /// </summary>
 internal static class Program
 {
@@ -30,6 +31,10 @@ internal static class Program
                 return SnapshotExample.Run();
             case "counterexamples" when options.ContainsKey("--assemblies"):
                 return Counterexamples.Run(options["--assemblies"]);
+            case "native" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies") && options.ContainsKey("--binary")
+                && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
+                return NativeCheck.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
+                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""));
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -44,6 +49,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录");
+        Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
         return 2;
     }
 
