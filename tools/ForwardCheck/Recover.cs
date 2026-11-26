@@ -54,6 +54,7 @@ internal static partial class Recover
         var byReason = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var refuted = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var rows = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var assumed = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
         var lines = new List<string>();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         foreach (var item in document.RootElement.EnumerateArray())
@@ -103,6 +104,11 @@ internal static partial class Recover
                 foreach (string row in outcome.Certificate?.Rows ?? [])
                 {
                     if (!rows.TryGetValue(row, out var users)) rows[row] = users = [];
+                    users.Add(name);
+                }
+                foreach (string assumption in outcome.Certificate?.Assumptions ?? [])
+                {
+                    if (!assumed.TryGetValue(assumption, out var users)) assumed[assumption] = users = [];
                     users.Add(name);
                 }
                 if (outcome.Refutation is { } refutation) Tally(refuted, Reason(refutation.Layer.ToString(), refutation.Obligation));
@@ -183,6 +189,7 @@ internal static partial class Recover
         Console.WriteLine($"  独立洞按层与义务：{string.Join("，", byReason.Select(k => $"{k.Key} {k.Value}"))}");
         Console.WriteLine($"  被反驳的声明按层与义务：{string.Join("，", refuted.Select(k => $"{k.Key} {k.Value}"))}");
         Console.WriteLine($"  用到的独立关系的行：{string.Join("，", rows.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
+        Console.WriteLine($"  凭据用到的有定义条件：{string.Join("，", assumed.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
         foreach (string line in lines.Order(StringComparer.Ordinal)) Console.WriteLine(line);
 
         int pairs = 0, rejected = 0, number = 3;

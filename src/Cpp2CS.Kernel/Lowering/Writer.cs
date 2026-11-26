@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Facts;
 using Cpp2CS.Kernel.Forward;
+using Cpp2CS.Kernel.Sources;
 using Cpp2CS.Snapshot;
 using Cpp2CS.Spec.Catalog;
 
@@ -12,7 +13,7 @@ namespace Cpp2CS.Kernel;
 /// 每条声明在落点处写出目录项的指令；项成为表达式，声明的定义与没有取定的块参数成为局部变量。
 /// 每个表达式写出之后按目录展开回项，与要表达的项相同才算可得（值可得，设计 9.7）；写不出的地方是洞。
 /// 选择用它试写来数洞、核对值可得；下降用它写出选定的解释。
-/// 它不走查路径，不解释合流，不判断效果能否越过。
+/// 它不走查路径，不自己解释合流（核对写出的表达式时用内核的分情况），不判断效果能否越过。
 /// </summary>
 internal sealed class Writer
 {
@@ -303,7 +304,25 @@ internal sealed class Writer
         var condition = graph.Condition(block)!;
         int whenTrue = 0, whenFalse = 1;
         while (condition is { Kind: TermKind.Operation, Op: Op.Not }) (condition, whenTrue, whenFalse) = (condition.Operands[0], whenFalse, whenTrue);
-        // 条件的写法：比较成为带条件的转移（目录里的 brfalse、blt、bne.un、cgt.un）。
+        foreach (var (body, opcode, swap) in Conditions(condition))
+        {
+            int taken = swap ? whenFalse : whenTrue, other = swap ? whenTrue : whenFalse, trampoline = labels++;
+            code.AddRange(body);
+            Emit(opcode, target: trampoline);
+            Leave(new EdgeId(block, other));
+            Emit(".label", trampoline);
+            Leave(new EdgeId(block, taken));
+            return;
+        }
+        ValueHole($"B{block.Index} 的分支条件", condition);
+    }
+
+    /// <summary>
+    /// 条件的写法：比较成为带条件的转移（目录里的 brfalse、blt、bne.un、cgt.un 与 brtrue）。给出转移之前的指令、转移的助记符，
+    /// 以及转移是否在条件不成立时发生。每种写法都按目录展开回项核对，与条件（或它的否定）相同才给出。条件已去掉外层的取反。
+    /// </summary>
+    private IEnumerable<(List<ManagedInstruction> Body, string Opcode, bool Swap)> Conditions(Term condition)
+    {
         var forms = new List<(Term[] Operands, string[] Middle, string Opcode, bool Swap)>();
         if (condition is { Kind: TermKind.Operation, Op: Op.Eq })
         {
@@ -335,15 +354,8 @@ internal sealed class Writer
             foreach (string instruction in middle) body.Add(new(instruction));
             var expected = swap ? terms.Not(condition) : condition;
             if (Denote(body, opcode) is not { } denoted || !Same(denoted, expected)) continue;
-            int taken = swap ? whenFalse : whenTrue, other = swap ? whenTrue : whenFalse, trampoline = labels++;
-            code.AddRange(body);
-            Emit(opcode, target: trampoline);
-            Leave(new EdgeId(block, other));
-            Emit(".label", trampoline);
-            Leave(new EdgeId(block, taken));
-            return;
+            yield return (body, opcode, swap);
         }
-        ValueHole($"B{block.Index} 的分支条件", condition);
     }
 
     private void ValueHole(string what, Term value)
@@ -434,11 +446,24 @@ internal sealed class Writer
     /// <summary>项成为表达式。写出之后按目录展开回项，与原来的项相同才算数。</summary>
     private Expr? Express(Term term, bool reference)
     {
-        if (cache.TryGetValue((term, reference), out var known) && (known is null || known.Code.All(i => i.Opcode != "ldloc" || Available((int)i.Operand)))) return known;
+        if (cache.TryGetValue((term, reference), out var known) && (known is null || known.Code.All(i => i.Opcode != "ldloc" || Available((int)i.Operand))))
+            return known is null ? null : Relabel(known);
         var built = Build(term, reference, 0);
         if (built is not null && (Denote(built.Code, null) is not { } denoted || !Same(denoted, term))) built = null;
         cache[(term, reference)] = built;
         return built;
+    }
+
+    /// <summary>方法体里每个标号只出现一次：再次取用的表达式里的标号换成新的。</summary>
+    private Expr Relabel(Expr expression)
+    {
+        if (!expression.Code.Any(i => i.Opcode == ".label")) return expression;
+        var renamed = new Dictionary<long, int>();
+        int Rename(long label) => renamed.TryGetValue(label, out int fresh) ? fresh : renamed[label] = labels++;
+        return expression with
+        {
+            Code = [.. expression.Code.Select(i => i.Opcode == ".label" ? i with { Operand = Rename(i.Operand) } : i.Target >= 0 ? i with { Target = Rename(i.Target) } : i)],
+        };
     }
 
     /// <summary>局部变量在当前程序点有没有值：声明的定义从它的落点起可用（落点支配使用处，或同一程序点上已经写出）。</summary>
@@ -524,8 +549,27 @@ internal sealed class Writer
                     return new([.. value.Code, new("ldc.i4", low.Width), new("shl")], value.Type);
                 return null;
             }
+            case TermKind.Select:
+                return Choose(term.Operands[0], term.Operands[1], term.Operands[2]);
             default:
                 return null;
+        }
+
+        // 选择：IL 里没有选择指令，写成带栈上汇合的转移（ECMA-335 III.1.8.1.3：汇合处各条入边的栈状态合并）。
+        // 条件的转移去往一支，另一支顺序执行后转到汇合处；两支在栈上的类别须相同。条件的写法与分支相同。
+        Expr? Choose(Term condition, Term whenTrue, Term whenFalse)
+        {
+            while (condition is { Kind: TermKind.Operation, Op: Op.Not }) (condition, whenTrue, whenFalse) = (condition.Operands[0], whenFalse, whenTrue);
+            if (Build(whenTrue, reference, depth + 1) is not { } a || Build(whenFalse, reference, depth + 1) is not { } b || a.Type.Kind != b.Type.Kind) return null;
+            var type = a.Null ? b.Type : b.Null || a.Type.Entity == b.Type.Entity ? a.Type : a.Type with { Entity = default };
+            foreach (var (body, opcode, swap) in Conditions(condition))
+            {
+                var (taken, fallthrough) = swap ? (b, a) : (a, b);
+                int target = labels++, join = labels++;
+                return new([.. body, new(opcode, Target: target), .. fallthrough.Code, new("br", Target: join),
+                    new(".label", target), .. taken.Code, new(".label", join)], type, a.Null && b.Null);
+            }
+            return null;
         }
 
         Expr? Shift(Term shift, string opcode)
@@ -569,33 +613,48 @@ internal sealed class Writer
     /// <summary>
     /// 一段表达式代表哪个项：把它放进一个只含这段指令的方法体，按目录展开，读出栈顶的值（branch 给出时读出转移的条件），
     /// 再把形参与局部变量换回它们代表的原生一侧的项。展开出效果的不是表达式。
+    /// 表达式可以含转移（选择的写法）。展开之后，从最后一个块（值是它的参数）出发，按内核的分情况（设计 7.3）读出各情况的取值：
+    /// 一个情况且没有条件时就是这个值；两个情况、各只有同一个分支条件的一真一假时，是按这个条件的选择。其余的不当作表达式。
     /// </summary>
-    private Term? Denote(IReadOnlyList<ManagedInstruction> expression, string? branch)
+    private Term? Denote(IReadOnlyList<ManagedInstruction> expression, string? branch) =>
+        Denote(expression, branch, (argument, index) => argument ? (host.Parameters[index], graph.Stored[index])
+            : localTypes[index] is { } type ? (type, localTerms[index]) : null, metadata, terms, pointerBits);
+
+    /// <summary>同上；variable 给出 ldarg（真）或 ldloc（假）的第几个变量的类型与它代表的项，类型未知时为空。</summary>
+    internal static Term? Denote(IReadOnlyList<ManagedInstruction> expression, string? branch, Func<bool, int, (TypeShape Type, Term Value)?> variable,
+        IMetadataView metadata, TermPool terms, int pointerBits)
     {
         var parameters = new List<TypeShape>();
         var bindings = new List<Term>();
         var slots = new Dictionary<(bool, int), int>();
+        var marks = new Dictionary<long, int>();
+        // 表达式里的标号换成从 1 起的编号，0 留给末尾。
+        int Mark(long label) => marks.TryGetValue(label, out int known) ? known : marks[label] = marks.Count + 1;
         var il = new IlWriter();
         foreach (var instruction in expression)
         {
-            if (instruction.Opcode is "ldarg" or "ldloc")
+            if (instruction.Opcode == ".label") il.Mark(Mark(instruction.Operand));
+            else if (instruction.Target >= 0) il.Branch(instruction.Opcode, Mark(instruction.Target));
+            else if (instruction.Opcode is "ldarg" or "ldloc")
             {
                 bool isArgument = instruction.Opcode == "ldarg";
                 int index = (int)instruction.Operand;
                 if (!slots.TryGetValue((isArgument, index), out int slot))
                 {
-                    if (!isArgument && localTypes[index] is null) return null;
+                    if (variable(isArgument, index) is not { } known) return null;
                     slot = slots[(isArgument, index)] = parameters.Count;
-                    parameters.Add(isArgument ? host.Parameters[index] : localTypes[index]!);
-                    bindings.Add(isArgument ? graph.Stored[index] : localTerms[index]);
+                    parameters.Add(known.Type);
+                    bindings.Add(known.Value);
                 }
                 il.Variable("ldarg", slot);
             }
             else if (instruction.Opcode == "ldc.i4") il.Int32("ldc.i4", (int)instruction.Operand);
             else il.Plain(instruction.Opcode);
         }
-        if (branch is null) { il.Branch("br", 0); il.Mark(0); il.Plain("pop"); il.Plain("ret"); }
-        else { il.Branch(branch, 0); il.Plain("ret"); il.Mark(0); il.Plain("ret"); }
+        // 末尾：值的写法转到只做出栈与返回的块，转移的写法以给定的转移结束。last 是最后一个块的起点不超过的偏移。
+        int last;
+        if (branch is null) { il.Branch("br", 0); last = il.Offset; il.Mark(0); il.Plain("pop"); il.Plain("ret"); }
+        else { last = il.Offset; il.Branch(branch, 0); il.Plain("ret"); il.Mark(0); il.Plain("ret"); }
         var body = new MethodBody(new MethodShape(default, false, [.. parameters], null, VariantCondition.StaticMethod), [], il.Build(), 0, true);
         Expansion expansion;
         try
@@ -607,20 +666,41 @@ internal sealed class Writer
             return null;
         }
         var flow = expansion.Graph;
-        var first = new BlockId(expansion.BlockOffsets.IndexOf(0));
         if (flow.Blocks.Any(b => b.Occurrences.Length > 0)) return null;
-        var terminator = flow.Terminator(first);
-        Term value = branch is null ? terminator.Exits[0].Arguments[^1] : terminator.Condition!;
-        // 第一个块的参数是入口块传来的各形参；形参再换成它们代表的项。
+        var offsets = expansion.BlockOffsets;
+        int final = -1;
+        for (int b = 0; b < offsets.Length; b++)
+            if (offsets[b] >= 0 && offsets[b] <= last && (final < 0 || offsets[b] > offsets[final])) final = b;
+        if (final < 0) return null;
+        var block = new BlockId(final);
+        var row = flow.Parameters(block);
+        Term value = branch is null ? row[^1] : flow.Terminator(block).Condition!;
+
+        // 从最后一个块的参数出发分情况。形参在每个块里都是参数，有形参时展开一直到入口块，各情况的取值与条件只含入口的形参；
+        // 没有形参时取值只含常量，在哪个块停下都一样。
+        var table = new ValueSources(flow, terms).SplitCases(new ProgramPoint(block, 0), [value, .. row]);
+        if (!table.Complete || table.Cases.Length is not (1 or 2)) return null;
         var map = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
-        var entered = flow.Terminator(flow.Entry).Exits[0].Arguments;
-        var inside = flow.Parameters(first);
         foreach (var parameter in flow.EntryParameters) map[parameter] = bindings[parameter.Slot.Index];
-        for (int i = 0; i < inside.Length; i++) map[inside[i]] = Substitute(entered[i], map);
-        return Substitute(value, map);
+        if (table.Cases.Length == 1) return table.Cases[0].Conditions.IsEmpty ? Substitute(terms, table.Cases[0].Terms[0], map) : null;
+        Term? test = null;
+        var arms = new Term?[2];
+        foreach (var item in table.Cases)
+        {
+            if (item.Origin != flow.Entry) return null;
+            // 情况的条件先列选择条件，再列所经各条入边的文字：只许有一条，且是一个二路分支的条件。
+            int branches = item.Edges.Count(e => flow.Terminator(e.Source).Kind != TerminatorKind.Single);
+            if (item.Conditions.Length != 1 || branches != 1 || item.Conditions[0] is not { Kind: LiteralKind.Condition, Term: { } condition } literal) return null;
+            if (test is not null && !ReferenceEquals(test, condition)) return null;
+            test = condition;
+            int arm = literal.Value != 0 ? 0 : 1;
+            if (arms[arm] is not null) return null;
+            arms[arm] = item.Terms[0];
+        }
+        return terms.Select(Substitute(terms, test!, map), Substitute(terms, arms[0]!, map), Substitute(terms, arms[1]!, map));
     }
 
-    private Term Substitute(Term term, Dictionary<Term, Term> map)
+    private static Term Substitute(TermPool terms, Term term, Dictionary<Term, Term> map)
     {
         if (map.TryGetValue(term, out var bound)) return bound;
         if (term.Operands.Length == 0) return term;
@@ -628,7 +708,7 @@ internal sealed class Writer
         bool changed = false;
         for (int i = 0; i < parts.Length; i++)
         {
-            parts[i] = Substitute(term.Operands[i], map);
+            parts[i] = Substitute(terms, term.Operands[i], map);
             changed |= !ReferenceEquals(parts[i], term.Operands[i]);
         }
         return changed ? terms.Rebuild(term, parts) : term;

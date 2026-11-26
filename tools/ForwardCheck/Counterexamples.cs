@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using Cpp2CS.Kernel;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Kernel.Sources;
@@ -364,6 +365,13 @@ internal static class Counterexamples
                 }
                 return "错误的图通过了构造";
             }),
+
+            // ---- 下降 ----
+
+            // ECMA-335 III.3.18 brtrue：值非零（真）时转移。语料 Control.Conditional 的真实 IL 是
+            // ldarg.0; brtrue.s L; ldarg.2; ret; L: ldarg.1; ret——条件成立时返回第 1 个形参。下降把选择写成带栈上汇合的转移，
+            // 核对表达式时读出的项须与真实 IL 两条路径合成的选择相同；两支互换的写法读出的项须与它不同。
+            new("选择的两支不能互换", "ECMA-335 III.3.18 brtrue；语料 Control.Conditional 的真实 IL", SelectArms),
         };
 
         int passed = 0;
@@ -381,6 +389,34 @@ internal static class Counterexamples
         }
         Console.WriteLine($"反例：{items.Count} 个，通过 {passed} 个，用时 {clock.Elapsed.TotalSeconds:F1} 秒");
         return passed == items.Count ? 0 : 1;
+    }
+
+    private static string? SelectArms()
+    {
+        var boolean = new TypeShape(StackKind.Int32, 8, false, default) { TwoValued = true };
+        TypeShape[] parameters = [boolean, Int32, Int32];
+        var graph = Expand([0x02, 0x2d, 0x02, 0x04, 0x2a, 0x03, 0x2a], Int32, parameters);
+        // 真实 IL 的两条路径：各带分支条件的一个取值与返回值。
+        var paths = Walk(graph);
+        if (paths.Length != 2) return $"真实 IL 走查得到 {paths.Length} 条路径";
+        Term? condition = null;
+        var returned = new Term?[2];
+        foreach (var path in paths)
+        {
+            if (path.End != PathEnd.Return || path.Conditions.Length != 1 || path.Conditions[0].Term is not { } test || (condition ??= test) != test)
+                return "真实 IL 的路径应各在同一个分支条件下返回";
+            returned[path.Conditions[0].Value != 0 ? 0 : 1] = path.Outcome[0];
+        }
+        var expected = graph.Terms.Select(condition!, returned[0]!, returned[1]!);
+        var host = new MethodShape(default, false, [.. parameters], Int32, VariantCondition.StaticMethod);
+        var arguments = graph.EntryParameters.OrderBy(e => e.Slot.Index).ToArray();
+        // 条件成立时转到 L1 取 taken，否则顺序执行取 fallthrough，两支在 L2 汇合。
+        ManagedInstruction[] Written(int taken, int fallthrough) =>
+            [new("ldarg", 0), new("brtrue", Target: 1), new("ldarg", fallthrough), new("br", Target: 2), new(".label", 1), new("ldarg", taken), new(".label", 2)];
+        var written = Lowering.Denote(Written(1, 2), host, arguments, new StaticFieldView(), graph.Terms, 64);
+        if (written != expected) return $"下降的写法读出 {written?.ToString() ?? "空"}，真实 IL 是 {expected}";
+        var swapped = Lowering.Denote(Written(2, 1), host, arguments, new StaticFieldView(), graph.Terms, 64);
+        return swapped is not null && swapped != expected ? null : $"两支互换的写法读出 {swapped?.ToString() ?? "空"}，应与 {expected} 不同";
     }
 
     // ---- 辅助 ----

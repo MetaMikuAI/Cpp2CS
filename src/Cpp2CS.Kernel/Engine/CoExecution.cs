@@ -100,6 +100,11 @@ public sealed partial class CoExecution
     private int steps, paths;
     /// <summary>最近一次原生读写落在托管堆上（不是帧对象，也不是映像数据区）。</summary>
     private bool heapAccess;
+    private ImmutableArray<RuntimeTargetDefinition>? targetDefinitions;
+
+    /// <summary>规格登记的、随目标而变的定义（设计 7.8）：按快照给出的目标选行。比较两张模板时没有现场，也就没有这些行。</summary>
+    private ImmutableArray<RuntimeTargetDefinition> TargetDefinitions => targetDefinitions ??=
+        native?.Target is { } target ? [.. RuntimeTargetDefinitions.Entries.Where(d => d.Targets.Contains(target))] : [];
 
     private CoExecution(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
         Func<ulong, MethodSnapshot?>? snapshots, int budget)
@@ -408,12 +413,45 @@ public sealed partial class CoExecution
                 // 经地址取字段的地址：所属值的地址加字段在值里的偏移。
                 result = terms.Add(result.Operands[0], terms.Constant(OffsetInValue(result.Operands[1].Entity), result.Width));
             }
+            else if (result.Kind == TermKind.Attribute && TargetDefinition(result) is { } definition)
+            {
+                // 具名函数在这个目标上的定义（规格登记的等式，设计 7.8）只对有定义条件成立的执行成立（9.1）：
+                // 条件并入路径条件，用到这条等式的结论只对这些执行有效，记进用到的有定义条件；条件在此处不能成立时不用这条等式。
+                if (conditions.Decide(definition.Defined) == true) result = definition.Value;
+                else if (conditions.With(definition.Defined, true) is { } assumed)
+                {
+                    conditions = assumed;
+                    assumptions.Add($"{definition.Function} 的目标定义的有定义条件");
+                    result = definition.Value;
+                }
+            }
             memo[t] = result;
             return result;
         }
         var lowered = Go(term);
         if (!ReferenceEquals(conditions, state.Conditions)) state = state with { Conditions = conditions };
         return lowered;
+    }
+
+    /// <summary>具名函数的项在这个目标上登记的定义：定义与有定义条件里的形参换成这个项的实参。没有登记时为空。</summary>
+    private (Term Value, Term Defined, RuntimeFunction Function)? TargetDefinition(Term named)
+    {
+        foreach (var definition in TargetDefinitions)
+        {
+            if (named.Attribute.Value != (int)definition.Function || named.Width != definition.Value.Width
+                || named.Operands.Length != 1 || named.Operands[0].Width != definition.Argument.Width) continue;
+            var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
+            Term Instantiate(Term t)
+            {
+                if (ReferenceEquals(t, definition.Argument)) return named.Operands[0];
+                if (memo.TryGetValue(t, out var done)) return done;
+                var parts = new Term[t.Operands.Length];
+                for (int i = 0; i < parts.Length; i++) parts[i] = Instantiate(t.Operands[i]);
+                return memo[t] = terms.Transplant(t, parts);
+            }
+            return (Instantiate(definition.Value), Instantiate(definition.DefinedWhen), definition.Function);
+        }
+        return null;
     }
 
     private Side Enter(IFlowGraph graph, Side side, Exit exit, ref State state, Role role)

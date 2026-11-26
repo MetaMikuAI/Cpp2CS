@@ -144,19 +144,22 @@ public sealed class MethodSnapshot : IFlowGraph
     public int PointerBits { get; }
     /// <summary>各返回槽，与每个返回出口的实参行逐项对应。</summary>
     public ImmutableArray<Slot> ReturnSlots { get; }
+    /// <summary>目标的名字，由前端给出。规格按它选取随目标而变的登记项（例如运行时函数在各目标上的定义）；没有给出时为空。</summary>
+    public string? Target { get; }
 
-    internal MethodSnapshot(FlowGraph<Occurrence> flow, int pointerBits, ImmutableArray<Slot> returnSlots)
+    internal MethodSnapshot(FlowGraph<Occurrence> flow, int pointerBits, ImmutableArray<Slot> returnSlots, string? target)
     {
         Flow = flow;
         PointerBits = pointerBits;
         ReturnSlots = returnSlots;
+        Target = target;
     }
 
     public TermPool Terms => Flow.Terms;
     public ImmutableArray<FlowBlock<Occurrence>> Blocks => Flow.Blocks;
     /// <summary>入口参数，按抽象槽位区分。</summary>
     public ImmutableArray<Term> EntryParameters => Flow.EntryParameters;
-    /// <summary>内容摘要：图的内容，加指针位宽与各返回槽。</summary>
+    /// <summary>内容摘要：图的内容，加指针位宽、各返回槽与给出时的目标。</summary>
     public ImmutableArray<byte> Digest => Flow.Digest;
     public string DigestText => Flow.DigestText;
     public Occurrence this[OccurrenceId occurrence] => Flow[occurrence];
@@ -183,14 +186,17 @@ public sealed class SnapshotBuilder
     private ImmutableArray<Slot> returnSlots = [];
 
     public int PointerBits { get; }
+    public string? Target { get; }
     public TermPool Terms => flow.Terms;
 
     /// <param name="pointerBits">指针位宽。</param>
     /// <param name="terms">项池；不给时新建一个。同一个方法的快照与它之上的结论共用一个池。</param>
-    public SnapshotBuilder(int pointerBits, TermPool? terms = null)
+    /// <param name="target">目标的名字（见 docs/前端.md 第 2 节），供规格选取随目标而变的登记项。</param>
+    public SnapshotBuilder(int pointerBits, TermPool? terms = null, string? target = null)
     {
         if (pointerBits is not (32 or 64)) throw new ArgumentException("指针位宽须为 32 或 64");
         PointerBits = pointerBits;
+        Target = target;
         flow = new FlowBuilder<Occurrence>(terms ?? new TermPool());
     }
 
@@ -258,14 +264,16 @@ public sealed class SnapshotBuilder
     {
         int pointerBits = PointerBits;
         var slots = returnSlots;
+        string? target = Target;
         var graph = flow.Build(draft => Check(draft, pointerBits, slots), writer =>
         {
-            // 返回槽的身份与指针位宽属于方法的契约，写入摘要。
+            // 返回槽的身份与指针位宽属于方法的契约，写入摘要。目标决定规格里随目标而变的登记项，给出时也写入。
             writer.Write(pointerBits);
             writer.Write(slots.Length);
             foreach (var slot in slots) { writer.Write((int)slot.Kind); writer.Write(slot.Index); }
+            if (target is not null) writer.Write(target);
         });
-        return new MethodSnapshot(graph, pointerBits, slots);
+        return new MethodSnapshot(graph, pointerBits, slots, target);
     }
 
     /// <summary>快照特有的契约，见 docs/前端.md 第 4、5 节。</summary>

@@ -295,7 +295,11 @@ public sealed class TermPool
 
     // ---- 运算 ----
 
-    /// <summary>不带规范化的运算：浮点、计数、高半乘积等。按运算符的定义检查操作数个数与位宽（见 <see cref="Op"/>），然后驻留。</summary>
+    /// <summary>
+    /// 其余运算：浮点、计数、高半乘积等。按运算符的定义检查操作数个数与位宽（见 <see cref="Op"/>），然后驻留。
+    /// 规范化只有浮点扩宽的两条恒等式。扩宽是精确的（IEEE 754：较窄格式的每个值在较宽格式里都能精确表示，NaN 仍是 NaN），
+    /// 所以扩宽之后转成整数就是原值转成整数；扩宽之后与一个较窄格式能精确表示的常量比较相等，就是原值与那个常量比较。
+    /// </summary>
     public Term Operation(Op op, int width, params ReadOnlySpan<Term> operands)
     {
         Own(operands);
@@ -304,7 +308,29 @@ public sealed class TermPool
             or Op.Shl or Op.LShr or Op.AShr or Op.SignExtend or Op.Eq or Op.Ult or Op.Slt or Op.UDiv or Op.SDiv or Op.URem or Op.SRem),
             $"{op} 有专门的构造方法");
         CheckShape(op, width, operands);
+        if (op is Op.FToSSaturate or Op.FToUSaturate or Op.FToSIndefinite && Widened(operands[0]) is { } original)
+            return Operation(op, width, original);
+        if (op == Op.FEq)
+        {
+            var (x, y) = operands[1].Kind == TermKind.Constant ? (operands[0], operands[1]) : (operands[1], operands[0]);
+            if (y.Kind == TermKind.Constant && Widened(x) is { } narrow && Narrowed(y, narrow.Width) is { } constant)
+                return Operation(Op.FEq, 1, narrow, constant);
+        }
         return Make(TermKind.Operation, width, [.. operands], op);
+    }
+
+    /// <summary>扩宽的浮点转换的原值。</summary>
+    private static Term? Widened(Term x) =>
+        x is { Kind: TermKind.Operation, Op: Op.FConvert } && x.Operands[0].Width < x.Width ? x.Operands[0] : null;
+
+    /// <summary>双精度常量能用单精度精确表示时，是那个单精度常量。NaN 不算：与 NaN 比较相等恒不成立，不归到这条恒等式。</summary>
+    private Term? Narrowed(Term constant, int width)
+    {
+        if (constant.Width != 64 || width != 32) return null;
+        ulong bits = (ulong)constant.Payload;
+        double value = BitConverter.UInt64BitsToDouble(bits);
+        float narrow = (float)value;
+        return double.IsNaN(value) || BitConverter.DoubleToUInt64Bits(narrow) != bits ? null : Constant((long)BitConverter.SingleToUInt32Bits(narrow), 32);
     }
 
     /// <summary>运算的形状：操作数个数，二元运算的两个操作数同宽，结果位宽与操作数的关系。</summary>
