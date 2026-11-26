@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text.Json;
+using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Kernel.Sources;
 using Cpp2CS.Snapshot;
@@ -73,6 +74,7 @@ internal static class Program
         int blocks = 0, effects = 0, instructions = 0, digestsStable = 0, cyclic = 0, mutations = 0, rejected = 0;
         long paths = 0, segments = 0, compared = 0;
         var problems = new List<string>();
+        var rows = new RowStats();
         int graphNumber = 1;
 
         foreach (var item in document.RootElement.EnumerateArray())
@@ -111,7 +113,7 @@ internal static class Program
                 if (again.Graph.DigestText == graph.DigestText) digestsStable++;
                 else problems.Add($"{name}：两次展开的摘要不同");
 
-                Exercise(name, graph, pool, problems, ref paths, ref segments, ref compared, ref cyclic);
+                Exercise(name, graph, pool, problems, rows, ref paths, ref segments, ref compared, ref cyclic);
                 Probe(name, graph, pool, problems, ref mutations, ref rejected);
                 if (show.Length > 0 && name.EndsWith("::" + show, StringComparison.Ordinal)) Dump(expansion);
             }
@@ -138,6 +140,8 @@ internal static class Program
         Console.WriteLine($"  构造时的校验：把展开出的图各改坏一处再构造，共 {mutations} 次，被拒绝 {rejected} 次");
         Console.WriteLine($"合流的三个操作（在展开出的图上）：含环的方法 {cyclic} 个；走查的路径 {paths} 条，其中切点之间的段 {segments} 条；" +
             $"走查与分情况逐路径对照 {compared} 条");
+        Console.WriteLine($"  路径条件格：不可行的走查路径 {rows.InfeasiblePaths} 条；剔除不可行的行：正向 {rows.ForwardDropped} 行，反向 {rows.BackwardDropped} 行；" +
+            $"逐情况提升按可行的各行判为一致 {rows.Consistent} 处，其中计入不可行行的 Lift 判为不一致 {rows.LiftStricter} 处");
         foreach (var entry in OperationCatalog.Entries)
             if (!entryUse.ContainsKey(entry.Id)) Console.WriteLine($"  目录项 {entry.Id} 没有被任何用例用到");
         if (show == "entries")
@@ -148,8 +152,14 @@ internal static class Program
         return expanded == results.Count && problems.Count == 0 ? 0 : 1;
     }
 
+    /// <summary>路径条件格在对照里剔除与判定的计数。</summary>
+    private sealed class RowStats
+    {
+        public long InfeasiblePaths, ForwardDropped, BackwardDropped, Consistent, LiftStricter;
+    }
+
     /// <summary>在一张展开出的图上核对按边代入、分情况、走查与逐情况提升。</summary>
-    private static void Exercise(string name, FlowGraph<TemplateEffect> graph, TermPool pool, List<string> problems,
+    private static void Exercise(string name, FlowGraph<TemplateEffect> graph, TermPool pool, List<string> problems, RowStats rows,
         ref long paths, ref long segments, ref long compared, ref int cyclic)
     {
         var sources = new ValueSources(graph, pool);
@@ -187,6 +197,8 @@ internal static class Program
             problems.Add($"{name}：走查得到 {whole.Paths.Length} 条路径，按图计数是 {Count(graph.Entry.Index)} 条");
 
         // 走查（向前、逐边代入）与分情况（向后展开）对照：同一条路径上，返回值必须是同一组项。
+        // 两边的行都先在这条路径的条件之下用路径条件格筛掉不可行的行，各项在该行的条件下求值，再按求值之后的项比较（设计 7.7）。
+        var empty = PathConditions.Empty(pool);
         foreach (var path in whole.Paths)
         {
             if (path.End != PathEnd.Return) continue;
@@ -195,23 +207,42 @@ internal static class Program
             if (returned.Length == 0) continue;
             var table = sources.SplitCases(path.ExitPoint, returned);
             if (!table.Complete) { problems.Add($"{name}：分情况的预算耗尽"); continue; }
+            if (CaseRows.Assume(empty, path.Conditions, pool) is not { } along) { rows.InfeasiblePaths++; continue; }
             var backward = new HashSet<string>();
             foreach (var item in table.Cases)
             {
                 bool onPath = item.Edges.Length <= path.Edges.Length;
                 for (int i = 0; onPath && i < item.Edges.Length; i++) onPath = item.Edges[i] == path.Edges[^(i + 1)];
-                if (onPath) backward.Add(Key(item));
+                if (!onPath) continue;
+                if (CaseRows.Evaluate(item, along, pool) is { } values) backward.Add(CaseRows.Key(values));
+                else rows.BackwardDropped++;
             }
             var forward = new HashSet<string>();
-            foreach (var item in sources.SplitCases(path.Entry, path.Outcome).Cases) forward.Add(Key(item));
+            foreach (var item in sources.SplitCases(path.Entry, path.Outcome).Cases)
+            {
+                if (CaseRows.Evaluate(item, along, pool) is { } values) forward.Add(CaseRows.Key(values));
+                else rows.ForwardDropped++;
+            }
             compared++;
             if (!forward.SetEquals(backward))
                 problems.Add($"{name}：路径 [{string.Join(" ", path.Edges)}] 上走查与分情况的返回值不同：{string.Join(" | ", forward)} ≠ {string.Join(" | ", backward)}");
 
-            // 逐情况提升：规则是“取这个项”，各情况一致当且仅当表里各行相同。
+            // 逐情况提升：规则是“取这个项”。一致性是“可行的各行相同”：提升的各行与情况表的各行分别筛掉不可行的行、
+            // 在该行的条件下求值，两边的判断必须相同。Lift 自己的 Unanimous 计入不可行的行，只会更严，单独计数。
             var lifted = sources.Lift(path.ExitPoint, returned[0], term => term);
-            bool same = table.Complete && sources.SplitCases(path.ExitPoint, [returned[0]]).Cases.Select(c => c.Terms[0]).Distinct().Count() == 1;
-            if (lifted.Unanimous != same) problems.Add($"{name}：逐情况提升的一致性与情况表不符");
+            bool liftedSame = lifted.Complete && Agree(lifted.Cases.Select(r => (r.Case, r.Result!)));
+            bool same = table.Complete && Agree(sources.SplitCases(path.ExitPoint, [returned[0]]).Cases.Select(c => (c, c.Terms[0])));
+            if (liftedSame != same) problems.Add($"{name}：逐情况提升的一致性与情况表不符");
+            if (liftedSame) rows.Consistent++;
+            if (liftedSame && !lifted.Unanimous) rows.LiftStricter++;
+        }
+
+        bool Agree(IEnumerable<(Case Row, Term Value)> items)
+        {
+            var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+            foreach (var (row, value) in items)
+                if (CaseRows.Assume(empty, row.Conditions, pool) is { } assumed) seen.Add(assumed.Evaluate(value));
+            return seen.Count == 1;
         }
     }
 
@@ -280,9 +311,6 @@ internal static class Program
             }
         }
     }
-
-    private static string Key(Case item) =>
-        string.Join(",", item.Terms.Select(t => t.Id)) + " 当 " + string.Join("&", item.Conditions.Select(c => $"{c.Term?.Id}={c.Value}").Order());
 
     private static void Dump(Expansion expansion)
     {

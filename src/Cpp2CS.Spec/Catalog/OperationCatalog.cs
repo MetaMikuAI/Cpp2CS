@@ -30,9 +30,9 @@ public static class OperationCatalog
 
     private static CatalogEntry E(string id, string il, string summary, StackClass[] operands, TemplateStep[] steps, TemplateValue? result,
         ResultKind kind, string translation, string runtime, string standard, bool sameKind = false,
-        VariantCondition condition = VariantCondition.None, bool fromSignature = false, int impliedBits = 0) =>
+        VariantCondition condition = VariantCondition.None, bool fromSignature = false, int impliedBits = 0, bool impliedReference = false) =>
         new(id, il, summary, [.. operands], sameKind, condition, [.. steps], result, kind, new(translation, runtime, "ECMA-335 " + standard))
-        { OperandsFromSignature = fromSignature, ImpliedBits = impliedBits };
+        { OperandsFromSignature = fromSignature, ImpliedBits = impliedBits, ImpliedReference = impliedReference };
 
     private static readonly StackClass[] None = [];
     private static readonly StackClass[] Integers = [StackClass.Integer, StackClass.Integer];
@@ -55,9 +55,13 @@ public static class OperationCatalog
             ResultKind.SameAsOperand, $"DivideByZeroCheck(b); a {symbol} b", $"{Codegen}: DivideByZeroCheck", standard, sameKind: true)
             with { Deviations = [deviation] };
 
-    private static CatalogEntry Compare(string il, TemplateValue condition, string symbol, string standard) =>
-        E(il + ".int", il, "有符号整数比较后分支", Integers, [Do(StepKind.Branch, condition)], null, ResultKind.None,
-            $"if (a {symbol} b) goto IL_xxxx", "—", standard, sameKind: true);
+    private static CatalogEntry Compare(string il, TemplateValue condition, string symbol, string standard,
+        string summary = "有符号整数比较后分支", string? translation = null) =>
+        E(il + ".int", il, summary, Integers, [Do(StepKind.Branch, condition)], null, ResultKind.None,
+            translation ?? $"if (a {symbol} b) goto IL_xxxx", "—", standard, sameKind: true);
+
+    private static TemplateValue OutOfBounds(TemplateValue array, TemplateValue index) =>
+        V(ValueOp.Not, V(ValueOp.UnsignedLess, index, Named(RuntimeFunction.ArrayLength, array)));
 
     private static readonly ImmutableArray<CatalogEntry> entries =
     [
@@ -70,6 +74,11 @@ public static class OperationCatalog
             "V_i = v", "—", "III.3.63 stloc"),
         E("ldc.i4", "ldc.i4", "int32 常量", None, [], new(ValueOp.Immediate, [], 32), ResultKind.Int32, "字面量", "—", "III.3.40 ldc"),
         E("ldnull", "ldnull", "空引用", None, [], V(ValueOp.Null), ResultKind.Object, "NULL", "—", "III.3.45 ldnull"),
+        // 字面量槽的惰性初始化不可观察；初始化之后槽里是字面量表里的那个字符串对象（同一内容同一对象）。
+        E("ldstr", "ldstr", "字符串字面量：结果是字符串实体，没有效果", None, [], V(ValueOp.Literal), ResultKind.Object,
+            "语料 Construction.ThrowEither：((String_t*)il2cpp_codegen_initialize_runtime_metadata_inline((uintptr_t*)&_stringLiteral8739…))",
+            $"{Codegen}: il2cpp_codegen_initialize_runtime_metadata_inline；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 的 kIl2CppMetadataUsageStringLiteral（GetStringLiteralFromIndex）",
+            "III.4.16 ldstr"),
         E("pop", "pop", "丢弃栈顶", [StackClass.Any], [], null, ResultKind.None, "（不生成代码）", "—", "III.3.54 pop"),
 
         // ---- 算术与位运算 ----
@@ -101,6 +110,8 @@ public static class OperationCatalog
         // ---- 转换 ----
         E("conv.i2", "conv.i2", "取低 16 位，按符号扩到 int32", [StackClass.Integer], [], Resize(P0, 16, 32, true), ResultKind.Int32,
             "(int16_t)a", "—", "III.3.27 conv"),
+        E("conv.i4.int", "conv.i4", "整数转 int32：取低 32 位", [StackClass.Integer], [], Resize(P0, 32, 32, true), ResultKind.Int32,
+            "语料 ArrayStore.StoreLengthLoop：(int32_t)(((RuntimeArray*)L_5)->max_length)", "—", "III.3.27 conv"),
         E("conv.i4.float", "conv.i4", "浮点转 int32，向零舍入；范围外的结果由运行时函数给出", [StackClass.Float], [],
             Named(RuntimeFunction.CastDoubleToInt32, V(ValueOp.FloatToDouble, P0)), ResultKind.Int32,
             "il2cpp_codegen_cast_double_to_int<int32_t>(a)", $"{Common}: il2cpp_codegen_cast_double_to_int", "III.3.27 conv"),
@@ -144,6 +155,32 @@ public static class OperationCatalog
                 Write(LocationKind.ArrayElement, P2, P0, P1)],
             null, ResultKind.None, "NullCheck(a); a->SetAt(i, v)（SetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK 与写入）",
             $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK", "III.4.27 stelem.<type>", impliedBits: 32),
+        E("ldelem.ref", "ldelem.ref", "读对象引用数组的元素", [StackClass.Object, StackClass.Int32],
+            [ThrowIfNull(P0), ThrowIf(OutOfBounds(P0, P1), ExceptionKind.IndexOutOfRange), Read(LocationKind.ArrayElement, P0, P1)],
+            S(2), ResultKind.Object,
+            "语料 ArrayStore.StoreThenLoad：NullCheck(L_3); (L_3)->GetAt(static_cast<il2cpp_array_size_t>(L_5))（GetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK 与读取）",
+            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK；数组结构体的 GetAt", "III.4.8 ldelem.<type>", impliedReference: true),
+        // 三个检查的先后照生成代码：判空，类型（ArrayElementTypeCheck），越界（SetAt 里的 IL2CPP_ARRAY_BOUNDS_CHECK）。
+        // 几种异常同时成立时以本运行时的先后为准（设计 16.2）。元素类型是密封类时生成代码不写 ArrayElementTypeCheck：
+        // 那时类型检查在可验证的 IL 上不会成立，由类型事实证明，模板不变。
+        E("stelem.ref", "stelem.ref", "写对象引用数组的元素：判空，值非空且不能当作元素类使用时抛出，越界抛出，写入",
+            [StackClass.Object, StackClass.Int32, StackClass.Object],
+            [ThrowIfNull(P0),
+                ThrowIf(V(ValueOp.Both, V(ValueOp.Not, IsNull(P2)),
+                    IsNull(Named(RuntimeFunction.IsInstance, P2, Named(RuntimeFunction.ElementClass, Named(RuntimeFunction.ClassOf, P0))))),
+                    ExceptionKind.ArrayTypeMismatch),
+                ThrowIf(OutOfBounds(P0, P1), ExceptionKind.IndexOutOfRange),
+                Write(LocationKind.ArrayElement, P2, P0, P1)],
+            null, ResultKind.None,
+            "语料 ArrayStore.StoreObject：NullCheck(L_0); ArrayElementTypeCheck (L_0, L_2); (L_0)->SetAt(static_cast<il2cpp_array_size_t>(L_1), (RuntimeObject*)L_2)"
+                + "（SetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK、写入与写屏障）；ArrayStore.StoreString（元素类型 String 是密封类）只有 NullCheck 与 SetAt",
+            $"{Codegen}: NullCheck, ArrayElementTypeCheck（value != NULL 且 IsInst(value, array->klass->element_class) == NULL 时抛出 ArrayTypeMismatchException）, IL2CPP_ARRAY_BOUNDS_CHECK；数组结构体的 SetAt",
+            "III.4.27 stelem.<type>", impliedReference: true),
+        E("ldlen", "ldlen", "数组的长度，本机无符号整数", [StackClass.Object],
+            [ThrowIfNull(P0)], Named(RuntimeFunction.ArrayLengthNative, P0), ResultKind.NativeInt,
+            "语料 ArrayStore.StoreLengthLoop：NullCheck(L_5); ((RuntimeArray*)L_5)->max_length（il2cpp_array_size_t，指针宽）",
+            $"{Codegen}: NullCheck；il2cpp-object-internals.h: Il2CppArray::max_length, IL2CPP_ARRAY_MAX_INDEX；vm/Array.cpp: NewSpecific",
+            "III.4.12 ldlen"),
 
         // ---- 类型检查 ----
         E("isinst", "isinst", "对象可以当作该类使用时是对象自己，否则为空", [StackClass.Object], [], Named(RuntimeFunction.IsInstance, P0), ResultKind.Object,
@@ -165,6 +202,9 @@ public static class OperationCatalog
         Compare("bgt", V(ValueOp.SignedLess, P1, P0), ">", "III.3.8 bgt"),
         Compare("ble", V(ValueOp.Not, V(ValueOp.SignedLess, P1, P0)), "<=", "III.3.10 ble"),
         Compare("blt", V(ValueOp.SignedLess, P0, P1), "<", "III.3.12 blt"),
+        // 只收整数：浮点的 bne.un 是“不相等或无序”时转移，语料里没有用例。
+        Compare("bne.un", V(ValueOp.Not, V(ValueOp.Equal, P0, P1)), "!=", "III.3.16 bne.un", "整数不相等时转移",
+            "语料 Construction.ThrowOneOfThree：if ((!(((uint32_t)L_2) == ((uint32_t)1)))) goto IL_001d（整数的相等与符号无关）"),
         E("switch", "switch", "跳转表：选择子按无符号数与表长比较", [StackClass.Int32], [Do(StepKind.Switch, P0)], null, ResultKind.None,
             "switch (a) { case k: goto IL_xxxx; }", "—", "III.3.66 switch"),
         E("ret.void", "ret", "返回", None, [Do(StepKind.Return)], null, ResultKind.None, "return", "—", "III.3.57 ret",
@@ -194,6 +234,22 @@ public static class OperationCatalog
             Loaded(S(2)), ResultKind.Subject, "NullCheck(o); InterfaceFuncInvokerN<R, T…>::Invoke(slot, I_il2cpp_TypeInfo_var, o, x…)",
             $"{Codegen}: NullCheck, il2cpp_codegen_get_interface_invoke_data；vm/ClassInlines.h: GetInterfaceInvokeDataFromVTable, GetInterfaceInvokeDataFromVTableSlowPath",
             "III.4.2 callvirt", condition: VariantCondition.InterfaceMethod, fromSignature: true),
+
+        // ---- 构造与抛出 ----
+        // 分配之后运行时再确保类已初始化（Object::NewAllocSpecific 末尾的 Runtime::ClassInit）；新对象在首次被使用之前不可见，
+        // 两个分量的先后不可观察。值类型的构造（this 是地址）不在本项。
+        E("newobj.class", "newobj", "构造引用类型的对象：新对象（含所属类的类初始化分量），调用构造函数，结果是新引用", None,
+            [Do(StepKind.NewObject), new(StepKind.Call, [S(0)])], S(0), ResultKind.Object,
+            "语料 Construction.NodeSwapped：L_4 = (Node_t3E58…*)il2cpp_codegen_object_new(Node_t3E58…_il2cpp_TypeInfo_var); Node__ctor_mC157…(L_4, L_2, L_3, NULL)",
+            $"{Codegen}: il2cpp_codegen_object_new；codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_object_new；vm/Object.cpp: Object::NewAllocSpecific",
+            "III.4.21 newobj；I.8.9.5", condition: VariantCondition.ReferenceTypeConstructor, fromSignature: true) with { Constructs = true },
+        // 翻译不检查空：il2cpp_codegen_raise_exception 先经异常对象写它的 trace_ips、stack_trace 字段，空对象上是空指针解引用。
+        E("throw", "throw", "抛出栈顶的异常对象；对象为空时翻译没有定义", [StackClass.Object],
+            [Do(StepKind.Require, V(ValueOp.Not, IsNull(P0))), Do(StepKind.Throw, P0)], null, ResultKind.None,
+            "语料 Construction.ThrowEither：IL2CPP_RAISE_MANAGED_EXCEPTION(L_1, ((RuntimeMethod*)il2cpp_codegen_initialize_runtime_metadata_inline(…_RuntimeMethod_var)))",
+            $"{Codegen}: IL2CPP_RAISE_MANAGED_EXCEPTION；codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_exception；vm/Exception.cpp: Exception::Raise",
+            "III.4.35 throw")
+            with { Deviations = [new("异常对象为空", "ECMA-335 III.4.35：对象为空时抛出 NullReferenceException", ImplementationDefined: false)] },
     ];
 
     private static readonly FrozenDictionary<string, CatalogEntry> byId = entries.ToFrozenDictionary(e => e.Id);

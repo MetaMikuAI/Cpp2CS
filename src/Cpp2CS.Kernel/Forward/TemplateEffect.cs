@@ -10,12 +10,16 @@ public enum EffectKind : byte
     Read, Write, Call, RuntimeCall, ClassInitialize, ThrowIf,
     /// <summary>有定义条件（设计 9.1）：不是效果，操作数是条件。</summary>
     Require,
+    /// <summary>新对象（设计 7.5）：分配 Entity 给出的类的对象，结果是新引用；含该类的类初始化分量，Precise 是它的时机是否精确。</summary>
+    NewObject,
+    /// <summary>抛出操作数给出的异常对象，不返回。</summary>
+    Throw,
 }
 
 /// <summary>
 /// 模板一侧的一个效果：目录项的效果模板里的一步，形参已经换成实参。
 /// 操作数的次序：读——位置的基；写——位置的基，然后是被写的值；调用——间接调用的目标（如果有），然后是各实参；
-/// 条件抛出——条件。Entry 与 Offset 是追溯信息，不作身份，不进入摘要。
+/// 条件抛出——条件；抛出——异常对象；新对象没有操作数。Entry 与 Offset 是追溯信息，不作身份，不进入摘要。
 /// </summary>
 public sealed class TemplateEffect : IFlowOccurrence
 {
@@ -49,8 +53,8 @@ public sealed class TemplateEffect : IFlowOccurrence
         Offset = offset;
     }
 
-    /// <summary>托管调用、写入与类初始化改变托管可见的内存；运行时操作只动运行时私有的状态。</summary>
-    public bool DefinesMemory => Kind is EffectKind.Write or EffectKind.Call or EffectKind.ClassInitialize;
+    /// <summary>托管调用、写入、类初始化与新对象（含类初始化分量）改变托管可见的内存；运行时操作只动运行时私有的状态。</summary>
+    public bool DefinesMemory => Kind is EffectKind.Write or EffectKind.Call or EffectKind.ClassInitialize or EffectKind.NewObject;
 
     public void WriteContent(DigestWriter writer)
     {

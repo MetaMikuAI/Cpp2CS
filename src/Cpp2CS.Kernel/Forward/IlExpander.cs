@@ -210,6 +210,8 @@ public sealed class IlExpander
         public FieldShape? Field;
         public TypeShape? Type;
         public TypeShape? Subject;
+        /// <summary>ldstr 的字面量。</summary>
+        public EntityRef? Literal;
         public StackValue[] Operands = [];
         public Term?[] Steps = [];
         public BlockId Block;
@@ -234,6 +236,7 @@ public sealed class IlExpander
             case OperandKind.Method: context.Method = metadata.Method(tokens.Method(token)); context.Subject = context.Method.Return; break;
             case OperandKind.Field: context.Field = metadata.Field(tokens.Field(token)); context.Subject = context.Field.Type; break;
             case OperandKind.Type: context.Type = metadata.Type(tokens.Type(token)); break;
+            case OperandKind.String: context.Literal = tokens.String(token); break;
         }
         if (opcode.Canonical is "ldarg" or "starg")
             context.Subject = Indexed(body.Method.Parameters, instruction, "形参");
@@ -247,13 +250,15 @@ public sealed class IlExpander
         foreach (var candidate in candidates)
         {
             if (!Holds(candidate.Condition, context)) continue;
-            int count = candidate.OperandsFromSignature ? context.Method!.Parameters.Length : candidate.Operands.Length;
+            // 构造函数的 this 由模板给出，不在栈上。
+            int skip = candidate.Constructs ? 1 : 0;
+            int count = candidate.OperandsFromSignature ? context.Method!.Parameters.Length - skip : candidate.Operands.Length;
             if (state.Stack.Count < count) continue;
             bool fits = true;
             for (int i = 0; i < count && fits; i++)
             {
                 var kind = state.Stack[state.Stack.Count - count + i].Kind;
-                if (candidate.OperandsFromSignature) fits = kind == context.Method!.Parameters[i].Kind;
+                if (candidate.OperandsFromSignature) fits = kind == context.Method!.Parameters[skip + i].Kind;
                 else fits = Matches(candidate.Operands[i], kind, context) && (!candidate.SameKind || kind == state.Stack[^count].Kind)
                     // 值类型的值只能核对大小：与要存入的类型同宽。
                     && (candidate.Operands[i] != StackClass.Assignable || kind != StackKind.Value
@@ -271,10 +276,11 @@ public sealed class IlExpander
         }
         used.Add((instruction.Offset, chosen.Id));
 
-        int operandCount = chosen.OperandsFromSignature ? context.Method!.Parameters.Length : chosen.Operands.Length;
+        int operandCount = chosen.OperandsFromSignature ? context.Method!.Parameters.Length - (chosen.Constructs ? 1 : 0) : chosen.Operands.Length;
         context.Operands = [.. state.Stack.Skip(state.Stack.Count - operandCount)];
         state.Stack.RemoveRange(state.Stack.Count - operandCount, operandCount);
         if (chosen.ImpliedBits > 0) context.Subject = new TypeShape(StackKind.Int32, chosen.ImpliedBits, true, default);
+        if (chosen.ImpliedReference) context.Subject = new TypeShape(StackKind.Object, pointerBits, false, default);
         context.Steps = new Term?[chosen.Steps.Length];
 
         for (int s = 0; s < chosen.Steps.Length; s++)
@@ -301,8 +307,10 @@ public sealed class IlExpander
                 case StepKind.Call:
                 {
                     var method = context.Method ?? throw Missing(instruction, "被调方法");
+                    // 模板写出的值在前（间接调用的目标，或构造函数的 this），栈上的实参对应其后的形参。
                     var operands = new List<Term>(values);
-                    for (int i = 0; i < context.Operands.Length; i++) operands.Add(Store(context.Operands[i].Value, method.Parameters[i], instruction));
+                    int first = method.Parameters.Length - context.Operands.Length;
+                    for (int i = 0; i < context.Operands.Length; i++) operands.Add(Store(context.Operands[i].Value, method.Parameters[first + i], instruction));
                     ImmutableArray<int> results = method.Return is { } returned ? [returned.StorageBits] : [];
                     var produced = Emit(block, new(EffectKind.Call, [.. operands], results, chosen.Id, instruction.Offset)
                         { Entity = method.Entity, Indirect = step.Indirect, Signature = method });
@@ -324,6 +332,18 @@ public sealed class IlExpander
                     });
                     break;
                 }
+                case StepKind.NewObject:
+                {
+                    // 被分配的类是构造函数所属的类；类初始化分量的时机取自元数据。
+                    var method = context.Method ?? throw Missing(instruction, "构造函数");
+                    context.Steps[s] = Emit(block, new(EffectKind.NewObject, [], [pointerBits], chosen.Id, instruction.Offset)
+                        { Entity = method.DeclaringType, Precise = method.HasInitializer && method.PreciseInitialization })[0];
+                    break;
+                }
+                case StepKind.Throw:
+                    Emit(block, new(EffectKind.Throw, [values[0]], [], chosen.Id, instruction.Offset));
+                    flow.Terminate(block, Terminator.Single(Exit.NoReturn));
+                    return true;
                 case StepKind.Require:
                     Emit(block, new(EffectKind.Require, [values[0]], [], chosen.Id, instruction.Offset));
                     break;
@@ -351,7 +371,7 @@ public sealed class IlExpander
             }
         }
 
-        if (chosen.Result is not null && !(chosen.OperandsFromSignature && context.Method!.Return is null))
+        if (chosen.Result is not null && !(chosen.OperandsFromSignature && !chosen.Constructs && context.Method!.Return is null))
         {
             var value = Value(chosen.Result, context, state);
             var kind = chosen.ResultKind switch
@@ -397,6 +417,7 @@ public sealed class IlExpander
         VariantCondition.ReturnsValue => context.Subject is not null,
         VariantCondition.StaticMethod => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: false },
         VariantCondition.StaticMethodWithInitializer => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: true },
+        VariantCondition.ReferenceTypeConstructor => context.Method is { HasThis: true, Parameters: [{ Kind: StackKind.Object }, ..] },
         _ => context.Method?.Dispatch == condition,
     };
 
@@ -437,6 +458,7 @@ public sealed class IlExpander
             case ValueOp.Argument: return state.Arguments[instruction.Operand];
             case ValueOp.Local: return state.Locals[instruction.Operand];
             case ValueOp.Null: return terms.Zero(pointerBits);
+            case ValueOp.Literal: return terms.Entity(context.Literal ?? throw Missing(instruction, "字面量"), pointerBits);
             // 结果未规定：在产生它的这一步取得身份（图，块，指令偏移，第几个）。
             case ValueOp.Undefined: return terms.Arbitrary(flow.Graph, context.Block, instruction.Offset, 0, context.Unspecified++, X(0).Width);
             case ValueOp.Add: return terms.Add(X(0), X(1));
@@ -492,7 +514,8 @@ public sealed class IlExpander
                 // 带实体操作数的函数：实体取自指令的元数据操作数。
                 EntityRef? entity = template.Function switch
                 {
-                    RuntimeFunction.IsInstance => (context.Type ?? throw Missing(instruction, "类型")).Entity,
+                    // 类没有由模板写出时取自指令的类型操作数。
+                    RuntimeFunction.IsInstance when a.Length == 1 => (context.Type ?? throw Missing(instruction, "类型")).Entity,
                     RuntimeFunction.FieldAddress => (context.Field ?? throw Missing(instruction, "字段")).Entity,
                     RuntimeFunction.VirtualInvokeData => (context.Method ?? throw Missing(instruction, "方法")).Entity,
                     _ => null,
