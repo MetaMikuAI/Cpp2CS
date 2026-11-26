@@ -365,8 +365,8 @@ public sealed class EffectGraph
         }
         if (callee.Kind == CalleeKind.Managed)
         {
-            if (callee.Signature is not { } shape) return unnamed($"被调方法 {callee.Name} 的签名未知");
-            if (EngineFacts.Convention(shape, out var returned, out string reason) is not { } slots) return unnamed(reason);
+            if (callee.MethodAtCall(Argument, out string reason) is not { } shape) return unnamed(reason);
+            if (EngineFacts.Convention(shape, out var returned, out reason) is not { } slots) return unnamed(reason);
             var arguments = ImmutableArray.CreateBuilder<Term>(slots.Length);
             for (int i = 0; i < slots.Length; i++)
             {

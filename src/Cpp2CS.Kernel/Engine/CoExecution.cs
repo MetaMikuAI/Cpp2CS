@@ -977,6 +977,20 @@ public sealed partial class CoExecution
 
     // ---- 事件的对照 ----
 
+    private static Term? HiddenArgument(CallOccurrence call, Event reached, Slot slot, PathConditions conditions)
+    {
+        int index = call.ArgumentSlots.IndexOf(slot);
+        return index < 0 ? null : conditions.Evaluate(reached.Values[index + 1]);
+    }
+
+    private static void CheckHiddenArgument(CallOccurrence call, Event reached, Slot slot, PathConditions conditions, EntityRef expected)
+    {
+        if (HiddenArgument(call, reached, slot, conditions) is not { Kind: TermKind.Entity } value)
+            throw new Refuted(Verdict.MissingFact, $"共享入口的隐含实参 {slot} 未解析为实体，期望 {expected}");
+        if (value.Entity != expected)
+            throw new Refuted(Verdict.Insufficient, $"共享入口的隐含实参 {slot} 不同：实得 {value.Entity}，期望 {expected}");
+    }
+
     private static string Name(Event e) => e.Kind switch
     {
         EventKind.Throw => e.Values.Length == 1 ? "抛出异常对象" : $"抛出 {e.Exception}",
@@ -1039,11 +1053,14 @@ public sealed partial class CoExecution
                 if (onNative.Address != onTemplate.Address)
                     throw new Refuted(Verdict.Insufficient, $"调用的目标不同：现场 0x{onNative.Address:x}，被展开的方法里 0x{onTemplate.Address:x}");
                 var callee = facts.Callee(onNative.Address);
-                var shape = callee.Signature ?? throw new Refuted(Verdict.MissingFact, $"被调方法 {callee.Name} 的签名未知");
                 var inner = state.Inner!;
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 var other = (CallOccurrence)inner.Snapshot[onTemplate.Occurrence];
+                var shape = callee.MethodAtCall(slot => HiddenArgument(other, onTemplate, slot, conditions), out string reason)
+                    ?? throw new Refuted(Verdict.MissingFact, reason);
                 var convention = Convention(shape, out _);
+                if (callee.SharedSignatures.HasValue)
+                    CheckHiddenArgument(call, onNative, NativeEntryQueries.MethodArgumentSlot(convention), conditions, shape.Entity);
                 for (int i = 0; i < convention.Length; i++)
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
@@ -1070,7 +1087,9 @@ public sealed partial class CoExecution
             {
                 var effect = onTemplate.Effect!;
                 if (effect.Indirect) throw new Refuted(Verdict.Insufficient, "间接调用的对照尚未实现");
-                ulong entry = facts.Entry(effect.Entity!.Value) ?? throw new Refuted(Verdict.MissingFact, $"方法 {effect.Entity} 的入口未知");
+                var method = effect.Entity!.Value;
+                var generic = facts.GenericEntry(method);
+                ulong entry = generic?.Address ?? facts.Entry(method) ?? throw new Refuted(Verdict.MissingFact, $"方法 {method} 的入口未知");
                 if (entry != onNative.Address)
                 {
                     Expand(state, onNative, onTemplate);
@@ -1078,6 +1097,13 @@ public sealed partial class CoExecution
                 }
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 var convention = Convention(effect.Signature!, out var result);
+                var candidates = facts.Callee(entry).SharedSignatures;
+                if (candidates.HasValue || generic is { MultipleEntities: true })
+                {
+                    var hidden = NativeEntryQueries.SharedMethodSlot(candidates ?? [], out string reason)
+                        ?? throw new Refuted(Verdict.MissingFact, reason);
+                    CheckHiddenArgument(call, onNative, hidden, conditions, method);
+                }
                 for (int i = 0; i < convention.Length; i++)
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
@@ -1227,10 +1253,13 @@ public sealed partial class CoExecution
     private void Expand(State state, Event onNative, Event onTemplate)
     {
         var effect = onTemplate.Effect!;
-        ulong entry = facts.Entry(effect.Entity!.Value) ?? throw new Refuted(Verdict.MissingFact, $"方法 {effect.Entity} 的入口未知");
+        var method = effect.Entity!.Value;
+        var generic = facts.GenericEntry(method);
+        ulong entry = generic?.Address ?? facts.Entry(method) ?? throw new Refuted(Verdict.MissingFact, $"方法 {method} 的入口未知");
         var snapshot = snapshots?.Invoke(entry) ?? throw new Refuted(Verdict.MissingFact,
             $"事件不同：现场 {Name(onNative)}，模板 {Name(onTemplate)}；展开需要被调方法 0x{entry:x} 的快照，它没有快照");
         var convention = Convention(effect.Signature!, out var returned);
+        Slot? hidden = generic is { MultipleEntities: true } ? NativeEntryQueries.MethodArgumentSlot(convention) : null;
         var env = ImmutableDictionary<Term, Term>.Empty;
         Term? pointer = null;
         foreach (var parameter in snapshot.EntryParameters)
@@ -1238,6 +1267,7 @@ public sealed partial class CoExecution
             var slot = parameter.Slot;
             var value = terms.Attribute(new AttributeId(KernelAttributes.InnerEntry), parameter.Width,
                 terms.Constant(state.Inlines, 32), terms.Constant((int)slot.Kind, 32), terms.Constant(slot.Index, 32));
+            if (slot == hidden) value = terms.Entity(method, parameter.Width);
             for (int i = 0; i < convention.Length; i++)
             {
                 int offset = 0;

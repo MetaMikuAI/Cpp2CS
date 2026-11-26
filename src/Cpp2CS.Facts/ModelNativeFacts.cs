@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Model;
 using Cpp2CS.Snapshot;
@@ -80,29 +81,20 @@ public sealed class ModelNativeFacts
         return new(address, method, entries[address].Count > 1);
     }
 
-    public bool RequiresMethodArgument(ulong address) => entries.TryGetValue(address, out var group) &&
-        group.Any(m => m.Key >= EntityKeys.InstanceBase);
+    public bool RequiresMethodArgument(ulong address) => entries.TryGetValue(address, out var group) && group.Count > 1;
 
-    public MethodShape? Signature(ulong address, out string reason)
+    public ImmutableArray<MethodShape> Signatures(ulong address, out string reason)
     {
         reason = "代码地图没有这个入口";
-        if (!entries.TryGetValue(address, out var group)) return null;
-        MethodShape? first = null;
+        if (!entries.TryGetValue(address, out var group)) return [];
+        var signatures = ImmutableArray.CreateBuilder<MethodShape>(group.Count);
         foreach (var entity in group)
         {
-            MethodShape shape;
-            try { shape = metadata.Method(entity); }
-            catch (ExpansionException e) { reason = e.Message; return null; }
-            if (first != null && (first.HasThis != shape.HasThis || first.Return != shape.Return ||
-                !first.Parameters.SequenceEqual(shape.Parameters)))
-            {
-                reason = "同一入口对应多个签名";
-                return null;
-            }
-            first ??= shape;
+            try { signatures.Add(metadata.Method(entity)); }
+            catch (ExpansionException e) { reason = e.Message; return []; }
         }
         reason = "";
-        return first;
+        return signatures.MoveToImmutable();
     }
 
     public int? Offset(EntityRef entity, FieldStorage storage, out string reason)

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Cpp2CS.Snapshot;
 using Cpp2CS.Spec.Runtime;
 
@@ -17,8 +18,10 @@ public enum CalleeKind : byte
 /// <summary>调用目标的命名。Basis 是命名的依据（设计第 8 节），Name 只用于诊断。</summary>
 public sealed record Callee(CalleeKind Kind, RuntimeOperation? Operation, string Name, string Basis)
 {
-    /// <summary>托管方法的签名：实参与返回值各占哪个槽位由它决定。入口被几个签名不同的方法共用、或签名不可得时为空。</summary>
+    /// <summary>独占入口的托管方法及其签名。</summary>
     public Forward.MethodShape? Signature { get; init; }
+    /// <summary>共享入口登记的全部方法签名。独占入口为 null，共享但签名不全时为空数组。</summary>
+    public ImmutableArray<Forward.MethodShape>? SharedSignatures { get; init; }
 }
 
 /// <summary>
@@ -48,11 +51,13 @@ public interface INativeFacts
     EntityRef? TypeAtSlot(ulong address);
     /// <summary>这个地址是一个字符串字面量的元数据槽时，是那个字符串：槽初始化之后的内容是该字面量对象的指针。依据是槽里的编码。</summary>
     EntityRef? StringAtSlot(ulong address) => null;
+    /// <summary>方法定义或方法引用的元数据槽初始化后指向的方法实体。</summary>
+    EntityRef? MethodAtSlot(ulong address) => null;
     /// <summary>
     /// 这个地址是一个元数据槽（任何用途）：槽里是编码，初始化之后换成运行时对象的指针，此后不变。
     /// 槽在被读取时已经初始化（设计 16.2），所以它的读取没有版本。
     /// </summary>
     bool MetadataSlot(ulong address) => EntityAtSlot(address) is not null;
-    /// <summary>元数据槽初始化之后的内容代表的实体：类型或字符串字面量。</summary>
-    EntityRef? EntityAtSlot(ulong address) => TypeAtSlot(address) ?? StringAtSlot(address);
+    /// <summary>元数据槽初始化之后的内容代表的实体：类型、字符串字面量或方法。</summary>
+    EntityRef? EntityAtSlot(ulong address) => TypeAtSlot(address) ?? StringAtSlot(address) ?? MethodAtSlot(address);
 }
