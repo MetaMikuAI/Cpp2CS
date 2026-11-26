@@ -19,7 +19,8 @@ public sealed record Expansion(FlowGraph<TemplateEffect> Graph, ImmutableArray<(
 /// </summary>
 public sealed class IlExpander
 {
-    private readonly record struct StackValue(Term Value, StackKind Kind);
+    /// <summary>栈上的一个值。Pointee：托管指针指向的类型，已知时给出（形参、局部变量、字段的地址）；经过汇合之后不再记录。</summary>
+    private readonly record struct StackValue(Term Value, StackKind Kind, EntityRef Pointee = default);
 
     private sealed class State
     {
@@ -260,6 +261,9 @@ public sealed class IlExpander
                 var kind = state.Stack[state.Stack.Count - count + i].Kind;
                 if (candidate.OperandsFromSignature) fits = kind == context.Method!.Parameters[skip + i].Kind;
                 else fits = Matches(candidate.Operands[i], kind, context) && (!candidate.SameKind || kind == state.Stack[^count].Kind)
+                    // 经地址访问字段：托管指针须指向含该字段的值类型（ECMA-335 III.4.10、III.4.11、III.4.28）。两者都已知而不同时不适用。
+                    && (candidate.Operands[i] != StackClass.ByRef || i != 0 || context.Field is not { IsStatic: false } member
+                        || state.Stack[state.Stack.Count - count].Pointee is var pointee && (pointee == default || member.DeclaringType == default || pointee == member.DeclaringType))
                     // 值类型的值只能核对大小：与要存入的类型同宽。
                     && (candidate.Operands[i] != StackClass.Assignable || kind != StackKind.Value
                         || state.Stack[state.Stack.Count - count + i].Value.Width == context.Subject!.StorageBits);
@@ -389,7 +393,15 @@ public sealed class IlExpander
             };
             if (value.Width != StackBits(kind, value))
                 throw new InvalidOperationException($"目录项 {chosen.Id} 的结果是 {value.Width} 位，与类别 {kind} 不符");
-            state.Stack.Add(new(value, kind));
+            // 托管指针指向的类型：形参与局部变量按声明，字段的地址按字段的类型。
+            var target = kind != StackKind.ByRef ? default : chosen.ResultKind switch
+            {
+                ResultKind.Subject => context.Subject!.Entity,
+                ResultKind.ByRef => context.Field?.Type.Entity ?? default,
+                ResultKind.SameAsOperand => context.Operands[0].Pointee,
+                _ => default,
+            };
+            state.Stack.Add(new(value, kind, target));
         }
         return false;
     }

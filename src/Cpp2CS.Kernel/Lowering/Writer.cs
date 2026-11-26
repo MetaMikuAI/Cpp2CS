@@ -43,6 +43,7 @@ internal sealed class Writer
     private List<Hole> holes = [];
     private ProgramPoint use;
     private int labels;
+    private bool[] kept = [];
 
     public IReadOnlyList<ManagedInstruction> Code => code;
     public IReadOnlyList<Hole> Holes => holes;
@@ -136,13 +137,14 @@ internal sealed class Writer
     private void Write()
     {
         var snapshot = graph.Snapshot;
-        // 写出的块：从入口沿没有被消费的边可达的块；只抛出尾不写。
-        var kept = new bool[snapshot.BlockCount];
+        // 写出的块：从入口沿没有被消费的边可达的块；只抛出尾不写。被消费的分支之后接的是消费它的声明的落点所在的块。
+        kept = new bool[snapshot.BlockCount];
         kept[snapshot.Entry.Index] = true;
         foreach (int index in graph.Order)
         {
             var block = new BlockId(index);
             if (!kept[index] || graph.EndsInThrow(block)) continue;
+            if (Consumer(block) is { } consumer) { kept[consumer.Claim.Landing.Block.Index] = true; continue; }
             var exits = snapshot.Terminator(block).Exits;
             for (int e = 0; e < exits.Length; e++)
                 if (exits[e].Kind == ExitKind.Target && !IsCheck(new EdgeId(block, e))) kept[exits[e].Target.Index] = true;
@@ -160,9 +162,12 @@ internal sealed class Writer
                 if (p == count || graph.Effect(new OccurrenceId(block, p)) is not { } effect) continue;
                 var reference = EffectRef.Of(effect.Occurrence);
                 if (effect.Kind == NativeEffectKind.Unnamed) Hole(reference, "未命名的效果", HoleLayer.Fact, null, effect.Detail);
-                else if (effect.Kind == NativeEffectKind.Throw) EffectHole(reference, $"抛出 {effect.Exception}");
-                else if (effect.Kind != NativeEffectKind.None && !occupiedBy.ContainsKey(reference)) EffectHole(reference, effect.Kind.ToString());
+                else if (effect.Kind == NativeEffectKind.Throw && effect.Value is null) EffectHole(reference, $"抛出 {effect.Exception}");
+                else if (effect.Kind != NativeEffectKind.None && !occupiedBy.ContainsKey(reference))
+                    EffectHole(reference, effect.Kind == NativeEffectKind.Throw ? "抛出异常对象" : effect.Kind.ToString());
                 ended = effect.Ends;
+                // 路径在这个效果处结束时，落在它之后的声明（占用它的那个操作）仍在这里写出。
+                if (ended) Landing(new ProgramPoint(block, p + 1));
             }
             if (!ended) Terminate(block, count);
         }
@@ -172,10 +177,47 @@ internal sealed class Writer
         graph.Snapshot.Terminator(edge.Source) is { Kind: TerminatorKind.Branch } terminator
         && graph.Tail(terminator.Exits[edge.Exit].Target) != ExceptionKind.None;
 
+    /// <summary>
+    /// 被消费的分支（设计 9.5、第 10 节）：块末有一条不通往只抛出尾的出口被某条声明占用。这个分支是那个操作内部的判断，
+    /// 输出里从这里直接接到那条声明的落点所在的块；凭据保证了经过这个分支的每条路径都到达落点，其间没有别的效果。
+    /// </summary>
+    private Certificate? Consumer(BlockId block)
+    {
+        var exits = graph.Snapshot.Terminator(block).Exits;
+        for (int e = 0; e < exits.Length; e++)
+            if (exits[e].Kind == ExitKind.Target && !IsCheck(new EdgeId(block, e))
+                && occupiedBy.TryGetValue(EffectRef.Of(new EdgeId(block, e)), out var consumer)) return consumer;
+        return null;
+    }
+
+    /// <summary>
+    /// 块的参数在输出里有没有值：每条走得到的入边都由输出写出并赋值。入边的源块被一个被消费的分支略去，或源块的块末被消费
+    /// （输出从那里直接接到落点，不经过这条边）时，经这条边进入的执行在输出里没有这次赋值，参数不可得。
+    /// 源块是只抛出尾的不计：走到那里的执行以异常结束。
+    /// </summary>
+    private bool Assigned(BlockId block)
+    {
+        foreach (var edge in graph.Shape.InEdges(block))
+        {
+            if (!graph.Live(edge)) continue;
+            var source = edge.Source;
+            if (kept[source.Index] ? Consumer(source) is not null && !IsCheck(edge) : graph.Tail(source) == ExceptionKind.None) return false;
+        }
+        return true;
+    }
+
     private void Terminate(BlockId block, int count)
     {
         use = new ProgramPoint(block, count + 1);
         var terminator = graph.Snapshot.Terminator(block);
+        if (Consumer(block) is { } consumer)
+        {
+            for (int e = 0; e < terminator.Exits.Length; e++)
+                if (IsCheck(new EdgeId(block, e)) && !occupiedBy.ContainsKey(EffectRef.Of(new EdgeId(block, e))))
+                    EffectHole(EffectRef.Of(new EdgeId(block, e)), $"条件抛出 {graph.Tail(terminator.Exits[e].Target)}");
+            Emit("br", target: consumer.Claim.Landing.Block.Index);
+            return;
+        }
         switch (terminator.Kind)
         {
             case TerminatorKind.Single when terminator.Exits[0].Kind == ExitKind.Target:
@@ -270,6 +312,16 @@ internal sealed class Writer
         }
         else if (condition is { Kind: TermKind.Operation, Op: Op.Slt }) forms.Add(([condition.Operands[0], condition.Operands[1]], [], "blt", false));
         else if (condition is { Kind: TermKind.Operation, Op: Op.Ult }) forms.Add(([condition.Operands[1], condition.Operands[0]], ["cgt.un"], "brtrue", false));
+        else
+        {
+            // 一位的条件的其他写法，都只是候选，写出之后照常按目录展开核对：
+            // 某个值的符号位——“小于零”；只取 0 与 1 的值的最低位——“非零”。
+            if (condition is { Kind: TermKind.Slice } bit)
+                foreach (int width in (int[])[32, 64])
+                    if (bit.Offset == width - 1 && bit.Operands[0].Width >= width)
+                        forms.Add(([bit.Operands[0].Width == width ? bit.Operands[0] : terms.Slice(bit.Operands[0], 0, width), terms.Zero(width)], [], "blt", false));
+            forms.Add(([terms.ZeroExtend(condition, 32)], [], "brtrue", false));
+        }
         foreach (var (operands, middle, opcode, swap) in forms)
         {
             var body = new List<ManagedInstruction>();
@@ -349,7 +401,7 @@ internal sealed class Writer
                 continue;
             }
             code.AddRange(body);
-            Emit(entry.Il, entity: claim.Entity);
+            if (!entry.Elided) Emit(entry.Il, entity: claim.Entity);
             if (certificate.ResultType is not null)
             {
                 if (definitionLocal.TryGetValue(certificate, out int local)) Emit("stloc", local);
@@ -359,11 +411,16 @@ internal sealed class Writer
         }
     }
 
-    /// <summary>静态类型相容（设计 9.7，不补转换）：栈上的类别相同；对象引用的类能当作所要求的类使用；数组操作的对象是元素位宽相符的数组。</summary>
+    /// <summary>
+    /// 静态类型相容（设计 9.7，不补转换）：栈上的类别相同；对象引用的类能当作所要求的类使用；数组操作的对象是元素位宽相符的数组；
+    /// 托管指针指向的类型与所要求的相同（ECMA-335 III.1.8.1.2.1：托管指针之间只有指向同一类型才相容）——
+    /// 两个地址数值相同（外层值与它偏移为零的字段）不说明它们的类型相同。
+    /// </summary>
     private bool Compatible(Expr expression, TypeShape expected, int elementBits)
     {
         var actual = expression.Type;
         if (actual.Kind != expected.Kind) return false;
+        if (expected.Kind == StackKind.ByRef) return expected.Entity == default || actual.Entity == expected.Entity;
         if (expected.Kind != StackKind.Object) return true;
         if (elementBits > 0)
             return !expression.Null && metadata.ElementOf(actual.Entity) is { } element && element.StorageBits == elementBits && element.Kind == StackKind.Int32;
@@ -407,6 +464,7 @@ internal sealed class Writer
         if (term.Kind == TermKind.BlockParameter || term is { Kind: TermKind.Slice, Offset: 0 } && term.Operands[0].Kind == TermKind.BlockParameter)
         {
             var parameter = term.Kind == TermKind.BlockParameter ? term : term.Operands[0];
+            if (!Assigned(parameter.Block)) return null;
             if (!parameterLocals.TryGetValue(parameter, out var widths)) parameterLocals[parameter] = widths = [];
             if (!widths.TryGetValue(term.Width, out int slot))
             {

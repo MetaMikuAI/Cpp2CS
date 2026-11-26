@@ -58,6 +58,20 @@ internal static class Counterexamples
             new("返回类型不相容", "ECMA-335 III.1.6 表 III.9、III.3.57", () =>
                 Rejected(() => Expand([0x14, 0x2a], Int32), "目录里没有适用的变体")),
 
+            // ECMA-335 III.4.28 stfld：obj 是托管指针时，它指向的值类型须含有该字段；III.1.8.1.2.1：托管指针只有指向同一类型才相容。
+            // 语料 Fields.WriteNested 的真实 IL 是 ldarg.0; ldflda Outer::Inner; ldarg.1; stfld Inner::X。内层的值位于外层偏移 0 处，
+            // 两个地址数值相同；直接拿外层的地址写内层的字段，原生效果相同，但写出的 IL 类型不对。展开必须拒绝后一种写法。
+            new("经地址写字段须指向含该字段的类型", "ECMA-335 III.4.28、III.1.8.1.2.1；语料 Fields.WriteNested 的真实 IL", () =>
+            {
+                var outer = new TypeShape(StackKind.ByRef, 64, false, new EntityRef(EntityKind.Type, 1));
+                var view = new NestedFieldView();
+                byte[] proper = [0x02, 0x7c, 1, 0, 0, 4, 0x03, 0x7d, 2, 0, 0, 4, 0x2a];
+                byte[] direct = [0x02, 0x03, 0x7d, 2, 0, 0, 4, 0x2a];
+                var graph = Expand(proper, null, [outer, Int32], metadata: view);
+                if (graph.Blocks.Sum(b => b.Occurrences.Length) != 1) return "真实 IL 的写法应展开成一次写入";
+                return Rejected(() => Expand(direct, null, [outer, Int32], metadata: view), "目录里没有适用的变体");
+            }),
+
             // 设计 14.6：接口查找的参数是接收者对象 (o, I, s)；运行时 vm/ClassInlines.h 的 GetInterfaceInvokeDataFromVTable(obj, itf, slot)
             // 在慢路径上把对象本身交给 GetInterfaceInvokeDataFromVTableSlowPath。
             new("接口查找保留接收者", "设计 14.6；libil2cpp vm/ClassInlines.h GetInterfaceInvokeDataFromVTable", () =>
@@ -522,6 +536,19 @@ internal static class Counterexamples
         public TypeShape Type(EntityRef entity) => Int32;
         public FieldShape Field(EntityRef entity) => new(entity, default, Int32, IsStatic: true, HasInitializer: true, PreciseInitialization: true, -1);
         public MethodShape Method(EntityRef entity) => new(entity, false, [], null, VariantCondition.StaticMethod);
+    }
+
+    /// <summary>
+    /// 嵌套的值类型：类型 1（外层）在偏移 0 处有字段 0x04000001，它的类型是类型 2（内层）；类型 2 在偏移 0 处有 int32 字段 0x04000002。
+    /// </summary>
+    private sealed class NestedFieldView : IMetadataView
+    {
+        private static readonly EntityRef Outer = new(EntityKind.Type, 1), Inner = new(EntityKind.Type, 2);
+        public TypeShape Type(EntityRef entity) => Int32;
+        public FieldShape Field(EntityRef entity) => entity.Key == 0x04000001
+            ? new(entity, Outer, new TypeShape(StackKind.Value, 32, false, Inner), IsStatic: false, HasInitializer: false, PreciseInitialization: false, 0)
+            : new(entity, Inner, Int32, IsStatic: false, HasInitializer: false, PreciseInitialization: false, 0);
+        public MethodShape Method(EntityRef entity) => throw new ExpansionException("夹具里没有方法", "");
     }
 
     /// <summary>方法一律是接口上的、无参无返回值的实例方法。</summary>

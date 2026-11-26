@@ -14,7 +14,7 @@ public enum NativeEffectKind : byte { None, Read, Write, Call, ClassInitialize, 
 /// <summary>
 /// 一个出现的效果。项都是取定之后的写法（见 <see cref="EffectGraph.Resolve"/>）。
 /// 读：Address、Width，Value 是读取的结果；写：Address、Value；新对象：Class，Value 是新引用；调用：Target、Callee，Arguments 按被调方法的签名、按栈上的位宽，
-/// Result 是按返回类型取出的栈上的值；类初始化：Class；抛出：Exception；未命名：Detail 是原因。
+/// Result 是按返回类型取出的栈上的值；类初始化：Class；抛出：运行时构造的异常给出 Exception，托管代码给出的异常对象在 Value 里；未命名：Detail 是原因。
 /// </summary>
 public sealed record NativeEffect(OccurrenceId Occurrence, NativeEffectKind Kind)
 {
@@ -68,6 +68,7 @@ public sealed class EffectGraph
     private readonly List<Term> stored = [];
     private readonly List<int> order = [];
     private readonly HashSet<EdgeId> live = [];
+    private readonly Dictionary<Term, Term> runtimeReads = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>各形参在栈上的值（原生一侧的项）与类型。</summary>
     public IReadOnlyList<(Term Value, TypeShape Type, int Index)> Arguments => arguments;
@@ -94,6 +95,19 @@ public sealed class EffectGraph
     public Term? ReturnSlot(BlockId block) => returnSlots[block.Index];
     /// <summary>块在一次抛出处结束：其后的出现与出口不属于任何执行（设计 7.5）。</summary>
     public bool EndsInThrow(BlockId block) => ends[block.Index];
+
+    /// <summary>
+    /// 这个值是运行时状态上一次读取的结果时，是那次读取的地址（设计 7.4）：映像可写数据区里既不是元数据槽、也不是链接期常量的字
+    /// （运行时私有状态，例如方法的元数据初始化标志），或类结构上的字（类的初始化完成标志、静态区指针）。
+    /// 这些读取不是托管位置上的读取，没有效果；条件只依赖这种值的分支不可表达（设计 9.5）。
+    /// </summary>
+    public Term? RuntimeStateAddress(Term value) => runtimeReads.GetValueOrDefault(value);
+
+    /// <summary>地址落在类结构里（设计 7.4）：类指针（类型实体）本身，或它加常量偏移。类结构是运行时的数据，不是托管位置。</summary>
+    internal static bool OnClassStructure(Term address) =>
+        address is { Kind: TermKind.Entity } named ? named.Entity.Kind == EntityKind.Type
+        : address is { Kind: TermKind.Operation, Op: Op.Add } sum && sum.Operands[1].IsConstant
+            && sum.Operands[0] is { Kind: TermKind.Entity } root && root.Entity.Kind == EntityKind.Type;
 
     /// <summary>块是只抛出尾（设计 7.5）时，是它抛出的异常的种类：到抛出为止没有可观察的效果。</summary>
     public ExceptionKind Tail(BlockId block)
@@ -202,6 +216,10 @@ public sealed class EffectGraph
                 {
                     var first = edges[0].Row[k];
                     if (edges.TrueForAll(e => ReferenceEquals(e.Row[k], first))) resolved[parameters[k]] = first;
+                    // 各条入边只在低位传入同一个值（被调方只保存低半的寄存器：高半各不相关）：参数的低位就是那个值，高位仍是它自己的高位。
+                    else if (first is { Kind: TermKind.Concat } pieces && pieces.Operands[0] is var low
+                        && edges.TrueForAll(e => e.Row[k] is { Kind: TermKind.Concat } other && ReferenceEquals(other.Operands[0], low)))
+                        resolved[parameters[k]] = terms.Concat(low, terms.Slice(parameters[k], low.Width, first.Width - low.Width));
                 }
             // 帧：各条入边上内容相同的偏移保留。
             Dictionary<long, Term> frame = [];
@@ -231,11 +249,13 @@ public sealed class EffectGraph
                         }
                         else if (address.IsConstant && facts.InImageData((ulong)address.Value))
                         {
-                            if (read.Width == facts.Layout.PointerBits && facts.TypeAtSlot((ulong)address.Value) is { } type)
+                            if (read.Width == facts.Layout.PointerBits && facts.EntityAtSlot((ulong)address.Value) is { } type)
                                 resolved[results[0]] = terms.Entity(type, read.Width);
                             else if (read.Width == facts.Layout.PointerBits && facts.LinkConstant((ulong)address.Value) is { } constant)
                                 resolved[results[0]] = terms.Bits(constant, read.Width);
+                            else runtimeReads[results[0]] = address;
                         }
+                        else if (OnClassStructure(address)) runtimeReads[results[0]] = address;
                         else if (EngineFacts.MentionsStack(address, pointer)) effect = Unnamed($"地址由栈指针算出，但不是常量偏移：{address}");
                         else effect = new(id, NativeEffectKind.Read) { Address = address, Width = read.Width, Value = results[0] };
                         break;
@@ -377,6 +397,10 @@ public sealed class EffectGraph
                 return Argument(new Slot(SlotKind.Integer, 0)) is { } allocated && Returned(new Slot(SlotKind.Integer, 0)) is { } created
                     ? new(id, NativeEffectKind.NewObject) { Class = allocated, Value = created } : unnamed("新对象的调用没有给出类或结果的槽位");
             case RuntimeEffect.Unobservable:
+                // 结果登记为“实参所指的元数据槽的内容”：类型的槽给出该类型的实体。
+                if (operation.ReturnsSlot && Argument(new Slot(SlotKind.Integer, 0)) is { IsConstant: true } slot
+                    && facts.EntityAtSlot((ulong)slot.Value) is { } type && Returned(new Slot(SlotKind.Integer, 0)) is { } content && content.Width == pointerBits)
+                    resolved[content] = terms.Entity(type, pointerBits);
                 return null;
             case RuntimeEffect.Pure:
             {
@@ -399,8 +423,9 @@ public sealed class EffectGraph
                 if (Argument(new Slot(SlotKind.Integer, 0)) is { Kind: TermKind.Attribute } thrownObject
                     && thrownObject.Attribute.Value == KernelAttributes.ExceptionObject)
                     return new(id, NativeEffectKind.Throw) { Exception = (ExceptionKind)(int)thrownObject.Operands[0].Value, Ends = true };
-                // 抛出一个托管代码构造的异常对象：对应 throw 指令，目录里还没有这一项。路径在此结束。
-                return unnamed("抛出的异常对象不是运行时构造的：throw 指令尚无目录项") with { Ends = true };
+                // 抛出一个托管代码给出的异常对象：Value 是这个对象。路径在此结束。
+                return Argument(new Slot(SlotKind.Integer, 0)) is { } thrown
+                    ? new(id, NativeEffectKind.Throw) { Value = thrown, Ends = true } : unnamed("抛出没有给出异常对象的槽位") with { Ends = true };
             default:
                 return unnamed($"运行时操作 {operation.Id} 的效果种类没有处理");
         }

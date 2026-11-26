@@ -136,7 +136,8 @@ public sealed record ProofOutcome(Claim Claim, Certificate? Certificate, Refutat
 /// <summary>
 /// 内核按实体提问的元数据（设计第 8 节）：形状之外，解释层还要问的几件事。
 /// Accessible：成员在 from 这个类的方法里能否合法访问；Assignable：一个类型的值能否不经转换当作另一个类型使用；
-/// ElementOf：一维零基数组类型的元素类型；FieldAt：类型（含基类）里位于该字节偏移的实例字段。回答不了时为假或为空。
+/// ElementOf：一维零基数组类型的元素类型；FieldAt：类型（含基类）里位于该字节偏移的实例字段；
+/// StaticFieldAt：类型自己声明的、位于普通静态区该字节偏移的静态字段。回答不了时为假或为空。
 /// </summary>
 public interface IEntityMetadata : IMetadataView
 {
@@ -144,6 +145,7 @@ public interface IEntityMetadata : IMetadataView
     bool Assignable(EntityRef from, EntityRef to);
     TypeShape? ElementOf(EntityRef array);
     FieldShape? FieldAt(EntityRef type, int offset);
+    FieldShape? StaticFieldAt(EntityRef type, int offset);
 }
 
 /// <summary>

@@ -460,8 +460,8 @@ public sealed partial class CoExecution
                 var condition = Value(terminator.Condition!, side, ref state, lower, foreign);
                 if (state.Conditions.Decide(condition) is bool taken)
                 {
-                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, taken ? 0 : 1));
                     Advance(Go(terminator.Exits[taken ? 0 : 1], ref state), ref state);
+                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, taken ? 0 : 1));
                     return null;
                 }
                 var forked = state;
@@ -477,8 +477,8 @@ public sealed partial class CoExecution
                 if (selector.IsConstant)
                 {
                     int chosen = selector.Value < (UInt128)last ? (int)selector.Value : last;
-                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, chosen));
                     Advance(Go(terminator.Exits[chosen], ref state), ref state);
+                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, chosen));
                     return null;
                 }
                 var arms = ImmutableArray.CreateBuilder<(ImmutableArray<(Term, bool)>, Side)>(last + 1);
@@ -568,9 +568,16 @@ public sealed partial class CoExecution
                         case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.NewObject:
                             return new Event(EventKind.Allocate) { Class = Argument(call, operands, new Slot(SlotKind.Integer, 0)), Occurrence = id, After = after };
                         case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.Unobservable:
-                            for (int k = 0; k < results.Length; k++) env = env.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
+                        {
+                            // 结果登记为“实参所指的元数据槽的内容”时，类型的槽给出的是该类型的实体（与读这个槽相同）。
+                            Term? content = callee.Operation.ReturnsSlot && Argument(call, operands, new Slot(SlotKind.Integer, 0)) is { IsConstant: true } slot
+                                && facts.EntityAtSlot((ulong)slot.Value) is { } named ? terms.Entity(named, facts.Layout.PointerBits) : null;
+                            for (int k = 0; k < results.Length; k++)
+                                env = env.SetItem(results[k], content is not null && call.ResultSlots[k] == new Slot(SlotKind.Integer, 0) && results[k].Width == content.Width
+                                    ? content : EventResult(state.Serial, k, results[k].Width));
                             state = state with { Serial = state.Serial + 1 };
                             break;
+                        }
                         case CalleeKind.Runtime when callee.Operation!.Effect is RuntimeEffect.Pure or RuntimeEffect.MakeException:
                         {
                             // 没有内存效果的运行时操作：结果是登记的具名函数作用在实参上，或一个运行时构造的、种类已知的异常对象。
@@ -595,8 +602,9 @@ public sealed partial class CoExecution
                         case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.ThrowArgument:
                         {
                             var thrown = Argument(call, operands, new Slot(SlotKind.Integer, 0));
+                            // 抛出托管代码给出的异常对象：事件的操作数是这个对象。运行时构造的异常只比较种类（设计 16.2）。
                             if (thrown.Kind != TermKind.Attribute || thrown.Attribute.Value != KernelAttributes.ExceptionObject)
-                                throw new Refuted(Verdict.MissingFact, $"抛出的异常对象没有命名：{thrown}");
+                                return new Event(EventKind.Throw) { Values = [thrown], Occurrence = id };
                             return new Event(EventKind.Throw) { Exception = (ExceptionKind)(int)thrown.Operands[0].Value };
                         }
                         default:
@@ -699,15 +707,19 @@ public sealed partial class CoExecution
         }
         if (address.IsConstant && facts.InImageData((ulong)address.Value))
         {
-            // 类型的元数据槽：读取是该类型的实体（类指针）。槽在被读取时已经初始化（设计 14.5、16.2）。
-            if (width == facts.Layout.PointerBits && facts.TypeAtSlot((ulong)address.Value) is { } type) return terms.Entity(type, width);
+            // 类型与字符串字面量的元数据槽：读取是该实体（类指针、字面量对象）。槽在被读取时已经初始化（设计 14.5、16.2）。
+            if (width == facts.Layout.PointerBits && facts.EntityAtSlot((ulong)address.Value) is { } type) return terms.Entity(type, width);
             // 装入后只读的指针字（全局偏移表等）：值是链接期常量。
             if (width == facts.Layout.PointerBits && facts.LinkConstant((ulong)address.Value) is { } constant) return terms.Bits(constant, width);
+            // 其余用途的元数据槽（类型句柄、方法、字段）：初始化之后不变，读取没有版本（设计 7.4）。
+            if (width == facts.Layout.PointerBits && facts.MetadataSlot((ulong)address.Value))
+                return terms.Attribute(new AttributeId(KernelAttributes.ImageWord), width, address, terms.Zero(32), terms.Zero(32));
             // 其余的字是运行时私有状态，可能被改写：读取的身份带上历元与序号，隔着事件、运行时调用或对数据区的写入的两次读取不视为同值。
             return terms.Attribute(new AttributeId(KernelAttributes.ImageWord), width, address, terms.Constant(state.Epoch, 32), terms.Constant(state.Serial, 32));
         }
         if (MentionsStack(address, pointer)) throw new Refuted(Verdict.MissingFact, $"地址由栈指针算出，但不是常量偏移：{address}");
-        heapAccess = true;
+        // 类结构上的读取（初始化完成标志、静态区指针）读的是运行时的数据，不是托管位置（设计 7.4）：它有读取的身份，但不是效果。
+        heapAccess = !Facts.EffectGraph.OnClassStructure(address);
         return HeapRead(inner ? state.TemplateWrites : state.NativeWrites, address, width, state.Epoch);
     }
 
@@ -953,6 +965,9 @@ public sealed partial class CoExecution
                     return new Event(EventKind.Initialize) { Effect = effect, Occurrence = id, After = next };
                 case EffectKind.NewObject:
                     return new Event(EventKind.Allocate) { Effect = effect, Occurrence = id, After = next };
+                case EffectKind.Throw:
+                    // 抛出一个异常对象：事件的操作数是这个对象，路径在此结束。
+                    return new Event(EventKind.Throw) { Effect = effect, Values = [operands[0]] };
                 default:
                     throw new Refuted(Verdict.Insufficient, $"模板效果 {effect.Kind}（{effect.Function}）的对照尚未实现");
             }
@@ -964,7 +979,7 @@ public sealed partial class CoExecution
 
     private static string Name(Event e) => e.Kind switch
     {
-        EventKind.Throw => $"抛出 {e.Exception}",
+        EventKind.Throw => e.Values.Length == 1 ? "抛出异常对象" : $"抛出 {e.Exception}",
         EventKind.Call => e.Effect is { } effect ? $"调用 {effect.Entity}" : $"调用 0x{e.Address:x}",
         EventKind.Return => "返回",
         EventKind.Initialize => "类初始化",
@@ -978,7 +993,15 @@ public sealed partial class CoExecution
         var conditions = state.Conditions;
         switch (onNative.Kind, onTemplate.Kind)
         {
-            case (EventKind.Throw, EventKind.Throw) when onNative.Exception == onTemplate.Exception:
+            case (EventKind.Throw, EventKind.Throw) when onNative.Values.Length == 1 && onTemplate.Values.Length == 1:
+                // 双方各抛出一个异常对象：同一个对象。
+                if (!conditions.Same(onNative.Values[0], onTemplate.Values[0]))
+                    throw new Refuted(Verdict.Insufficient,
+                        $"抛出的异常对象不同：现场 {conditions.Evaluate(onNative.Values[0])}，模板 {conditions.Evaluate(onTemplate.Values[0])}");
+                CompareWrites(state);
+                paths++;
+                return;
+            case (EventKind.Throw, EventKind.Throw) when onNative.Values.Length == 0 && onTemplate.Values.Length == 0 && onNative.Exception == onTemplate.Exception:
                 CompareWrites(state);
                 paths++;
                 return;

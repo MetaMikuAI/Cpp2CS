@@ -95,6 +95,9 @@ public sealed class PathConditions
             if (t.Kind == TermKind.Attribute && t.Attribute.Value == KernelAttributes.Load && !t.Operands[1].IsZero
                 && immutable.Contains((t.Operands[0], t.Width)))
                 return terms.Attribute(t.Attribute, t.Width, t.Operands[0], terms.Zero(32));
+            // 运行时不可变的位置不被任何写入改变（设计 7.4）：排在一次不能证明不重叠的写入之后的读取，仍是同一个值。
+            if (t.Kind == TermKind.Attribute && t.Attribute.Value == KernelAttributes.LoadAfter && immutable.Contains((t.Operands[0], t.Width)))
+                return terms.Attribute(new AttributeId(KernelAttributes.Load), t.Width, t.Operands[0], terms.Zero(32));
             // 规格登记的等式：登记的操作数为零时，具名函数的结果为零。
             if (t.Kind == TermKind.Attribute)
                 foreach (var (function, operand) in Cpp2CS.Spec.Runtime.RuntimeEquations.ZeroPreserving)

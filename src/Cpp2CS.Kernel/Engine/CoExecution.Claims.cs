@@ -25,10 +25,15 @@ public sealed partial class CoExecution
     /// Deferred：与此前被占用的效果不能证明独立、因而要落在本声明之后的旁观效果。Reads 与 TemplateReads：
     /// 上一个同步点以来现场被占用的读取、模板做的读取。Tail：上一条分支边被占用，其后没有别的效果——接下来的抛出属于这条边。
     /// Excused：这条路径走进了一个被推后的旁观检查的只抛出尾。Outside：路径上确立了条件的、不属于本声明的分支。
+    /// Consumed：这条路径经过了一个被消费的分支（设计 9.5），还没有到落点——输出里从那个分支直接接到落点，
+    /// 所以其间不能有旁观效果，路径也不能从别处离开。
     /// </summary>
     internal sealed record Trail(bool Entered, ImmutableList<Passed> Occupied, ImmutableList<Passed> Deferred,
         ImmutableList<(Term Address, int Width, Term Value)> Reads, ImmutableList<Term> TemplateReads, int Epoch,
-        bool Tail, bool Excused, ImmutableHashSet<BlockId> Outside);
+        bool Tail, bool Excused, ImmutableHashSet<BlockId> Outside)
+    {
+        public bool Consumed { get; init; }
+    }
 
     private sealed class ClaimRun
     {
@@ -46,6 +51,9 @@ public sealed partial class CoExecution
         public required bool[] Cyclic;
         public int Landings;
         public bool Peeking;
+        /// <summary>被消费的分支所在的块；被占用的块末上、在某条路径上走过而没被占用的出口。</summary>
+        public readonly HashSet<BlockId> Consumed = [];
+        public readonly HashSet<EdgeId> Unoccupied = [];
     }
 
     private sealed class ClaimRefuted(Obligation obligation, string detail, string? row = null) : Exception(detail)
@@ -122,6 +130,10 @@ public sealed partial class CoExecution
             foreach (var effect in claim.Occupied)
                 if (!run.Touched.Contains(effect))
                     throw new ClaimRefuted(Obligation.Correspondence, $"占用的 {effect} 在任何路径上都没有作为这个操作的效果出现");
+            // 被消费的分支不出现在输出里（设计 9.5）：它的每个走得到的出口都归这条声明。
+            foreach (var edge in run.Unoccupied.OrderBy(e => e.Source.Index).ThenBy(e => e.Exit))
+                if (run.Consumed.Contains(edge.Source))
+                    throw new ClaimRefuted(Obligation.Correspondence, $"被消费的分支 B{edge.Source.Index} 的出口 {edge.Exit} 没有被占用");
         }
         catch (ClaimRefuted refuted)
         {
@@ -193,7 +205,12 @@ public sealed partial class CoExecution
                     throw new ClaimRefuted(Obligation.Coverage, "有一条路径到达落点而没有经过被占用的效果");
                 Synchronize(state, onNative);
                 return;
-            case EventKind.Throw when trail.Tail:
+            case EventKind.Throw when onNative.Values.Length == 1 && run!.Occurrences.Contains(onNative.Occurrence):
+                // 被占用的“抛出异常对象”：路径在这里结束，它就是这条路径上的落点。
+                if (!run.Peeking) run.Landings++;
+                Synchronize(Occupy(state, new Passed(EffectRef.Of(onNative.Occurrence), EffectClass.Call, null, 0, ExceptionKind.None)), onNative);
+                return;
+            case EventKind.Throw when trail.Tail && onNative.Values.Length == 0:
                 Synchronize(state, onNative);
                 return;
             case EventKind.Throw or EventKind.Return or EventKind.Trap or EventKind.Departed:
@@ -290,6 +307,8 @@ public sealed partial class CoExecution
     /// </summary>
     private State Bystander(State state, Passed passed)
     {
+        if (state.Trail!.Consumed)
+            throw new ClaimRefuted(Obligation.Motion, $"被消费的分支与落点之间有旁观效果 {passed.Effect}（{passed.Class}）：输出里这一段不存在");
         var trail = state.Trail! with { Tail = false };
         if (trail.Entered)
             foreach (var occupied in trail.Occupied)
@@ -355,18 +374,29 @@ public sealed partial class CoExecution
         };
     }
 
-    /// <summary>现场的分支在路径条件下已经判定：走的那条边被占用时，其后的抛出属于它。</summary>
+    /// <summary>
+    /// 现场的分支在路径条件下已经判定，state 已经在所走的那一臂上。走的那条边被占用时，其后的抛出属于它；
+    /// 这一臂不是只抛出尾时，这个分支被消费（设计 9.5）。
+    /// </summary>
     private State Decided(State state, EdgeId edge)
     {
-        bool occupied = run!.Edges.Contains(edge);
-        if (occupied && !run.Peeking) run.Touched.Add(EffectRef.Of(edge));
-        return state with { Trail = state.Trail! with { Tail = occupied, Excused = false } };
+        var trail = state.Trail!;
+        if (!run!.Edges.Contains(edge))
+        {
+            if (!run.Peeking && run.Terminators.Contains(edge.Source)) run.Unoccupied.Add(edge);
+            return state with { Trail = trail with { Tail = false, Excused = false } };
+        }
+        if (run.Peeking) return state with { Trail = trail with { Tail = true, Excused = false } };
+        run.Touched.Add(EffectRef.Of(edge));
+        bool consumed = Peek(state) == ExceptionKind.None;
+        if (consumed) run.Consumed.Add(edge.Source);
+        return state with { Trail = trail with { Entered = true, Tail = true, Excused = false, Consumed = trail.Consumed || consumed } };
     }
 
     /// <summary>这一臂是不是只抛出尾（设计 7.5）：沿它走到第一个事件，途中没有托管堆上的读写，事件是抛出。是则返回异常的种类。</summary>
     private ExceptionKind Peek(State arm)
     {
-        var probe = arm with { Trail = arm.Trail! with { Entered = false, Occupied = [], Deferred = [], Tail = true } };
+        var probe = arm with { Trail = arm.Trail! with { Entered = false, Occupied = [], Deferred = [], Tail = true, Consumed = false } };
         run!.Peeking = true;
         ExceptionKind kind = ExceptionKind.None;
         try
@@ -387,6 +417,8 @@ public sealed partial class CoExecution
         var block = state.Native.Block;
         var before = state.Trail!;
         bool owned = run!.Terminators.Contains(block);
+        if (!owned && before.Consumed)
+            throw new ClaimRefuted(Obligation.Motion, $"被消费的分支与落点之间有旁观的分支 B{block.Index}：输出里这一段不存在");
         int count = fork.Arms.Length;
         var arms = new State?[count];
         var tails = new ExceptionKind[count];
@@ -410,9 +442,11 @@ public sealed partial class CoExecution
             if (arms[i] is not { } arm) continue;
             var edge = new EdgeId(block, i);
             bool occupied = run.Edges.Contains(edge);
-            if (occupied && tails[i] == ExceptionKind.None)
-                throw new ClaimRefuted(Obligation.Correspondence, $"占用的边 {EffectRef.Of(edge)} 不通往只抛出尾（被消费的分支不在首批范围内）");
+            // 被占用的边不通往只抛出尾：这个分支被消费（设计 9.5），它是操作内部的判断，不出现在输出里。
+            bool consumed = occupied && tails[i] == ExceptionKind.None;
             if (occupied) run.Touched.Add(EffectRef.Of(edge));
+            else if (owned) run.Unoccupied.Add(edge);
+            if (consumed) run.Consumed.Add(block);
             // 这个分支其余各臂上的条件抛出，对走这一臂的执行来说是已经过的效果。
             for (int j = 0; j < count; j++)
             {
@@ -427,7 +461,7 @@ public sealed partial class CoExecution
                 var self = new Passed(EffectRef.Of(edge), EffectClass.ConditionalThrow, null, 0, tails[i]);
                 foreach (var passed in before.Occupied) excused |= !Independent(state, passed, self, out _);
             }
-            var trail = arm.Trail! with { Tail = occupied, Excused = excused };
+            var trail = arm.Trail! with { Entered = arm.Trail.Entered || occupied, Tail = occupied, Excused = excused, Consumed = before.Consumed || consumed };
             if (!owned && !run.OwnOnly) trail = trail with { Outside = trail.Outside.Add(block) };
             Explore(arm with { Trail = trail });
         }
@@ -437,6 +471,10 @@ public sealed partial class CoExecution
     private void LeaveWindow(State state, string what)
     {
         var trail = state.Trail!;
+        // 区域的各出口必须能归并（设计 9.5）。实现了第一种形式：经过被消费的分支的每条路径都到达落点这一个程序点。
+        if (trail.Consumed)
+            throw new ClaimRefuted(Obligation.Destination,
+                $"经过被消费的分支的一条路径以“{what}”离开，没有到达落点：区域的出口不能归并（按结果分支、保留一份等价的后续这两种形式尚未实现）");
         if (trail.Entered && !trail.Excused)
             foreach (var occupied in trail.Occupied)
                 if (occupied.Class is not (EffectClass.Read or EffectClass.ConditionalThrow))

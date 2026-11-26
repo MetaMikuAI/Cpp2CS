@@ -239,6 +239,8 @@ public sealed record CatalogEntry(string Id, string Il, string Summary, Immutabl
     public bool ImpliedReference { get; init; }
     /// <summary>方法操作数是构造函数：this 由模板里“新对象”一步的结果给出，栈上只有其余的实参；结果是新对象。</summary>
     public bool Constructs { get; init; }
+    /// <summary>下降时不写出指令：空操作的 IL 写法为空（设计 9.1），Il 只在取模板时使用。</summary>
+    public bool Elided { get; init; }
     /// <summary>登记的实现偏差，与模板里的有定义条件对应。</summary>
     public ImmutableArray<Deviation> Deviations { get; init; } = [];
 }

@@ -119,6 +119,28 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         return slots[address] = result;
     }
 
+    /// <summary>
+    /// 字符串字面量的元数据槽：用途 5（il2cpp-metadata.h 的 kIl2CppMetadataUsageStringLiteral），下标指向字面量表；
+    /// vm/MetadataCache.cpp 的 InitializeRuntimeMetadata 把它换成 GetStringLiteralFromIndex 的结果。实体是内容相同的最小下标。
+    /// </summary>
+    /// <summary>元数据槽：低位为 1 的编码，用途在 1 到 7 之间（il2cpp-metadata.h 的 Il2CppMetadataUsage）。</summary>
+    public bool MetadataSlot(ulong address)
+    {
+        if (input.Elf.FileOffset(address, 8) is not int offset) return false;
+        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
+        return value >> 32 == 0 && (value & 1) == 1 && (uint)value >> 29 is >= 1 and <= 7;
+    }
+
+    public EntityRef? StringAtSlot(ulong address)
+    {
+        if (input.Elf.FileOffset(address, 8) is not int offset) return null;
+        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
+        uint encoded = unchecked((uint)value);
+        int index = (int)((encoded & 0x1FFFFFFE) >> 1);
+        if (value >> 32 != 0 || (encoded & 1) != 1 || encoded >> 29 != 5 || index >= input.Model.StringLiterals.Count) return null;
+        return metadata.Keys.StringKey(input.Model.StringLiterals[index]) is long key ? new(EntityKind.String, key) : null;
+    }
+
     public ulong? LinkConstant(ulong address)
     {
         const uint RelativeRelocation = 1027, ReadOnlyAfterRelocation = 0x6474e552;

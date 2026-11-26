@@ -250,6 +250,12 @@ public static class OperationCatalog
             $"{Codegen}: IL2CPP_RAISE_MANAGED_EXCEPTION；codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_exception；vm/Exception.cpp: Exception::Raise",
             "III.4.35 throw")
             with { Deviations = [new("异常对象为空", "ECMA-335 III.4.35：对象为空时抛出 NullReferenceException", ImplementationDefined: false)] },
+        // ---- 空操作：模板没有效果，下降时不写出指令 ----
+        // 它用来消费两臂在可观察行为上相同的分支（设计 9.1、9.5）：元数据惰性初始化的守卫没有托管操作可以归属。
+        E("nop", "nop", "空操作：没有效果", None, [], null, ResultKind.None,
+            "语料 Guards.MetadataOnBranches：if (!s_Il2CppMethodInitialized) { il2cpp_codegen_initialize_runtime_metadata(…); s_Il2CppMethodInitialized = true; }",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata；vm/MetadataCache.cpp: MetadataCache::InitializeRuntimeMetadata",
+            "III.3.51 nop") with { Elided = true },
     ];
 
     private static readonly FrozenDictionary<string, CatalogEntry> byId = entries.ToFrozenDictionary(e => e.Id);

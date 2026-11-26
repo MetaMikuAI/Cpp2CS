@@ -128,7 +128,9 @@ public static class Selection
                         foreach (var o in occupied) taken.Remove(o);
                         chosen.RemoveAt(chosen.Count - 1);
                     }
-                    Search(at + 1, unoccupied + 1);
+                    // 留着不占用的效果一定是洞的才计入下界：出现的效果与条件抛出。不通往只抛出尾的边留在原处是一个普通的分支，未必是洞。
+                    bool hole = !effect.IsEdge || graph.Tail(graph.Shape.Target(effect.Edge)) != ExceptionKind.None;
+                    Search(at + 1, unoccupied + (hole ? 1 : 0));
                 }
                 Search(0, 0);
                 if (exhausted) { inexact = true; continue; }

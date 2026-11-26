@@ -88,7 +88,7 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
             ?? throw new ExpansionException("目录里没有这一项", claim.Operation);
         foreach (var step in entry.Steps)
             if (step.Kind is not (StepKind.ThrowIf or StepKind.Read or StepKind.Write or StepKind.Call or StepKind.RuntimeCall
-                or StepKind.ClassInitialize or StepKind.Require))
+                or StepKind.ClassInitialize or StepKind.Require or StepKind.NewObject or StepKind.Throw))
                 throw new ClaimFormatException($"{entry.Id} 是数据搬动或控制转移，不是声明的操作");
         var opcode = IlWriter.Find(entry.Il) ?? throw new ExpansionException("目录项的指令不在指令表里", entry.Il);
         var tokens = new Tokens(claim);
@@ -101,7 +101,8 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
 
         // 各操作数在求值栈上的类型：取自被调方法的签名，或目录项对操作数的要求。
         var operands = ImmutableArray.CreateBuilder<TypeShape>();
-        if (entry.OperandsFromSignature) operands.AddRange(method!.Parameters.Select(OnStack));
+        // 构造函数的 this 由模板里“新对象”一步给出，不在栈上。
+        if (entry.OperandsFromSignature) operands.AddRange(method!.Parameters.Skip(entry.Constructs ? 1 : 0).Select(OnStack));
         else
         {
             if (claim.Operands.Length != entry.Operands.Length)
@@ -120,7 +121,8 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
                     StackClass.Float32 => Float(32),
                     StackClass.Float64 => Float(64),
                     StackClass.Float when width is 32 or 64 => Float(width),
-                    StackClass.ByRef => new TypeShape(StackKind.ByRef, pointerBits, false, default),
+                    // 经地址访问字段：托管指针指向含该字段的值类型（ECMA-335 III.4.28）。
+                    StackClass.ByRef => new TypeShape(StackKind.ByRef, pointerBits, false, i == 0 && field is not null ? field.DeclaringType : default),
                     StackClass.Assignable when subject is not null && subject.Kind != StackKind.Value => OnStack(subject),
                     _ => throw new ClaimFormatException($"{entry.Id} 的第 {i} 个操作数（{entry.Operands[i]}，{width} 位）不在首批范围内"),
                 });
@@ -132,7 +134,7 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
             if (claim.Operands[i].Width != StackBits(operands[i]))
                 throw new ClaimFormatException($"第 {i} 个操作数是 {claim.Operands[i].Width} 位，{entry.Id} 在栈上需要 {StackBits(operands[i])} 位");
 
-        bool pushes = entry.OperandsFromSignature ? method!.Return is not null : entry.ResultKind != ResultKind.None;
+        bool pushes = entry.Constructs || (entry.OperandsFromSignature ? method!.Return is not null : entry.ResultKind != ResultKind.None);
         TypeShape? result = !pushes ? null : entry.ResultKind switch
         {
             ResultKind.Subject => subject is null ? null : OnStack(subject),
@@ -141,8 +143,9 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
             ResultKind.NativeInt => new TypeShape(StackKind.NativeInt, pointerBits, true, default),
             ResultKind.Float32 => new TypeShape(StackKind.Float32, 32, true, default),
             ResultKind.Float64 => new TypeShape(StackKind.Float64, 64, true, default),
-            ResultKind.Object => new TypeShape(StackKind.Object, pointerBits, false, opcode.Operand == OperandKind.Type ? claim.Entity ?? default : default),
-            ResultKind.ByRef => new TypeShape(StackKind.ByRef, pointerBits, false, default),
+            ResultKind.Object => new TypeShape(StackKind.Object, pointerBits, false,
+                opcode.Operand == OperandKind.Type ? claim.Entity ?? default : entry.Constructs ? method!.DeclaringType : default),
+            ResultKind.ByRef => new TypeShape(StackKind.ByRef, pointerBits, false, field?.Type.Entity ?? default),
             ResultKind.SameAsOperand => operands[0],
             _ => null,
         };
@@ -155,6 +158,15 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
         int at = il.Offset, after = -1;
         if (opcode.Operand == OperandKind.None) il.Plain(opcode.Name);
         else il.Int32(opcode.Name, 1);
+        // 以抛出结束的操作之后没有指令。
+        if (entry.Steps.Any(step => step.Kind == StepKind.Throw))
+        {
+            var thrown = new MethodBody(new MethodShape(default, false, operands.ToImmutable(), null, VariantCondition.StaticMethod), [], il.Build(), 0, true);
+            var ending = IlExpander.Expand(thrown, metadata, tokens, terms, 1, pointerBits);
+            if (!ending.Entries.Contains((at, entry.Id)))
+                throw new ClaimFormatException($"这条指令按元数据展开成 {ending.Entries.FirstOrDefault(e => e.Offset == at).Entry}，不是声明的 {entry.Id}");
+            return new ClaimTemplate(ending.Graph, thrown, null, entry, operands.ToImmutable(), null);
+        }
         if (pushes)
         {
             il.Branch("br", 0);

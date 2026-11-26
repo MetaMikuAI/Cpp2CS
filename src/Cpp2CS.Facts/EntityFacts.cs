@@ -157,4 +157,24 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
         }
         return null;
     }
+
+    public FieldShape? StaticFieldAt(EntityRef type, int offset)
+    {
+        if (Reference(type) is not NamedType owner) return null;
+        var definition = Model.Types[owner.Definition];
+        for (int i = definition.FirstField; i < definition.FirstField + definition.FieldCount; i++)
+        {
+            if (Model.Fields[i].Storage != FieldStorage.Static) continue;
+            try
+            {
+                if (metadata.FieldOffset(i, owner, FieldStorage.Static) == offset && metadata.Keys.FieldKey(i, owner) is long key)
+                    return metadata.Field(new EntityRef(EntityKind.Field, key));
+            }
+            catch (ExpansionException)
+            {
+                // 这个字段的静态区偏移没有依据：不作候选。
+            }
+        }
+        return null;
+    }
 }

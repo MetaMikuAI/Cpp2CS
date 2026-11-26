@@ -46,4 +46,13 @@ public interface INativeFacts
     ulong? LinkConstant(ulong address);
     /// <summary>这个地址是一个类型的元数据槽时，是那个类型：槽初始化之后的内容是该类型的类指针。依据是槽里的编码。</summary>
     EntityRef? TypeAtSlot(ulong address);
+    /// <summary>这个地址是一个字符串字面量的元数据槽时，是那个字符串：槽初始化之后的内容是该字面量对象的指针。依据是槽里的编码。</summary>
+    EntityRef? StringAtSlot(ulong address) => null;
+    /// <summary>
+    /// 这个地址是一个元数据槽（任何用途）：槽里是编码，初始化之后换成运行时对象的指针，此后不变。
+    /// 槽在被读取时已经初始化（设计 16.2），所以它的读取没有版本。
+    /// </summary>
+    bool MetadataSlot(ulong address) => EntityAtSlot(address) is not null;
+    /// <summary>元数据槽初始化之后的内容代表的实体：类型或字符串字面量。</summary>
+    EntityRef? EntityAtSlot(ulong address) => TypeAtSlot(address) ?? StringAtSlot(address);
 }

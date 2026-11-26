@@ -38,6 +38,8 @@ public sealed record RuntimeOperation(string Id, ImmutableArray<string> Symbols,
     /// <summary>纯函数：结果是哪个具名函数，作用在前几个整数实参上。</summary>
     public RuntimeFunction Function { get; init; }
     public int Arguments { get; init; }
+    /// <summary>结果是第 0 个实参所指的元数据槽在初始化之后的内容（类指针、方法、字符串等运行时对象的指针）。</summary>
+    public bool ReturnsSlot { get; init; }
 }
 
 /// <summary>具名函数的等式（设计 7.8）。每条写明出处。</summary>
@@ -68,9 +70,13 @@ public static class RuntimeOperations
         Raise("raise.divide-by-zero", ExceptionKind.DivideByZero,
             "vm/Exception.cpp: Exception::RaiseDivideByZeroException；codegen/il2cpp-codegen-il2cpp.h: DivideByZeroCheck 经 il2cpp_codegen_raise_divide_by_zero_exception 到达",
             "_Z45il2cpp_codegen_raise_divide_by_zero_exceptionv", "_ZN6il2cpp2vm9Exception26RaiseDivideByZeroExceptionEv"),
-        new("metadata.initialize", ["_Z42il2cpp_codegen_initialize_runtime_metadataPm", "_Z49il2cpp_codegen_initialize_runtime_metadata_inlinePm"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
+        new("metadata.initialize", ["_Z42il2cpp_codegen_initialize_runtime_metadataPm"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
             Idempotent: true, ExceptionKind.None, "元数据槽的地址", "无", "把槽里的编码换成运行时对象的指针；只写映像里的元数据槽",
-            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata、il2cpp_codegen_initialize_runtime_metadata_inline；vm/MetadataCache.cpp: InitializeRuntimeMetadata"),
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata；vm/MetadataCache.cpp: InitializeRuntimeMetadata"),
+        new("metadata.initialize-inline", ["_Z49il2cpp_codegen_initialize_runtime_metadata_inlinePm"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
+            Idempotent: true, ExceptionKind.None, "元数据槽的地址", "槽初始化之后的内容", "把槽里的编码换成运行时对象的指针；只写映像里的元数据槽",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata_inline 返回 MetadataCache::InitializeRuntimeMetadata 的结果；vm/MetadataCache.cpp: InitializeRuntimeMetadata 返回 *metadataPointer")
+            { ReturnsSlot = true },
         new("gc.write-barrier", ["_Z25Il2CppCodeGenWriteBarrierPPvS_"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
             Idempotent: true, ExceptionKind.None, "被写位置的地址、写入的引用", "无", "通知垃圾回收器这个位置被写过；只改回收器的私有状态，不写托管位置（存入本身由生成代码完成）",
             "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier；gc/BoehmGC.cpp: GarbageCollector::SetWriteBarrier"),

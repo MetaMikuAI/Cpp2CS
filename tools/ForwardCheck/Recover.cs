@@ -42,7 +42,7 @@ internal static partial class Recover
             }
         }
 
-        IDiscoverer[] discoverers = [new GenericDiscoverer()];
+        IDiscoverer[] discoverers = [new GenericDiscoverer(), new GuardDiscoverer()];
         int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
         var adversary = new Adversary();
         // 交叉对照的素材：已证明等价的用例的恢复结果，与签名相同的另一个用例的真实 IL 对照，应当被反驳。
