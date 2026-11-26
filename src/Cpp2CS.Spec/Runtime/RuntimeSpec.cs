@@ -19,6 +19,12 @@ public enum RuntimeEffect : byte
     MakeException,
     /// <summary>抛出第 0 个实参给出的异常对象，不返回。</summary>
     ThrowArgument,
+    /// <summary>分配指定类的新实例，含类初始化分量；结果是新引用。</summary>
+    NewObject,
+    /// <summary>按数组类与长度分配一维零基数组，超出最大下标时抛出。</summary>
+    NewArray,
+    /// <summary>正常返回时只查询运行时不可变数据；失败时抛出登记的异常。</summary>
+    ReadOrThrow,
 }
 
 /// <summary>
@@ -35,7 +41,7 @@ public sealed record RuntimeOperation(string Id, ImmutableArray<string> Symbols,
 }
 
 /// <summary>具名函数的等式（设计 7.8）。每条写明出处。</summary>
-public static class RuntimeEquations
+public static partial class RuntimeEquations
 {
     /// <summary>
     /// 登记的操作数为零时结果为零。IsInst(空, 类) 是空：vm/Object.cpp 的 Object::IsInst 第一行；
@@ -81,6 +87,18 @@ public static class RuntimeOperations
         new("class.initialize", ["_Z33il2cpp_codegen_runtime_class_initP11Il2CppClass", "_ZN6il2cpp2vm7Runtime9ClassInitEP11Il2CppClass"], RuntimeEffect.ClassInitialize, Returns: true, Observable: true,
             Idempotent: true, ExceptionKind.None, "类", "无", "执行该类的类型初始化器（至多一次）；返回时该类的初始化已触发",
             "vm/Runtime.cpp: Runtime::ClassInit；codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline"),
+        new("object.new", ["_Z25il2cpp_codegen_object_newP11Il2CppClass"], RuntimeEffect.NewObject, Returns: true, Observable: true,
+            Idempotent: false, ExceptionKind.None, "类", "新实例；Nullable<T> 使用底层类 T", "分配零初始化实例，按类登记终结器，再触发实际分配类的类初始化；静态构造失败时传播 TypeInitializationException",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_object_new；vm/Object.cpp: Object::New、Object::NewAllocSpecific；vm/Runtime.cpp: Runtime::ClassInit"),
+        new("array.new-vector", ["_Z10SZArrayNewP11Il2CppClassj"], RuntimeEffect.NewArray, Returns: true, Observable: true,
+            Idempotent: false, ExceptionKind.Overflow, "数组类、uint32_t 长度", "指定长度的新一维零基数组", "准备数组类的运行时数据；长度超过 IL2CPP_ARRAY_MAX_INDEX 则抛出 OverflowException，否则分配默认初始化的元素区，写入长度",
+            "codegen/il2cpp-codegen-il2cpp.cpp: SZArrayNew；vm/Array.cpp: Array::NewSpecific、RaiseOverflowException"),
+        new("type.cast-sealed", ["_Z15CastclassSealedP12Il2CppObjectP11Il2CppClass"], RuntimeEffect.ReadOrThrow, Returns: true, Observable: true,
+            Idempotent: false, ExceptionKind.InvalidCast, "对象、目标密封类", "空对象或类相符时返回原引用", "非空时比较对象的类与目标类，不相等则构造并抛出 InvalidCastException",
+            "codegen/il2cpp-codegen-il2cpp.h: CastclassSealed、IsInstSealed；codegen/il2cpp-codegen-il2cpp.cpp: RaiseInvalidCastException"),
+        new("raise.invalid-cast", ["_Z25RaiseInvalidCastExceptionP12Il2CppObjectP11Il2CppClass"], RuntimeEffect.Throw, Returns: false, Observable: true,
+            Idempotent: false, ExceptionKind.InvalidCast, "非空对象、目标类", "不返回", "按对象类的元素类和目标类构造异常消息，抛出 InvalidCastException",
+            "codegen/il2cpp-codegen-il2cpp.cpp: RaiseInvalidCastException、il2cpp_codegen_get_invalid_cast_exception、il2cpp_codegen_raise_exception"),
     ];
 
     private static readonly FrozenDictionary<string, RuntimeOperation> bySymbol =
@@ -90,28 +108,4 @@ public static class RuntimeOperations
 
     /// <summary>按符号名找登记项。</summary>
     public static RuntimeOperation? BySymbol(string symbol) => bySymbol.GetValueOrDefault(symbol);
-}
-
-/// <summary>
-/// 运行时结构的布局。每个数字注明出处（相对 libil2cpp 目录的头文件与成员）。
-/// 这一份是 Unity 2022.3、指针 64 位（LP64）。
-/// </summary>
-public sealed record RuntimeLayout(int PointerBits,
-    // il2cpp-object-internals.h: Il2CppObject { Il2CppClass* klass; MonitorData* monitor; }
-    int ObjectHeaderBytes,
-    // il2cpp-object-internals.h: Il2CppArray { Il2CppObject obj; Il2CppArrayBounds* bounds; il2cpp_array_size_t max_length; }
-    // 生成代码按 uint32 读长度：IL2CPP_ARRAY_BOUNDS_CHECK(index, (uint32_t)(this)->max_length)。
-    int ArrayLengthOffset, int ArrayLengthBits,
-    // il2cpp-object-internals.h: IL2CPP_ARRAY_MAX_INDEX（0x7fffffff）；vm/Array.cpp 的 NewSpecific 在长度超过它时抛出。长度不超过这个值。
-    long ArrayLengthMaximum,
-    // il2cpp-object-internals.h: kIl2CppSizeOfArray；Il2CppArraySize 的 vector 成员紧随 max_length。
-    int ArrayDataOffset,
-    // il2cpp-class-internals.h: Il2CppClass::static_fields；生成代码经 il2cpp_codegen_static_fields_for 读它。
-    int ClassStaticFieldsOffset,
-    // il2cpp-class-internals.h: Il2CppClass::cctor_finished_or_no_cctor（uint32_t）；il2cpp_codegen_runtime_class_init_inline 测试它。
-    // 它只会从 0 变为非 0：单调状态（设计 7.4）。
-    int ClassInitializedOffset, int ClassInitializedBits)
-{
-    public static RuntimeLayout Unity2022Lp64 { get; } = new(64, ObjectHeaderBytes: 16, ArrayLengthOffset: 24, ArrayLengthBits: 32, ArrayLengthMaximum: 0x7fffffff, ArrayDataOffset: 32,
-        ClassStaticFieldsOffset: 0xb8, ClassInitializedOffset: 0xe0, ClassInitializedBits: 32);
 }

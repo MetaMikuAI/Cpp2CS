@@ -24,19 +24,23 @@ internal static class Program
         for (int i = 1; i + 1 < arguments.Length; i += 2) options[arguments[i]] = arguments[i + 1];
         switch (arguments[0])
         {
+            case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
+                using (var metadata = ModelInput.Load(assemblies, options))
+                    return arguments[0] == "keys" ? MetadataAudit.Keys(metadata, options.GetValueOrDefault("--order") == "reverse", options.GetValueOrDefault("--keys-file"))
+                        : MetadataAudit.Layouts(metadata);
             case "terms":
                 return new TermCheck(int.Parse(options.GetValueOrDefault("--seed", "12345")))
                     .Run(int.Parse(options.GetValueOrDefault("--rounds", "60000")), depth: 4, samples: 16);
             case "snapshot":
                 return SnapshotExample.Run();
             case "counterexamples" when options.ContainsKey("--assemblies"):
-                return Counterexamples.Run(options["--assemblies"]);
+                return Counterexamples.Run(options["--assemblies"], options);
             case "native" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies") && options.ContainsKey("--binary")
                 && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
                 return NativeCheck.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
                     options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""));
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
-                return CheckIl(options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
+                return CheckIl(options, options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
             default:
                 return Usage();
@@ -47,18 +51,20 @@ internal static class Program
     {
         Console.Error.WriteLine("用法：ForwardCheck terms [--seed N] [--rounds N]");
         Console.Error.WriteLine("      ForwardCheck snapshot");
-        Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--pointer-bits 64] [--show 方法名]");
-        Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录");
+        Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
     }
 
     private sealed record CaseResult(string Category, string Name, bool Expanded, string Reason, string Detail);
 
-    private static int CheckIl(string casesPath, string assemblies, int pointerBits, string show)
+    private static int CheckIl(Dictionary<string, string> options, string casesPath, string assemblies, int pointerBits, string show)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
-        using var metadata = new SrmMetadata(assemblies, pointerBits);
+        if (pointerBits != 64) throw new ArgumentException("元数据模型需要 LP64 目标");
+        using var metadata = ModelInput.Load(assemblies, options);
         var shared = new TermPool();
         var results = new List<CaseResult>();
         var entryUse = new SortedDictionary<string, int>(StringComparer.Ordinal);
@@ -85,9 +91,9 @@ internal static class Program
                     throw new ExpansionException("IL 与语料记录不一致", "");
                 foreach (var instruction in IlDecoder.Decode(body.Code.AsSpan())) instructionsSeen.Add(instruction.Opcode.Name);
 
-                var view = metadata.View(module);
+                var tokens = metadata.Tokens(module, body.Method.Entity);
                 var pool = new TermPool();
-                var expansion = IlExpander.Expand(body, view, pool, 1, pointerBits);
+                var expansion = IlExpander.Expand(body, metadata.Facts, tokens, pool, 1, pointerBits);
                 results.Add(new(category, name, true, "", ""));
                 var graph = expansion.Graph;
                 blocks += graph.BlockCount;
@@ -101,7 +107,7 @@ internal static class Program
                 }
 
                 // 摘要：在另一个已有内容的池里、用另一个图号再展开一次，摘要必须相同。
-                var again = IlExpander.Expand(body, view, shared, ++graphNumber, pointerBits);
+                var again = IlExpander.Expand(body, metadata.Facts, tokens, shared, ++graphNumber, pointerBits);
                 if (again.Graph.DigestText == graph.DigestText) digestsStable++;
                 else problems.Add($"{name}：两次展开的摘要不同");
 

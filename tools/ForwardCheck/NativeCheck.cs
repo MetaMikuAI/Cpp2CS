@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using Cpp2CS.Input;
+using Cpp2CS.Facts;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Model;
@@ -13,57 +14,26 @@ namespace Cpp2CS.Tools.ForwardCheck;
 
 /// <summary>
 /// 核对工具里的事实来源，只供正向核对使用。运行时函数按符号表命名；托管方法的入口取自代码登记表；
-/// 字段偏移取自元数据模型。托管程序集里的实体经“定义的坐标”（模块与记号，或所属类型的名字与序号）对到模型上，
-/// 名称只用来把引用解析到定义。
+/// 模型给出实体、签名和布局。映像给出元数据槽、链接常量及数据区。
 /// </summary>
-internal sealed class BridgeFacts : INativeFacts
+internal sealed class BridgeFacts : IGenericEntryFacts
 {
     private readonly Il2CppInput input;
-    private readonly SrmMetadata metadata;
+    private readonly ModelMetadata metadata;
+    private readonly ModelNativeFacts native;
     private readonly Dictionary<ulong, string> symbols = [];
-    private readonly HashSet<ulong> entries = [];
-    private readonly Dictionary<string, int> images = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<(int Image, string Name), int> types = [];
-    private readonly Dictionary<(int Image, int Token), int> methods = [];
-    private readonly Dictionary<ulong, (int Image, int Token)?> byEntry = [];
     private readonly Dictionary<ulong, EntityRef?> slots = [];
     private readonly Dictionary<ulong, ElfRela> relocations = [];
     private readonly byte[] file;
 
-    public BridgeFacts(Il2CppInput input, SrmMetadata metadata, string symbolFile, byte[] file)
+    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string symbolFile, byte[] file)
     {
         this.input = input;
         this.metadata = metadata;
         this.file = file;
         foreach (var relocation in input.Elf.Relocations) relocations[relocation.Address] = relocation;
-        foreach (var method in input.Code.Methods.Concat(input.Code.MethodInstances))
-            if (method.Entry is { } entry) entries.Add(entry);
-        var model = input.Model;
-        for (int i = 0; i < model.Images.Count; i++)
-        {
-            var image = model.Images[i];
-            images[Path.GetFileNameWithoutExtension(image.Name)] = i;
-            for (int t = image.FirstType; t < image.FirstType + image.TypeCount; t++)
-            {
-                types[(i, TypeName(t))] = t;
-                var type = model.Types[t];
-                for (int m = type.FirstMethod; m < type.FirstMethod + type.MethodCount; m++)
-                {
-                    int token = unchecked((int)model.Methods[m].Token);
-                    methods[(i, token)] = m;
-                    // 一个入口被几个方法共用（相同代码合并）时，签名不唯一。
-                    if (input.Code.Methods[m].Entry is { } at) byEntry[at] = byEntry.ContainsKey(at) ? null : (i, token);
-                }
-            }
-        }
+        native = new(metadata, input.Code);
         ReadSymbols(symbolFile);
-    }
-
-    private string TypeName(int index)
-    {
-        var type = input.Model.Types[index];
-        if (type.DeclaringType is { } outer) return TypeName(outer) + "/" + type.Name;
-        return type.Namespace.Length == 0 ? type.Name : type.Namespace + "." + type.Name;
     }
 
     /// <summary>读符号表（.symtab）：函数符号的地址到名字。</summary>
@@ -94,45 +64,40 @@ internal sealed class BridgeFacts : INativeFacts
     public Callee Callee(ulong address)
     {
         string name = Symbol(address);
-        if (entries.Contains(address)) return new(CalleeKind.Managed, null, name, "代码登记表") { Signature = Shape(address) };
+        if (native.IsEntry(address))
+        {
+            // 内联体中的原生调用也走 Callee.Signature；旧引擎只比较显式实参。
+            bool hidden = native.RequiresMethodArgument(address);
+            string reason = "隐含实参的核对尚未实现";
+            var signature = hidden ? null : native.Signature(address, out reason);
+            return new(CalleeKind.Managed, null, signature == null ? $"{name}（{reason}）" : name, "代码登记表") { Signature = signature };
+        }
         if (symbols.TryGetValue(address, out var symbol) && RuntimeOperations.BySymbol(symbol) is { } operation)
             return new(CalleeKind.Runtime, operation, name, "符号表");
         return new(CalleeKind.Unknown, null, name, "");
     }
 
-    private MethodShape? Shape(ulong address)
+    private GenericEntry? pendingMethod;
+    private string offsetReason = "";
+    public void BeginCheck()
     {
-        if (!byEntry.TryGetValue(address, out var found) || found is not { } definition) return null;
-        var module = metadata.Load(Path.GetFileNameWithoutExtension(input.Model.Images[definition.Image].Name));
-        return module is null ? null : metadata.Method(module, definition.Token);
+        pendingMethod = null;
+        offsetReason = "";
     }
-
     public ulong? Entry(EntityRef method)
     {
-        if (!metadata.MethodDefinitions.TryGetValue(method, out var definition)) return null;
-        if (!images.TryGetValue(definition.Module, out int image) || !methods.TryGetValue((image, definition.Token), out int index)) return null;
-        return input.Code.Methods[index].Entry;
+        var entry = native.Entry(method);
+        if (entry == null) pendingMethod = GenericEntry(method);
+        return entry;
     }
+    public GenericEntry? GenericEntry(EntityRef method) => native.GenericEntry(method);
+    public int? InstanceFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Instance, out offsetReason);
+    public int? StaticFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Static, out offsetReason);
 
-    public int? InstanceFieldOffset(EntityRef field)
-    {
-        if (!metadata.FieldDefinitions.TryGetValue(field, out var definition)) return null;
-        if (!images.TryGetValue(definition.Module, out int image) || !types.TryGetValue((image, definition.Type), out int type)) return null;
-        var owner = input.Model.Types[type];
-        if (definition.Ordinal >= owner.FieldCount) return null;
-        var found = input.Model.Fields[owner.FirstField + definition.Ordinal];
-        return found.Name == definition.Name && found.Storage == FieldStorage.Instance ? found.Offset : null;
-    }
-
-    public int? StaticFieldOffset(EntityRef field)
-    {
-        if (!metadata.FieldDefinitions.TryGetValue(field, out var definition)) return null;
-        if (!images.TryGetValue(definition.Module, out int image) || !types.TryGetValue((image, definition.Type), out int type)) return null;
-        var owner = input.Model.Types[type];
-        if (definition.Ordinal >= owner.FieldCount) return null;
-        var found = input.Model.Fields[owner.FirstField + definition.Ordinal];
-        return found.Name == definition.Name && found.Storage == FieldStorage.Static ? found.Offset : null;
-    }
+    // 引擎在 Entry 返回空的地方结束本次证明。补上该次查询的依据，不改变判定。
+    public string Detail(ProofResult result) => result.Verdict == Verdict.MissingFact && pendingMethod is { } entry
+        ? $"隐含实参的核对尚未实现（期望 {entry.ExpectedMethod}，登记入口 0x{entry.Address:x}）"
+        : result.Verdict == Verdict.MissingFact && offsetReason.Length != 0 ? offsetReason : result.Detail;
 
     /// <summary>
     /// 元数据槽里的编码（vm/MetadataCache.cpp 的 InitializeRuntimeMetadata）：最低位为 1 表示尚未初始化，
@@ -148,13 +113,8 @@ internal sealed class BridgeFacts : INativeFacts
             uint encoded = unchecked((uint)value);
             int index = (int)((encoded & 0x1FFFFFFE) >> 1);
             if (value >> 32 == 0 && (encoded & 1) == 1 && encoded >> 29 == 1 && index < input.Model.RuntimeTypes.Count
-                && input.Model.RuntimeTypes[index] is NamedType { Arguments.Count: 0 } named)
-            {
-                int image = 0;
-                for (int i = 0; i < input.Model.Images.Count; i++)
-                    if (named.Definition >= input.Model.Images[i].FirstType && named.Definition < input.Model.Images[i].FirstType + input.Model.Images[i].TypeCount) image = i;
-                result = metadata.TypeEntity(Path.GetFileNameWithoutExtension(input.Model.Images[image].Name), TypeName(named.Definition));
-            }
+                && metadata.Keys.TypeKey(input.Model.RuntimeTypes[index]) is long key)
+                result = new(EntityKind.Type, key);
         }
         return slots[address] = result;
     }
@@ -190,10 +150,10 @@ internal static class NativeCheck
     public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
-        using var metadata = new SrmMetadata(assemblies, 64);
         var input = Il2CppInput.Load(binary, metadataPath);
         byte[] bytes = File.ReadAllBytes(binary);
-        var facts = new BridgeFacts(input, metadata, symbolFile, bytes);
+        using var metadata = ModelInput.Open(assemblies, input, bytes);
+        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes);
         var lifter = new Arm64Target(input.Elf, bytes,
             input.Code.Methods.Concat(input.Code.MethodInstances).Where(m => m.Entry.HasValue).Select(m => m.Entry!.Value));
         // 别的方法的快照，展开调用时使用。提升不出来、或通不过快照校验的方法没有快照。
@@ -250,7 +210,7 @@ internal static class NativeCheck
                 body = metadata.Body(module, Convert.ToInt32(method.GetProperty("token").GetString()!, 16));
                 if (!Convert.ToHexString(body.Code.AsSpan()).Equals(method.GetProperty("il_hex").GetString(), StringComparison.OrdinalIgnoreCase))
                     throw new ExpansionException("IL 与语料记录不一致", "");
-                expansion = IlExpander.Expand(body, metadata.View(module), snapshot.Terms, 1, 64);
+                expansion = IlExpander.Expand(body, metadata.Facts, metadata.Tokens(module, body.Method.Entity), snapshot.Terms, 1, 64);
             }
             catch (ExpansionException failure)
             {
@@ -260,6 +220,7 @@ internal static class NativeCheck
 
             string signature = method.GetProperty("signature_blob").GetString()!, il = method.GetProperty("il_hex").GetString()!;
             bodies.Add((name, signature, il, metadata.Load(Path.GetFileNameWithoutExtension(method.GetProperty("assembly").GetString()!))!, body));
+            facts.BeginCheck();
             var result = CoExecution.Check(snapshot, expansion.Graph, body, facts, Snapshot);
             if (result.Verdict == Verdict.Proved) proved.Add((name, address, signature, il));
             steps += result.Steps;
@@ -272,7 +233,7 @@ internal static class NativeCheck
                 Verdict.MissingIndependence => "缺独立关系的行",
                 Verdict.Insufficient => "理论不够",
                 _ => "预算",
-            }, result.Detail);
+            }, facts.Detail(result));
         }
 
         // 交叉对照（设计第 15 节的对抗核对）：把通过的用例的原生代码，与签名相同、IL 不同的另一个用例的真实 IL 对照，引擎必须反驳。
@@ -283,7 +244,7 @@ internal static class NativeCheck
             {
                 if (other.Signature != signature || other.Il == il) continue;
                 var snapshot = lifter.Lift(address).Snapshot!;
-                var expansion = IlExpander.Expand(other.Body, metadata.View(other.Module), snapshot.Terms, 1, 64);
+                var expansion = IlExpander.Expand(other.Body, metadata.Facts, metadata.Tokens(other.Module, other.Body.Method.Entity), snapshot.Terms, 1, 64);
                 crossed++;
                 if (CoExecution.Check(snapshot, expansion.Graph, other.Body, facts, Snapshot).Verdict == Verdict.Proved) accepted.Add($"{name} 的原生代码 ≡ {other.Name} 的 IL");
                 else refuted++;
