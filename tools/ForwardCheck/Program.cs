@@ -39,6 +39,10 @@ internal static class Program
                 && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
                 return NativeCheck.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
                     options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""));
+            case "recover" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies") && options.ContainsKey("--binary")
+                && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
+                return Recover.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
+                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""));
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options, options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -53,6 +57,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
+        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;

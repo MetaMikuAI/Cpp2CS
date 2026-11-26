@@ -107,11 +107,14 @@ public sealed class Certificate
     /// <summary>各操作数与结果在输出里的静态类型，取自目录与元数据。</summary>
     public ImmutableArray<TypeShape> OperandTypes { get; }
     public TypeShape? ResultType { get; }
+    /// <summary>操作把第 0 个操作数当作数组使用时，是元素的存储位宽；否则为 0。</summary>
+    public int ElementBits { get; }
     public int Paths { get; }
     public int Steps { get; }
 
     internal Certificate(Claim claim, string snapshotDigest, ImmutableArray<BlockId> before, ImmutableArray<EffectRef> after,
-        ImmutableArray<string> rows, ImmutableArray<string> assumptions, ImmutableArray<TypeShape> operandTypes, TypeShape? resultType, int paths, int steps)
+        ImmutableArray<string> rows, ImmutableArray<string> assumptions, ImmutableArray<TypeShape> operandTypes, TypeShape? resultType,
+        int elementBits, int paths, int steps)
     {
         Claim = claim;
         SnapshotDigest = snapshotDigest;
@@ -121,6 +124,7 @@ public sealed class Certificate
         Assumptions = assumptions;
         OperandTypes = operandTypes;
         ResultType = resultType;
+        ElementBits = elementBits;
         Paths = paths;
         Steps = steps;
     }

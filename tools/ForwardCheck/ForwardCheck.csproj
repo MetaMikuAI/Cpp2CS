@@ -10,6 +10,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Cpp2CS.Facts/Cpp2CS.Facts.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Discovery/Cpp2CS.Discovery.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Target/Cpp2CS.Target.csproj" />
   </ItemGroup>

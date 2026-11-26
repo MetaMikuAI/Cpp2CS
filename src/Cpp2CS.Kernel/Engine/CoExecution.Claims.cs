@@ -109,7 +109,8 @@ public sealed partial class CoExecution
         ImmutableArray<string> rows = [.. run.Rows];
         if (refutation is not null) return new(claim, null, refutation, rows, engine.paths, engine.steps);
         var certificate = new Certificate(claim, context.Snapshot.DigestText, [.. run.Before.OrderBy(b => b.Index)], [.. run.After.Order()], rows,
-            [.. engine.assumptions], template.OperandTypes, template.ResultType, engine.paths, engine.steps);
+            [.. engine.assumptions], template.OperandTypes, template.ResultType,
+            template.Entry.Steps.Any(step => step.Location == LocationKind.ArrayElement) ? template.Entry.ImpliedBits : 0, engine.paths, engine.steps);
         return new(claim, certificate, null, rows, engine.paths, engine.steps);
     }
 
