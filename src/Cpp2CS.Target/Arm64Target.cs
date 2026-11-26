@@ -5,6 +5,16 @@ using Cpp2CS.Snapshot;
 
 namespace Cpp2CS.Target;
 
+/// <summary>核对工具请求的指令位置；不参与快照构造与摘要。</summary>
+public sealed class LiftLocations(bool collectBlocks = true)
+{
+    internal bool CollectBlocks => collectBlocks;
+    public ulong? UnresolvedBranch { get; internal set; }
+    internal Dictionary<ulong, ulong[]> Tables { get; } = [];
+    public IReadOnlyDictionary<ulong, ulong[]> SwitchTargets => Tables;
+    public Dictionary<BlockId, (ulong Start, int Instructions)> Blocks { get; } = [];
+}
+
 public sealed record LiftResult(MethodSnapshot? Snapshot, string? Reason);
 
 /// <summary>按 FDE 划界，从登记的入口追踪可达指令，按调用点表接展开边。</summary>
@@ -55,6 +65,15 @@ public sealed class Arm64Target
         ref var cell = ref decodeCache[(word * 2654435761u) >> 16];
         if (!cell.Valid || cell.Word != word) cell = (word, Decoder.Decode(word), true);
         return cell.Value;
+    }
+
+    /// <summary>逐指令核对使用同一提升语义。输入与输出依 Abi 的寄存器顺序排列，读写出现追加到给定块。</summary>
+    public Term[] EvaluateInstruction(ulong pc, SnapshotBuilder builder, BlockId block, Term[] inputs)
+    {
+        if (inputs.Length != Abi.Count) throw new ArgumentException("寄存器行长度不符", nameof(inputs));
+        var machine = new Machine(builder, block, (Term[])inputs.Clone());
+        machine.Apply(Cached(Word(pc)), pc);
+        return machine.Row;
     }
 
     public uint Word(ulong pc) => BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(elf.FileOffset(pc, 4) ??
@@ -109,7 +128,7 @@ public sealed class Arm64Target
 
     static readonly ulong arguments = Abi.Arguments.Aggregate(0ul, (mask, r) => mask | (1ul << r));
     static readonly ulong results = Abi.Results.Append(31).Aggregate(0ul, (mask, r) => mask | (1ul << r));
-    public LiftResult Lift(ulong entry)
+    public LiftResult Lift(ulong entry, LiftLocations? locations = null)
     {
         if (Unwind.Find(entry) is not Frame f) return new(null, "缺少 FDE");
         if ((entry & 3) != 0 || ((f.End - f.Start) & 3) != 0 || elf.FileOffset(f.Start, f.End - f.Start) == null)
@@ -135,8 +154,13 @@ public sealed class Arm64Target
                 instructions.Add(pc, i);
                 if (i.Form == Form.BranchRegister)
                 {
-                    if (JumpTable(pc, f) is not { } table) return new(null, "间接跳转目标未证实");
+                    if (JumpTable(pc, f) is not { } table)
+                    {
+                        if (locations != null) locations.UnresolvedBranch = pc;
+                        return new(null, "间接跳转目标未证实");
+                    }
                     tables.Add(pc, table);
+                    if (locations != null && !locations.CollectBlocks) locations.Tables.Add(pc, table.Arms);
                     foreach (var arm in table.Arms.Distinct()) Edge(arm);
                     break;
                 }
@@ -221,8 +245,10 @@ public sealed class Arm64Target
             }
             var state = new Machine(builder, b, row);
             Exit To(ulong dest) => Exit.To(Block(dest, defined), Out(dest, state.Row));
+            int instructionCount = 0;
             for (ulong pc = start; ; pc += 4)
             {
+                instructionCount++;
                 if (tails.Contains(pc))
                 {
                     var link = state.G(30);
@@ -256,6 +282,7 @@ public sealed class Arm64Target
                 else { state.Apply(i, pc); ulong bits = (ulong)LiveRows.Description(i).Write & arguments; defined |= bits; }
                 if (heads.Contains(pc + 4)) { builder.Terminate(b, Terminator.Single(To(pc + 4), pc)); break; }
             }
+            if (locations?.CollectBlocks == true) locations.Blocks.Add(b, (start, instructionCount));
             if (state.PlatformRegister) return new(null, "读取平台寄存器 x18");
         }
         return new(builder.Build(), null);

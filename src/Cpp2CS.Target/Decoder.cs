@@ -6,13 +6,18 @@ public enum Form
 {
     Unknown, Nop, Trap, Return, BranchRegister, CallRegister, Branch, Call, Condition, CompareBranch, TestBranch,
     Address, Wide, Immediate, Shifted, Extended, Logical, Mask, Bitfield, Select, Multiply, Binary, Unary,
-    Memory, Pair, Literal, Thread, FloatBinary, FloatUnary, FloatCompare, FloatMove, FloatSelect, Fused, LongMultiply, Extract, VectorImmediate, VectorOr, FloatImmediate, Convert
+    Memory, Pair, Literal, Thread, FloatBinary, FloatUnary, FloatCompare, FloatMove, FloatSelect, Fused, LongMultiply, Extract, VectorImmediate, VectorOr, FloatImmediate, Convert,
+    ConditionalCompare, FloatConditionalCompare, Reverse, RoundConvert, SimdBinary, SimdUnary,
+    SimdIndexed, SimdCopy, SimdPermute, SimdNarrow, SimdWiden, SimdReduce, SimdShift,
+    SimdBits, SimdImmediate, SimdFloatImmediate, SimdTransfer
 }
 
 /// <summary>DDI 0487 的 A64 基本指令和标量浮点编码。立即数在解码时完成符号扩展与比例换算。</summary>
 public readonly record struct Instruction(Form Form, string Name, int Width = 64, int D = 31, int N = 31,
     int M = 31, int A = 31, long Imm = 0, int Mode = 0, int Shift = 0, int Size = 0, bool Vector = false)
 {
+    public string? Extension => Form < Form.ConditionalCompare ? null : $"{Form}/{Name}" + (Form == Form.SimdCopy ? $"/{Mode}" : "");
+    public uint WrittenGeneralRegisters => (uint)LiveRows.Description(this).Write;
     public bool Conditional => Form is Form.Condition or Form.CompareBranch or Form.TestBranch;
     public bool IsCall => Form is Form.Call or Form.CallRegister;
     public ulong Destination(ulong pc) => unchecked(pc + (ulong)Imm);
@@ -174,6 +179,6 @@ public static class Decoder
         }
         if (Is(0xfffffc00, 0x1e22c000) || Is(0xfffffc00, 0x1e624000))
             return new(Form.Convert, "fcvt", fw == 32 ? 64 : 32, d, n, Size: fw);
-        return default;
+        return SimdDecoder.Decode(word);
     }
 }

@@ -56,6 +56,28 @@ internal static class LiveRows
             case Form.Fused: return (V(i.N) | V(i.M) | V(i.A), V(i.D));
             case Form.FloatBinary: case Form.VectorOr: return (V(i.N) | V(i.M), V(i.D));
             case Form.Branch: case Form.BranchRegister: case Form.Nop: case Form.Trap: return (0, 0);
+            case Form.ConditionalCompare: return (flags | n | (i.Vector ? 0 : m), flags);
+            case Form.FloatConditionalCompare: return (flags | V(i.N) | V(i.M), flags);
+            case Form.Reverse: return (n, d);
+            case Form.RoundConvert: return (V(i.N), d);
+            case Form.SimdCopy:
+                return i.Mode switch
+                {
+                    0 => (n, V(i.D)), 1 or 2 => (V(i.N), V(i.D)), 3 => (V(i.D) | n, V(i.D)),
+                    4 => (V(i.D) | V(i.N), V(i.D)), _ => (V(i.N), d)
+                };
+            case Form.SimdImmediate: return (i.Name is "bic" or "orr" ? V(i.D) : 0, V(i.D));
+            case Form.SimdFloatImmediate: return (0, V(i.D));
+            case Form.SimdBits: return (V(i.N) | V(i.M) | (i.Name is "bsl" or "bit" or "bif" ? V(i.D) : 0), V(i.D));
+            case Form.SimdBinary: case Form.SimdIndexed: case Form.SimdPermute: return (V(i.N) | V(i.M), V(i.D));
+            case Form.SimdNarrow: return (V(i.N) | (i.Mode == 1 ? V(i.D) : 0), V(i.D));
+            case Form.SimdUnary: case Form.SimdWiden: case Form.SimdReduce: case Form.SimdShift: return (V(i.N), V(i.D));
+            case Form.SimdTransfer:
+                var baseReg = Bit(i.N);
+                var inputs = baseReg | (i.Mode != 0 ? m : 0);
+                if (i.Name == "st2") inputs |= V((i.D + 1) % 32);
+                if (i.Name != "ld1r") inputs |= V(i.D);
+                return (inputs, (i.Mode != 0 ? baseReg : 0) | (i.Name[0] == 'l' ? V(i.D) : 0));
             default: throw new InvalidOperationException("指令缺少寄存器使用说明");
         }
     }

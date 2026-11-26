@@ -24,8 +24,9 @@ internal sealed class Scan
 
     public void Inventory(ulong from = 0, ulong until = ulong.MaxValue)
     {
-        var counts = new Dictionary<uint, (int Count, bool Unknown)>();
+        var counts = new Dictionary<uint, (int Count, bool Unknown, string? Extension)>();
         using var listing = new StreamWriter(prefix + ".functions.local.tsv");
+        using var witnesses = new StreamWriter(prefix + ".candidates.local.tsv");
         using var unknown = new BinaryWriter(File.Create(prefix + ".unknown.local.bin"));
         foreach (ulong entry in Target.Entries)
         {
@@ -33,17 +34,26 @@ internal sealed class Scan
             var frame = Target.Unwind.Find(entry);
             if (frame == null) { listing.WriteLine($"{entry:x}\t-\t-\t缺少 FDE"); continue; }
             var seen = new HashSet<uint>();
+            HashSet<string>? extensions = null;
             for (ulong pc = frame.Value.Start; pc < frame.Value.End; pc += 4)
             {
                 uint word = Target.Word(pc);
                 ref var record = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(counts, word, out bool exists);
-                if (!exists) record.Unknown = Decoder.Decode(word).Form == Form.Unknown;
+                if (!exists)
+                {
+                    var insn = Decoder.Decode(word);
+                    record.Unknown = insn.Form == Form.Unknown;
+                    record.Extension = insn.Extension;
+                }
+                if (record.Extension != null) (extensions ??= []).Add(record.Extension);
                 record.Count++;
                 if (record.Unknown) seen.Add(word);
             }
             unknown.Write(seen.Count);
             foreach (var word in seen) unknown.Write(word);
             var result = Target.Lift(entry);
+            if (result.Snapshot != null && extensions != null)
+                witnesses.WriteLine($"{entry:x}\t{frame.Value.End - frame.Value.Start}\t{string.Join(',', extensions.Order())}");
             listing.WriteLine($"{entry:x}\t{frame.Value.Start:x}\t{frame.Value.End:x}\t{result.Reason ?? "成功"}");
         }
         using var words = new StreamWriter(prefix + ".words.local.tsv");

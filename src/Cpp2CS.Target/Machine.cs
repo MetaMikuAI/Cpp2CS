@@ -2,7 +2,7 @@ using Cpp2CS.Snapshot;
 
 namespace Cpp2CS.Target;
 
-internal sealed class Machine(SnapshotBuilder builder, BlockId block, Term[] registers)
+internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Term[] registers)
 {
     TermPool T => builder.Terms;
     public Term[] Row => registers;
@@ -197,7 +197,7 @@ internal sealed class Machine(SnapshotBuilder builder, BlockId block, Term[] reg
                 if (i.Name is "fmsub" or "fnmadd") x = T.Operation(Op.FNeg, w, x);
                 if (i.Name is "fnmadd" or "fnmsub") y = T.Operation(Op.FNeg, w, y);
                 Vector(i.D, T.Opaque((int)ArmOperation.FusedMultiplyAdd, w, y, x, V(i.M, w))); return;
-            default: throw new InvalidOperationException("指令不是块内计算");
+            default: ApplyExtension(i, pc); return;
         }
     }
 

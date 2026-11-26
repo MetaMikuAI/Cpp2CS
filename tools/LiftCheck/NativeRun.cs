@@ -17,6 +17,10 @@ internal sealed unsafe class NativeRun : IDisposable
     readonly HashSet<ulong> mapped = [];
     readonly List<Delegate> hooks = [];
     int steps, calls;
+    readonly HashSet<uint> executed;
+    readonly int budget;
+    readonly TextWriter? instructions;
+    readonly UndefinedSource? undefined;
     ulong defined = 0xfful | 1ul << 8 | 1ul << 31 | 0xfful << 32;
     ulong? resume;
     bool finished;
@@ -27,13 +31,16 @@ internal sealed unsafe class NativeRun : IDisposable
     delegate void Data(nint uc, int type, ulong at, int size, long value, nint data);
     [return: MarshalAs(UnmanagedType.I1)]
     delegate bool Missing(nint uc, int type, ulong at, int size, long value, nint data);
-    public NativeRun(Image image, Disassembly disassembly, Frame frame, ulong seed)
+    public NativeRun(Image image, Disassembly disassembly, Frame frame, ulong seed, int budget, HashSet<uint> executed, TextWriter? instructions = null, UndefinedSource? undefined = null)
     {
+        this.undefined = undefined; this.instructions = instructions; this.budget = budget; this.executed = executed;
         this.image = image; this.disassembly = disassembly; this.frame = frame; this.seed = seed;
         if (uc_open(2, 0, out engine) != 0) throw new InvalidOperationException("Unicorn 无法创建 ARM64 CPU");
         Hook(4, (Code)OnCode);
         Hook(1 << 10 | 1 << 11, (Data)OnData);
         Hook(16 | 32 | 64, (Missing)OnMissing);
+        // 地址空间末页的首次缺页可能让 Unicorn 的读钩子报告全一哨兵。预置该页保留原始访问地址。
+        MapPage(ulong.MaxValue & ~4095ul);
         for (int r = 0; r <= 64; r++) Set(r, EnvironmentState.Register(seed, r));
         ulong flags = EnvironmentState.Mix(seed) & 0xf0000000;
         Status(uc_reg_write(engine, 3, &flags));
@@ -51,8 +58,10 @@ internal sealed unsafe class NativeRun : IDisposable
     void Set(int r, UInt128 value) => Status(uc_reg_write(engine, Id(r), &value));
 
     bool OnMissing(nint _, int type, ulong address, int size, long value, nint data)
+        => MapPage(address & ~4095ul);
+
+    bool MapPage(ulong page)
     {
-        ulong page = address & ~4095ul;
         if (!mapped.Add(page)) { trace.Error = "重复缺页"; return false; }
         Status(uc_mem_map(engine, page, 4096, 7));
         if (trace.Error != null) return false;
@@ -120,14 +129,24 @@ internal sealed unsafe class NativeRun : IDisposable
     void OnCode(nint _, ulong address, uint size, nint data)
     {
         if (vectorTransfers != 0 || lowHalf != null) { trace.Error = "Q 访存回调缺失"; uc_emu_stop(engine); return; }
-        pc = address;
-        if (++steps > EnvironmentState.StepLimit) { trace.Error = "原生执行预算"; uc_emu_stop(engine); return; }
+        pc = trace.Pc = address;
+        if (++steps > budget) { trace.Exhausted = true; uc_emu_stop(engine); return; }
         if (address < frame.Start || address >= frame.End)
         {
             var link = Get(30); EventCall(address); Return(link); return;
         }
         uint word = 0; Status(uc_mem_read(engine, address, &word, 4));
+        executed.Add(word);
         var i = disassembly.At(address, word);
+        undefined?.Record(pc, word, i, trace.Events.Count);
+        if (instructions != null)
+        {
+            var decoded = Decoder.Decode(word);
+            string inputs = "";
+            if (decoded.Form is Form.Memory or Form.Pair or Form.Shifted or Form.Extended)
+                inputs = $" N={Get(decoded.N):x} M={Get(decoded.M):x}";
+            instructions.WriteLine($"{steps}\t{trace.Events.Count}\t{pc:x}\t{i.Name} {i.Operands}{inputs}");
+        }
         if (i.Operands.StartsWith('q')) vectorTransfers = i.Name switch
         {
             "ldp" or "stp" or "ldnp" or "stnp" => 2,
@@ -146,7 +165,7 @@ internal sealed unsafe class NativeRun : IDisposable
             case "ret":
                 Return(i.Operands.Length == 0 ? Get(30) : BranchReg(i.Operands) is int ret && ret >= 0 ? Get(ret) : 0); break;
             case "brk": case "udf": End("Trap"); break;
-            default: defined |= i.Written; break;
+            default: defined |= (ulong)i.Written; break;
         }
     }
     static ulong ParseAddress(string text)
@@ -154,6 +173,18 @@ internal sealed unsafe class NativeRun : IDisposable
         var value = text.AsSpan().TrimStart('#');
         return value.StartsWith("0x") ? ulong.Parse(value[2..], NumberStyles.HexNumber) : ulong.Parse(value);
     }
+    public (Trace Trace, UInt128[] Registers) Step(ulong pc)
+    {
+        int status = uc_emu_start(engine, pc, pc + 4, 0, 1);
+        if (status != 0) trace.Error ??= "Unicorn " + status;
+        var row = new UInt128[Abi.Count];
+        for (int r = 0; r <= Abi.Thread; r++) row[r] = Get(r);
+        ulong flags = 0;
+        Status(uc_reg_read(engine, 3, &flags));
+        for (int r = Abi.Negative; r <= Abi.Overflow; r++) row[r] = (flags >> (31 - r + Abi.Negative)) & 1;
+        return (trace, row);
+    }
+
     public Trace Run(ulong entry)
     {
         resume = entry;
@@ -161,9 +192,9 @@ internal sealed unsafe class NativeRun : IDisposable
         {
             ulong start = resume.Value; resume = null;
             int status = uc_emu_start(engine, start, ulong.MaxValue, 0, 0);
-            if (status != 0) trace.Error ??= "Unicorn " + status;
+            if (status != 0) { trace.Error ??= "Unicorn " + status; trace.Diagnostic ??= $"PC {pc:x}"; }
         }
-        if (!finished && trace.Error == null) trace.Error = "原生执行无结局";
+        if (!finished && !trace.Exhausted && trace.Error == null) trace.Error = "原生执行无结局";
         return trace;
     }
     public void Dispose() { uc_close(engine); GC.KeepAlive(hooks); }

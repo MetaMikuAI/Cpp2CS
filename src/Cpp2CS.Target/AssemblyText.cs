@@ -3,7 +3,7 @@ using System.Numerics;
 namespace Cpp2CS.Target;
 
 /// <summary>A64 解码结果的汇编表示。寄存器 31 按对应操作数解释为 SP 或 ZR。</summary>
-public static class AssemblyText
+public static partial class AssemblyText
 {
     static readonly string[] conditions = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"];
     static readonly string[] shifts = ["lsl", "lsr", "asr", "ror"];
@@ -136,7 +136,7 @@ public static class AssemblyText
             case Form.FloatMove: return mode == 0 ? Join(D, Vec(n, w)) : Join(Vec(d, w), N);
             case Form.FloatSelect: return Join(Vec(d, w), Vec(n, w), Vec(m, w), cond);
             case Form.Fused: return Join(Vec(d, w), Vec(n, w), Vec(m, w), Vec(a, w));
-            default: throw new ArgumentOutOfRangeException(nameof(i));
+            default: return FormatExtension(i);
         }
     }
 }

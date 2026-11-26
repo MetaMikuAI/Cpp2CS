@@ -35,7 +35,7 @@ internal static unsafe class NativeApi
     [DllImport("cs")] public static extern nint cs_reg_name(nuint handle, uint reg);
 }
 
-internal sealed record NativeInstruction(string Name, string Operands, ulong Written);
+internal sealed record NativeInstruction(string Name, string Operands, UInt128 Read, UInt128 Written);
 
 internal sealed unsafe class Disassembly : IDisposable
 {
@@ -56,6 +56,7 @@ internal sealed unsafe class Disassembly : IDisposable
         {
             "fp" => 29,
             "lr" => 30,
+            "nzcv" => 65,
             "sp" or "wsp" => 31,
             _ when id.Length > 1 && int.TryParse(id.AsSpan(1), out int n) && "xw".Contains(id[0]) => n,
             _ when id.Length > 1 && int.TryParse(id.AsSpan(1), out int n) && "bhsdqv".Contains(id[0]) => n + 32,
@@ -66,15 +67,30 @@ internal sealed unsafe class Disassembly : IDisposable
     public NativeInstruction At(ulong pc, uint word)
     {
         if (cache.TryGetValue((pc, word), out var instruction)) return instruction;
-        if (NativeApi.cs_disasm(handle, (byte*)&word, 4, pc, 1, out nint raw) != 1) return new("?", "", 0);
+        if (NativeApi.cs_disasm(handle, (byte*)&word, 4, pc, 1, out nint raw) != 1) return new("?", "", 0, 0);
         string name = Marshal.PtrToStringAnsi(raw + 42)!, operands = Marshal.PtrToStringAnsi(raw + 74)!;
         ushort* reads = stackalloc ushort[64]; ushort* writes = stackalloc ushort[64];
-        if (NativeApi.cs_regs_access(handle, raw, reads, out _, writes, out byte count) != 0)
+        if (NativeApi.cs_regs_access(handle, raw, reads, out byte readCount, writes, out byte count) != 0)
             throw new InvalidOperationException("Capstone 未给出寄存器写集");
-        ulong mask = 0;
-        for (int j = 0; j < count; j++) if (Register(writes[j]) is int r && r >= 0) mask |= 1ul << r;
+        UInt128 Mask(ushort* regs, int length)
+        {
+            UInt128 mask = 0;
+            for (int j = 0; j < length; j++) if (Register(regs[j]) is int r && r >= 0) mask |= UInt128.One << r;
+            return mask;
+        }
+        var read = Mask(reads, readCount);
+        var written = Mask(writes, count);
+        // DDI 0487：比较指令和丢弃结果的比较别名只写 NZCV。
+        // Capstone 5 对 CMP 等别名把第一源寄存器列入写集。
+        if (name is "cmp" or "cmn" or "tst" or "ccmp" or "ccmn" or "fcmp" or "fcmpe" or "fccmp" or "fccmpe")
+        {
+            var flags = UInt128.One << 65;
+            read = (read | written) & ~flags;
+            if (name is "ccmp" or "ccmn" or "fccmp" or "fccmpe") read |= flags;
+            written = flags;
+        }
         NativeApi.cs_free(raw, 1);
-        return cache[(pc, word)] = new(name, operands, mask);
+        return cache[(pc, word)] = new(name, operands, read, written);
     }
     public void Dispose() => NativeApi.cs_close(ref handle);
 }

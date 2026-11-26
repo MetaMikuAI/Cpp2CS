@@ -20,6 +20,30 @@ def report(prefix, symbols, cases):
     execution = Counter(row[0] for row in checked.values())
     edges = [sum(row[1] for row in checked.values()), sum(row[2] for row in checked.values())]
     summary = dict(entries=len(functions), lift=lift, selected=len(checked), execution=execution, edges=edges)
+    coverage_file = Path(prefix + ".coverage.local.tsv")
+    if coverage_file.exists():
+        coverage = list(rows(coverage_file))
+        summary["ordinary_edges"] = sum(int(r[1]) for r in coverage)
+        summary["biased_edges"] = sum(int(r[2]) for r in coverage)
+        destinations = defaultdict(Counter)
+        groups = defaultdict(Counter)
+        for _, group, old, outcome, *_ in rows(prefix + ".followup.local.tsv"):
+            if old:
+                destinations[old][outcome] += 1
+            groups[group][outcome] += 1
+        summary.update(destinations=destinations, groups=groups)
+    branch_file = Path(prefix + ".branches.local.tsv")
+    if branch_file.exists():
+        classes = defaultdict(Counter)
+        examples = defaultdict(list)
+        for entry, _, sp, lr, origin, table in rows(branch_file):
+            for dimension, value in (("栈与链接", sp + "/" + lr), ("来源", origin), ("跳转表形态", table)):
+                classes[dimension][value] += 1
+                if len(examples[(dimension, value)]) < 3:
+                    examples[(dimension, value)].append(entry)
+        if sum(classes["来源"].values()) != lift["间接跳转目标未证实"]:
+            raise ValueError("间接跳转分类与提升清单不一致")
+        summary["branches"] = {k: {v: [count, examples[(k, v)]] for v, count in c.items()} for k, c in classes.items()}
     if symbols:
         sizes = defaultdict(set)
         with open(symbols, "rb") as source:

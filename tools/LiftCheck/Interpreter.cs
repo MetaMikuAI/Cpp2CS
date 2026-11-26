@@ -22,6 +22,26 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
         generations[term.Id] = generation;
         return values[term.Id] = value;
     }
+    // 在三值位上逐位做全加器。进位是否确定由三个输入中的多数位决定。
+    static Bits Add(Bits a, Bits b, int width, bool subtract)
+    {
+        UInt128 mask = Bits.Mask(width);
+        UInt128 right = subtract ? ~b.Value & mask : b.Value;
+        UInt128 value = (subtract ? a.Value - b.Value : a.Value + b.Value) & mask;
+        UInt128 unknown = 0;
+        bool minCarry = subtract, maxCarry = subtract;
+        for (int i = 0; i < width; i++)
+        {
+            UInt128 bit = UInt128.One << i;
+            if (((a.Undefined | b.Undefined) & bit) != 0 || minCarry != maxCarry) unknown |= bit;
+            bool minA = (a.Value & ~a.Undefined & bit) != 0, maxA = ((a.Value | a.Undefined) & bit) != 0;
+            bool minB = (right & ~b.Undefined & bit) != 0, maxB = ((right | b.Undefined) & bit) != 0;
+            minCarry = minA && minB || (minA || minB) && minCarry;
+            maxCarry = maxA && maxB || (maxA || maxB) && maxCarry;
+        }
+        return new(value, unknown);
+    }
+
     int calls;
     Bits Eval(Term t)
     {
@@ -55,6 +75,14 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
                 else if (t.Op == Op.Or) v = new(a.Value | b.Value, (a.Undefined & (~b.Value | b.Undefined)) | (b.Undefined & (~a.Value | a.Undefined)));
                 else if (t.Op == Op.Xor) v = new(a.Value ^ b.Value, a.Undefined | b.Undefined);
                 else if (t.Op == Op.Not) v = new(~a.Value & mask, a.Undefined);
+                else if (a.Undefined != 0 && (t.Op is Op.SignExtend or Op.BitReverse or Op.ByteSwap ||
+                    t.Op is Op.Shl or Op.LShr or Op.AShr && b.Undefined == 0))
+                    v = new(Operation(t, a.Value, b.Value) & mask, Operation(t, a.Undefined, b.Value) & mask);
+                else if (t.Op is Op.FNeg or Op.FAbs)
+                    v = new(Operation(t, a.Value, 0), a.Undefined & (t.Op == Op.FAbs ? mask >> 1 : mask));
+                else if ((a.Undefined | b.Undefined) != 0 && t.Op is Op.Add or Op.Sub or Op.Neg)
+                    v = t.Op == Op.Neg ? Add(default, a, t.Width, true) : Add(a, b, t.Width, t.Op == Op.Sub);
+                else if (t.Op == Op.Eq && ((a.Value ^ b.Value) & ~(a.Undefined | b.Undefined)) != 0) v = new(0);
                 else if ((a.Undefined | b.Undefined) != 0 || t.Operands.Length == 3 && Child(2).Undefined != 0) v = new(0, mask);
                 else v = new(Operation(t, a.Value, b.Value) & mask);
                 break;
@@ -134,6 +162,25 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
             bool condition = t.Op switch { Op.FLt => x < y, Op.FEq => x == y, Op.FLe => x <= y, _ => F.IsNaN(x) || F.IsNaN(y) };
             return condition ? UInt128.One : UInt128.Zero;
         }
+        if (F.IsNaN(x) || F.IsNaN(y) || F.IsNaN(z))
+        {
+            // FPCR 默认模式的 FPProcessNaNs：信令 NaN 优先，同类按操作数顺序，保留符号与负载。
+            UInt128 quiet = t.Operands[0].Width == 32 ? 1u << 22 : 1ul << 51;
+            UInt128 ax = UInt128.CreateTruncating(a), by = UInt128.CreateTruncating(b), cz = UInt128.CreateTruncating(c);
+            if (F.IsNaN(x) && (ax & quiet) == 0) return ax | quiet;
+            if (F.IsNaN(y) && (by & quiet) == 0) return by | quiet;
+            if (F.IsNaN(z) && (cz & quiet) == 0) return cz | quiet;
+            if (t.Op == Op.Opaque)
+            {
+                var op = (ArmOperation)t.OpaqueCode;
+                if (op is ArmOperation.MaximumNumber or ArmOperation.MinimumNumber && F.IsNaN(x) != F.IsNaN(y))
+                    return F.IsNaN(x) ? by : ax;
+                if (op == ArmOperation.FusedMultiplyAdd && F.IsNaN(x) &&
+                    (F.IsZero(y) && F.IsInfinity(z) || F.IsInfinity(y) && F.IsZero(z)))
+                    return t.Width == 32 ? 0x7fc00000u : 0x7ff8000000000000ul;
+            }
+            return F.IsNaN(x) ? ax : F.IsNaN(y) ? by : cz;
+        }
         F result = t.Op switch
         {
             Op.FAdd => x + y,
@@ -163,31 +210,42 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
         return UInt128.CreateTruncating(System.Runtime.CompilerServices.Unsafe.BitCast<F, U>(result));
     }
 
-    UInt128 Observe(Term t)
+    internal Bits Result(Term value) => Eval(value);
+
+    UInt128 Observe(Term t, string role, ulong pc)
     {
         var v = Eval(t);
-        if (v.Undefined != 0) trace.Error = "依赖未定义";
+        if (v.Undefined != 0 && trace.Error == null)
+        {
+            trace.Error = "依赖未定义";
+            trace.Diagnostic = $"{role}@{pc:x} 位掩码 {v.Undefined:x}";
+        }
         return v.Value;
     }
 
-    public Trace Run(MethodSnapshot snapshot)
+    public Trace Run(MethodSnapshot snapshot, LiftLocations locations)
     {
         values = new Bits[snapshot.Terms.Count];
         generations = new int[values.Length];
         BlockId id = snapshot.Entry;
         Bits[] args = [];
-        for (int step = 0; step < EnvironmentState.StepLimit && trace.Error == null; step++)
+        while (trace.Error == null)
         {
             var block = snapshot.Flow[id];
+            int cost = locations.Blocks.GetValueOrDefault(id).Instructions;
+            if (trace.Instructions + cost > EnvironmentState.StepLimit) { trace.Exhausted = true; break; }
+            trace.Instructions += cost;
             generation++;
             for (int j = 0; j < args.Length; j++) Store(block.Parameters[j], args[j]);
             for (int j = 0; j < block.Occurrences.Length; j++)
             {
                 var occurrence = block.Occurrences[j]; var results = block.Results[j];
+                trace.Pc = occurrence.Address;
                 switch (occurrence)
                 {
                     case ReadOccurrence read:
-                        ulong address = (ulong)Observe(read.Location); UInt128 value = 0;
+                        ulong address = (ulong)Observe(read.Location, "读地址", read.Address); UInt128 value = 0;
+                        if (trace.Error != null) return trace;
                         for (int k = 0; k < read.Width / 8; k++)
                         {
                             ulong at = address + (uint)k;
@@ -195,14 +253,17 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
                         }
                         trace.Add("读", address, read.Width); Store(results[0], new(value)); break;
                     case WriteOccurrence write:
-                        address = (ulong)Observe(write.Location); value = Observe(write.Value);
+                        address = (ulong)Observe(write.Location, "写地址", write.Address); value = Observe(write.Value, "写值", write.Address);
+                        if (trace.Error != null) return trace;
                         trace.Add("写", address, write.Value.Width, value);
                         for (int k = 0; k < write.Value.Width / 8; k++) writes[address + (uint)k] = (byte)(value >> (k * 8));
                         break;
                     case CallOccurrence call:
-                        trace.Add("调用", (ulong)Observe(call.Target!));
+                        var target = (ulong)Observe(call.Target!, "调用目标", call.Address);
+                        if (trace.Error != null) return trace;
+                        trace.Add("调用", target);
                         for (int k = 0; k < call.Arguments.Length; k++)
-                            trace.Add("实参", width: call.Arguments[k].Width, value: Observe(call.Arguments[k]), slot: Abi.Register(call.ArgumentSlots[k]));
+                            trace.Row("实参", call.Arguments[k].Width, Eval(call.Arguments[k]), Abi.Register(call.ArgumentSlots[k]));
                         calls++;
                         for (int k = 0; k < results.Length; k++)
                             Store(results[k], new(EnvironmentState.Register(seed, Abi.Register(call.ResultSlots[k]), calls)));
@@ -212,9 +273,10 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
                 if (trace.Error != null) return trace;
             }
             var end = block.Terminator; int edge = 0;
+            trace.Pc = end.Address;
             if (end.Condition is { } condition)
             {
-                var v = Observe(condition);
+                var v = Observe(condition, "分支条件", end.Address);
                 edge = end.Kind == TerminatorKind.Branch ? (v == 0 ? 1 : 0) : (int)UInt128.Min(v, (uint)(end.Exits.Length - 1));
                 if (trace.Error != null) return trace;
             }
@@ -230,9 +292,9 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
             trace.Add(exit.Kind.ToString());
             if (exit.Kind == ExitKind.Return)
                 for (int k = 0; k < exit.Arguments.Length; k++)
-                    trace.Add("返回槽", width: exit.Arguments[k].Width, value: Observe(exit.Arguments[k]), slot: Abi.Register(snapshot.ReturnSlots[k]));
+                    trace.Row("返回槽", exit.Arguments[k].Width, Eval(exit.Arguments[k]), Abi.Register(snapshot.ReturnSlots[k]));
             return trace;
         }
-        trace.Error ??= "快照执行预算"; return trace;
+        return trace;
     }
 }
