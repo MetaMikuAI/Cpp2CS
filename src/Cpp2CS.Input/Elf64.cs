@@ -23,6 +23,42 @@ public sealed class Elf64
 
     public static Elf64 Load(string path) => new(File.ReadAllBytes(path));
 
+    /// <summary>GNU 构建标识，同一映像的分离符号文件有相同标识。</summary>
+    public string BuildId()
+    {
+        foreach (var section in Sections.Where(s => s.Type == 7))
+        {
+            var notes = Slice(section.Offset, section.Size);
+            while (notes.Length >= 12)
+            {
+                int name = checked((int)U32(notes)), size = checked((int)U32(notes, 4));
+                int data = checked(12 + ((name + 3) & ~3));
+                int end = checked(data + ((size + 3) & ~3));
+                if (end > notes.Length) throw new InvalidDataException("ELF 注记越界");
+                if (U32(notes, 8) == 3 && size > 0 && notes.Slice(12, name).SequenceEqual("GNU\0"u8))
+                    return Convert.ToHexString(notes.Slice(data, size));
+                notes = notes[end..];
+            }
+        }
+        throw new InvalidDataException("缺少 GNU 构建标识");
+    }
+
+    public IEnumerable<ElfSymbol> FunctionSymbols()
+    {
+        foreach (var section in Sections.Where(s => s.Type == 2))
+        {
+            if (section.EntrySize != 24 || section.Size % 24 != 0) throw new InvalidDataException("符号表步长无效");
+            var strings = Sections[checked((int)section.Link)];
+            for (ulong i = 0; i < section.Size; i += 24)
+            {
+                var s = Slice(section.Offset + i, 24);
+                if ((s[4] & 15) == 2 && U16(s, 6) != 0)
+                    yield return new(CString(Slice(strings.Offset, strings.Size), U32(s)), s[4], s[5],
+                        U16(s, 6), U64(s, 8), U64(s, 16));
+            }
+        }
+    }
+
     private Elf64(byte[] file)
     {
         this.file = file;

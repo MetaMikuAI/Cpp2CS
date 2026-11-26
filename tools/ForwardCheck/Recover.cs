@@ -18,16 +18,17 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// </summary>
 internal static partial class Recover
 {
-    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show, string? emit)
+    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string? symbolFile, string target, string show, string? emit, string? fingerprint)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
         var input = Il2CppInput.Load(binary, metadataPath);
         byte[] bytes = File.ReadAllBytes(binary);
         using var metadata = ModelInput.Open(assemblies, input, bytes);
-        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes);
         var entities = new EntityFacts(metadata.Facts);
         var lifter = new Arm64Target(input.Elf, bytes,
             input.Code.Methods.Concat(input.Code.MethodInstances).Where(m => m.Entry.HasValue).Select(m => m.Entry!.Value));
+        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes, lifter, fingerprint);
+        if (fingerprint != null) Console.WriteLine(facts.Admission);
         var lifts = new Dictionary<ulong, MethodSnapshot?>();
         MethodSnapshot? Snapshot(ulong entry)
         {

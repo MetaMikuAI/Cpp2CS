@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Text;
 using System.Text.Json;
 using Cpp2CS.Input;
 using Cpp2CS.Facts;
@@ -13,7 +12,7 @@ using Cpp2CS.Target;
 namespace Cpp2CS.Tools.ForwardCheck;
 
 /// <summary>
-/// 核对工具里的事实来源，只供正向核对使用。运行时函数按符号表命名；托管方法的入口取自代码登记表；
+/// 核对工具里的事实来源。运行时函数按符号或已准入的参照命名；托管方法的入口取自代码登记表；
 /// 模型给出实体、签名和布局。映像给出元数据槽、链接常量及数据区。
 /// </summary>
 internal sealed class BridgeFacts : IGenericEntryFacts
@@ -21,60 +20,104 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     private readonly Il2CppInput input;
     private readonly ModelMetadata metadata;
     private readonly ModelNativeFacts native;
-    private readonly Dictionary<ulong, string> symbols = [];
+    private readonly IReadOnlyDictionary<ulong, RuntimeName> names;
+    private readonly Dictionary<ulong, Callee?> wrappers = [];
+    private readonly Dictionary<ulong, string> wrapperFailures = [];
+    private readonly Arm64Target target;
+    private readonly RegisteredEntries entries;
+    private readonly FingerprintImage image;
+    public string Admission { get; }
     private readonly Dictionary<ulong, EntityRef?> slots = [];
     private readonly Dictionary<ulong, ElfRela> relocations = [];
     private readonly byte[] file;
 
-    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string? symbolFile, byte[] file)
+    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string? symbolFile, byte[] file,
+        Arm64Target target, string? fingerprint)
     {
         this.input = input;
         this.metadata = metadata;
         this.file = file;
+        this.target = target;
         foreach (var relocation in input.Elf.Relocations) relocations[relocation.Address] = relocation;
         native = new(metadata, input.Code);
-        if (symbolFile != null) ReadSymbols(symbolFile);
-    }
-
-    /// <summary>读符号表（.symtab）：函数符号的地址到名字。</summary>
-    private void ReadSymbols(string path)
-    {
-        byte[] file = File.ReadAllBytes(path);
-        var elf = Elf64.Load(path);
-        foreach (var section in elf.Sections)
+        entries = new(input);
+        image = new(input.Elf, file, target.Unwind);
+        var symbols = NamingCheck.Symbols(input, symbolFile);
+        if (fingerprint == null)
         {
-            if (section.Name != ".symtab") continue;
-            var strings = elf.Sections[(int)section.Link];
-            for (ulong at = section.Offset; at + 24 <= section.Offset + section.Size; at += 24)
-            {
-                var entry = file.AsSpan((int)at, 24);
-                if ((entry[4] & 0xf) != 2) continue;
-                ulong value = BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]);
-                int name = (int)(strings.Offset + BinaryPrimitives.ReadUInt32LittleEndian(entry));
-                int end = Array.IndexOf(file, (byte)0, name);
-                symbols.TryAdd(value, Encoding.UTF8.GetString(file, name, end - name));
-            }
+            var signed = new Dictionary<ulong, RuntimeName>();
+            foreach (var (a, aliases) in symbols)
+                if (RuntimeNaming.NameOf(aliases) != null) signed.Add(a, new([.. aliases], "符号"));
+            names = signed;
+            Admission = "未指定参照表";
+        }
+        else
+        {
+            var naming = NamingCheck.Match(input, image, target.Unwind, entries, symbols, RuntimeFingerprint.Read(fingerprint));
+            names = naming.Names;
+            Admission = naming.Admission;
         }
     }
 
     public RuntimeLayout Layout => RuntimeLayout.Unity2022Lp64;
 
-    public string Symbol(ulong address) => symbols.GetValueOrDefault(address, $"0x{address:x}");
+    public string Symbol(ulong address) => names.TryGetValue(address, out var name) ? name.Name : $"0x{address:x}";
 
     public Callee Callee(ulong address)
     {
         string name = Symbol(address);
-        if (native.IsEntry(address))
+        ulong rva = address - input.Elf.ImageBase;
+        if (native.IsEntry(rva))
         {
             // 内联体中的原生调用也走 Callee.Signature；旧引擎只比较显式实参。
-            bool hidden = native.RequiresMethodArgument(address);
+            bool hidden = native.RequiresMethodArgument(rva);
             string reason = "隐含实参的核对尚未实现";
-            var signature = hidden ? null : native.Signature(address, out reason);
+            var signature = hidden ? null : native.Signature(rva, out reason);
             return new(CalleeKind.Managed, null, signature == null ? $"{name}（{reason}）" : name, "代码登记表") { Signature = signature };
         }
-        if (symbols.TryGetValue(address, out var symbol) && RuntimeOperations.BySymbol(symbol) is { } operation)
-            return new(CalleeKind.Runtime, operation, name, "符号表");
-        return new(CalleeKind.Unknown, null, name, "");
+        var direct = Direct(address);
+        if (direct.Kind == CalleeKind.Runtime || names.Count == 0 || entries.Managed.Contains(address)) return direct;
+        if (Wrapper(address) is { } expanded) return expanded;
+        return wrapperFailures.TryGetValue(address, out var failure) ? direct with { Name = $"{direct.Name}（{failure}）" } : direct;
+    }
+
+    private Callee Direct(ulong address)
+    {
+        if (entries.Managed.Contains(address) || !names.TryGetValue(address, out var n)) return new(CalleeKind.Unknown, null, Symbol(address), "");
+        var operation = n.Operation;
+        return new(operation == null ? CalleeKind.Unknown : CalleeKind.Runtime, operation, n.Name,
+            n.Depth == 0 ? n.Basis : $"{n.Basis} {n.Depth} 层，经 0x{n.Parent:x}+{n.Offset}");
+    }
+
+    private Callee? Wrapper(ulong address)
+    {
+        if (wrappers.TryGetValue(address, out var known)) return known;
+        Callee? result = null;
+        if (target.Unwind.Find(address) is { } f && f.Start == address && image.MayCallNamed(f, names))
+        {
+            LiftResult lift;
+            try { lift = target.Lift(address); }
+            catch (FlowException failure) { lift = new(null, failure.Violations[0]); }
+            if (lift.Snapshot == null) wrapperFailures[address] = $"包装快照不可用：{lift.Reason}";
+            else if (CoExecution.WrapperTarget(lift.Snapshot, Direct, Abi.CallArgumentSlots) is ulong to)
+            {
+                var callee = Direct(to);
+                result = callee with { Basis = $"包装经 0x{to:x} {callee.Name}（{callee.Basis}）" };
+            }
+        }
+        return wrappers[address] = result;
+    }
+
+    public Dictionary<string, long> CountCalls()
+    {
+        var counts = new Dictionary<string, long> { ["符号"] = 0, ["同体"] = 0, ["传递"] = 0, ["包装"] = 0, ["未命名"] = 0 };
+        foreach (var (address, weight) in image.CallsFrom(target.Entries.ToHashSet()))
+        {
+            string basis = entries.Managed.Contains(address) ? "未命名" :
+                names.TryGetValue(address, out var n) ? n.Basis : Wrapper(address) != null ? "包装" : "未命名";
+            counts[basis] += weight;
+        }
+        return counts;
     }
 
     private GenericEntry? pendingMethod;
@@ -169,15 +212,16 @@ internal static class NativeCheck
 {
     private sealed record Outcome(string Category, string Name, string Class, string Detail);
 
-    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show)
+    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string? symbolFile, string target, string show, string? fingerprint)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
         var input = Il2CppInput.Load(binary, metadataPath);
         byte[] bytes = File.ReadAllBytes(binary);
         using var metadata = ModelInput.Open(assemblies, input, bytes);
-        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes);
         var lifter = new Arm64Target(input.Elf, bytes,
             input.Code.Methods.Concat(input.Code.MethodInstances).Where(m => m.Entry.HasValue).Select(m => m.Entry!.Value));
+        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes, lifter, fingerprint);
+        if (fingerprint != null) Console.WriteLine(facts.Admission);
         // 别的方法的快照，展开调用时使用。提升不出来、或通不过快照校验的方法没有快照。
         var lifts = new Dictionary<ulong, MethodSnapshot?>();
         MethodSnapshot? Snapshot(ulong entry)

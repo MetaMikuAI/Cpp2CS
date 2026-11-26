@@ -11,7 +11,8 @@ internal static class Sample
     {
         public override string ToString() => $"{Name} 0x{Address:x} [方法 {Key}]";
     }
-    internal sealed record Plan(int Population, int Entries, int Count, int Audit, Item[] Items, long[] Shown);
+    internal sealed record Plan(int Population, int Entries, int Count, int Audit, Item[] Items, long[] Shown,
+        string? Admission, Dictionary<string, long>? Calls);
     internal sealed record Group(int Count, string First);
 
     internal sealed class Result
@@ -57,7 +58,7 @@ internal static class Sample
     {
         var options = new Dictionary<string, string>();
         for (int i = 1; i < args.Length; i += 2)
-            if (i + 1 == args.Length || args[i] is not ("--binary" or "--metadata" or "--symbols" or "--count" or "--seed" or "--show" or "--batch-size")
+            if (i + 1 == args.Length || args[i] is not ("--binary" or "--metadata" or "--symbols" or "--fingerprint" or "--count" or "--seed" or "--show" or "--batch-size")
                 || !options.TryAdd(args[i], args[i + 1])) return Usage();
         if (!options.TryGetValue("--binary", out var binary) || !options.TryGetValue("--metadata", out var metadata)
             || !int.TryParse(options.GetValueOrDefault("--count", "2000"), out int count) || count < 1
@@ -65,7 +66,7 @@ internal static class Sample
         if (!int.TryParse(options.GetValueOrDefault("--batch-size", "0"), out int batchSize) || batchSize < 0) return Usage();
         if (Environment.GetEnvironmentVariable("CPP2CS_SAMPLE_WORKER") == "1")
         {
-            var input = new SampleInput(binary, metadata, options.GetValueOrDefault("--symbols"));
+            var input = new SampleInput(binary, metadata, options.GetValueOrDefault("--symbols"), options.GetValueOrDefault("--fingerprint"));
             Console.WriteLine("就绪");
             while (Console.ReadLine() is { } line)
             {
@@ -88,7 +89,7 @@ internal static class Sample
 
     private static int Usage()
     {
-        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量]");
+        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--fingerprint 参照表] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量]");
         Console.Error.WriteLine("分批时，每批结束输出“批次暂停”，从标准输入收到“继续”后处理下一批。");
         return 2;
     }
@@ -197,6 +198,12 @@ internal static class Sample
     {
         var main = records.Take(plan.Count).ToArray();
         var complete = main.Where(r => r.Complete).ToArray();
+        if (plan.Calls != null)
+        {
+            Console.WriteLine(plan.Admission);
+            Console.WriteLine("全映像托管入口对地图外的直接调用点：" +
+                string.Join("，", plan.Calls.Select(p => $"{p.Key} {p.Value}")) + $"，合计 {plan.Calls.Values.Sum()}");
+        }
         var times = main.Select(r => r.Milliseconds).Order().ToArray();
         Console.WriteLine($"总体方法 {plan.Population}，去重入口 {plan.Entries}；抽样 {main.Length}，种子 {seed}");
         Console.WriteLine($"提升 {main.Count(r => r.Lifted)}；完整恢复 {complete.Length}/{main.Length}（{(main.Length == 0 ? 0 : 100.0 * complete.Length / main.Length):F2}%）；CIL 写出 {main.Count(r => r.Written)}");
