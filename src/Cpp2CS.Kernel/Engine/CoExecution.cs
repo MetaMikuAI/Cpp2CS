@@ -64,6 +64,8 @@ public sealed partial class CoExecution
         /// <summary>这条路径上已经展开的调用数，以及已经引入的任意值的个数。</summary>
         public int Inlines { get; init; }
         public int Fresh { get; init; }
+        /// <summary>现场路径上实际执行过的纯运行时调用，按函数与实参区分。</summary>
+        public ImmutableHashSet<Term> PureCalls { get; init; } = [];
         /// <summary>证明一条声明时，这条路径上与声明有关的记录（见 CoExecution.Claims.cs）。</summary>
         public Trail? Trail { get; init; }
     }
@@ -95,6 +97,8 @@ public sealed partial class CoExecution
     private readonly Func<ulong, MethodSnapshot?>? snapshots;
     private readonly TermPool terms;
     private readonly int budget;
+    private ImmutableArray<RuntimeInlineBody> inlineBodies;
+    private readonly Dictionary<RuntimeInlineBody, WalkResult> inlinePaths = [];
     private readonly SortedSet<string> assumptions = new(StringComparer.Ordinal);
     private readonly Term stackPointer;
     private int steps, paths;
@@ -369,12 +373,19 @@ public sealed partial class CoExecution
     };
 
     /// <summary>
-    /// 把模板里布局登记的运行时属性换成现场的读取（规格登记的等式，设计 7.8）：数组的长度是数组对象里固定偏移上的字，
-    /// 运行时不可变，读取与历元无关。模板在数组上使用这个属性，说明该值是数组，这个位置由此登记为不可变。
+    /// 把模板里布局登记的运行时属性换成现场的读取（设计 7.4、7.8）。不可变字段上的读取与历元无关。
     /// </summary>
     private Term Lower(Term term, ref State state)
     {
         var conditions = state.Conditions;
+        var atCall = state;
+        var layout = facts.Layout;
+        Term Field(Term owner, int offset, int bits)
+        {
+            var address = conditions.Evaluate(terms.Add(owner, terms.Constant(offset, layout.PointerBits)));
+            conditions = conditions.WithImmutable(address, bits);
+            return terms.Attribute(new AttributeId(KernelAttributes.Load), bits, address, terms.Zero(32));
+        }
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         Term Go(Term t)
         {
@@ -388,20 +399,35 @@ public sealed partial class CoExecution
                 changed |= !ReferenceEquals(parts[i], t.Operands[i]);
             }
             Term result = changed ? terms.Rebuild(t, parts) : t;
-            if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLength)
+            if (result.Kind == TermKind.Attribute && result.Attribute.Value is (int)RuntimeFunction.ArrayLength or (int)RuntimeFunction.ArrayLengthNative)
             {
-                var layout = facts.Layout;
-                var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
-                result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.ArrayLengthBits, address, terms.Zero(32));
-                conditions = conditions.WithImmutable(address, layout.ArrayLengthBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                // il2cpp-object-internals.h: Il2CppArray::max_length；il2cpp-codegen-il2cpp.h: IL2CPP_ARRAY_BOUNDS_CHECK。
+                int bits = result.Attribute.Value == (int)RuntimeFunction.ArrayLength ? layout.ArrayLengthBits : layout.ArrayLengthStorageBits;
+                result = Field(result.Operands[0], layout.ArrayLengthOffset, bits);
+                conditions = conditions.WithUpperBound(conditions.Evaluate(result), (UInt128)layout.ArrayLengthMaximum);
             }
-            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLengthNative)
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ClassOf)
             {
-                // 同一个长度字段按 il2cpp_array_size_t 读（指针位宽），取值范围相同。
-                var layout = facts.Layout;
-                var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
-                result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.PointerBits, address, terms.Zero(32));
-                conditions = conditions.WithImmutable(address, layout.PointerBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                // il2cpp-object-internals.h: Il2CppObject::klass。
+                result = Field(result.Operands[0], layout.ObjectClassOffset, layout.PointerBits);
+            }
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ElementClass)
+            {
+                // il2cpp-codegen-il2cpp.h: ArrayElementTypeCheck 读取 Il2CppClass::element_class。
+                result = Field(result.Operands[0], layout.ClassElementOffset, layout.PointerBits);
+            }
+            else if (result.Kind == TermKind.Attribute && result.Attribute == RuntimeAttributes.ImmutableRead)
+            {
+                // 内联体的字段读取由其头文件定义与布局登记，IsInstClass 读取深度、层级表指针与祖先项。
+                result = Field(result.Operands[0], 0, result.Width);
+            }
+            else if (leftTemplate is null && result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.IsInstance
+                && result.Operands[1] is { Kind: TermKind.Entity } target && facts.TypeTestCondition(target.Entity) is { } type)
+            {
+                var named = result;
+                if (!atCall.PureCalls.Any(call => call.Attribute == named.Attribute && conditions.Same(call.Operands[0], named.Operands[0])
+                    && conditions.Same(call.Operands[1], named.Operands[1])))
+                    result = InlineTypeTest(result, type, atCall, ref conditions);
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.FieldAddress && result.Operands[1].Kind == TermKind.Entity)
             {
@@ -414,6 +440,65 @@ public sealed partial class CoExecution
         var lowered = Go(term);
         if (!ReferenceEquals(conditions, state.Conditions)) state = state with { Conditions = conditions };
         return lowered;
+    }
+
+    /// <summary>执行规格登记的 IsInstSealed 或 IsInstClass 的纯内联图（设计 9.1）。
+    /// 走查给出所有返回路径，实参按内联体的签名绑定。尚未确定的分支用选择项保留。</summary>
+    private Term InlineTypeTest(Term call, RuntimeTypeCondition type, State state, ref PathConditions conditions)
+    {
+        if (inlineBodies.IsDefault) inlineBodies = RuntimeInlineBodies.ForLayout(facts.Layout);
+        var body = inlineBodies.Single(b => b.Function == RuntimeFunction.IsInstance && b.TargetType == type);
+        var graph = body.Graph;
+        if (!inlinePaths.TryGetValue(body, out var walk))
+        {
+            walk = new ValueSources(graph, graph.Terms).Walk(new([new(graph.Entry, 0)], []));
+            inlinePaths.Add(body, walk);
+        }
+        if (walk.Status != WalkStatus.Complete || walk.Paths.IsEmpty || walk.Paths.Any(p =>
+            p.End != PathEnd.Return || !p.Steps.IsEmpty || p.Outcome.Length != 1 || p.Outcome[0].HasUndefined
+            || p.Conditions.Any(l => l.Kind != LiteralKind.Condition || l.Term!.HasUndefined)))
+            throw new Refuted(Verdict.Insufficient, $"运行时内联体不是无环的纯值图：{body.Source}");
+
+        var env = ImmutableDictionary<Term, Term>.Empty;
+        foreach (var parameter in graph.EntryParameters)
+            env = env.Add(parameter, call.Operands[body.ArgumentOrder[parameter.Slot.Index]]);
+        var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
+        int fresh = state.Fresh;
+        var returns = new List<(Term Guard, Term Value)>();
+        foreach (var path in walk.Paths)
+        {
+            var local = state with { Conditions = conditions };
+            Term guard = terms.True;
+            Term Value(Term t) => Lower(Import(t, env, memo, ref fresh), ref local);
+            foreach (var literal in path.Conditions)
+            {
+                Step();
+                var test = Value(literal.Term!);
+                // 只有必经前缀上的读取可以在整个调用点登记为不可变。
+                if (ReferenceEquals(guard, terms.True)) conditions = local.Conditions;
+                bool truth = literal.Value != 0;
+                if (local.Conditions.Decide(test) is bool taken)
+                {
+                    if (taken == truth) continue;
+                    guard = terms.False;
+                    break;
+                }
+                var branch = local.Conditions.With(test, truth);
+                if (branch is null) { guard = terms.False; break; }
+                guard = terms.And(guard, truth ? test : terms.Not(test));
+                local = local with { Conditions = branch };
+            }
+            if (guard.IsZero) continue;
+            var value = Value(path.Outcome[0]);
+            value = local.Conditions.Evaluate(value);
+            if (ReferenceEquals(guard, terms.True)) { conditions = local.Conditions; return value; }
+            returns.Add((guard, value));
+        }
+        if (returns.Count == 0) throw new Refuted(Verdict.Insufficient, $"运行时内联体没有可达的返回：{body.Source}");
+        var result = returns[^1].Value;
+        for (int i = returns.Count - 2; i >= 0; i--)
+            result = terms.Select(returns[i].Guard, returns[i].Value, result);
+        return result;
     }
 
     private Side Enter(IFlowGraph graph, Side side, Exit exit, ref State state, Role role)
@@ -589,6 +674,7 @@ public sealed partial class CoExecution
                                 var arguments = new Term[operation.Arguments];
                                 for (int k = 0; k < arguments.Length; k++) arguments[k] = Argument(call, operands, new Slot(SlotKind.Integer, k));
                                 value = terms.Attribute(new AttributeId((int)operation.Function), pointerBits, arguments);
+                                if (!inner) state = state with { PureCalls = state.PureCalls.Add(value) };
                             }
                             else
                                 value = terms.Attribute(new AttributeId(KernelAttributes.ExceptionObject), pointerBits,

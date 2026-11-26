@@ -528,8 +528,15 @@ public sealed class TermPool
         return Make(TermKind.Operation, x.Width, [x], Op.Not);
     }
 
-    private Term ShiftLeft(Term x, int amount) =>
-        amount == 0 ? x : amount >= x.Width ? Zeros(x.Width) : Concat(Zeros(amount), Slice(x, 0, x.Width - amount));
+    private Term ShiftLeft(Term x, int amount)
+    {
+        if (amount == 0) return x;
+        if (amount >= x.Width) return Zeros(x.Width);
+        // 定宽左移等于乘 2 的幂，常量加数可先乘再合并。vm/ClassInlines.h 的 ClassInlines::HasParentUnsafe 以 depth - 1 索引指针表。
+        if (x.Kind == TermKind.Operation && x.Op == Op.Add && x.Operands[1].IsConstant)
+            return Add(ShiftLeft(x.Operands[0], amount), ShiftLeft(x.Operands[1], amount));
+        return Concat(Zeros(amount), Slice(x, 0, x.Width - amount));
+    }
 
     private Term Shift(Op op, Term x, Term amount)
     {

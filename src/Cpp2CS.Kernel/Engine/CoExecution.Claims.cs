@@ -244,8 +244,7 @@ public sealed partial class CoExecution
         foreach (var (address, width, value) in trail.Reads)
         {
             // 模板把这个位置当作运行时不可变数据使用（例如数组的长度）：这次读取是该属性的求值，不是托管位置上的读取。
-            var now = state.Conditions.Evaluate(value);
-            if (now.Kind == TermKind.Attribute && now.Attribute.Value == KernelAttributes.Load && now.Operands[1].IsZero) continue;
+            if (state.Conditions.IsImmutable(address, width)) continue;
             bool matched = false;
             foreach (var read in trail.TemplateReads) matched |= state.Conditions.Same(read, value);
             if (!matched) throw new ClaimRefuted(Obligation.Correspondence, $"被占用的读取 [{address}]（{width} 位）在模板里没有对应");

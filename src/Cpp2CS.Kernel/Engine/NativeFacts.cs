@@ -29,6 +29,8 @@ public interface INativeFacts
 {
     /// <summary>运行时结构的布局。</summary>
     RuntimeLayout Layout { get; }
+    /// <summary>目标类型的元数据满足哪一条 IsInst 内联体的前提。没有依据时保留具名函数。</summary>
+    RuntimeTypeCondition? TypeTestCondition(EntityRef type) => null;
     /// <summary>对这个地址的调用是什么。</summary>
     Callee Callee(ulong address);
     /// <summary>托管方法的入口地址（代码地图）。</summary>
