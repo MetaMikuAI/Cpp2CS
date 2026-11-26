@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Cpp2CS.Snapshot;
 using Cpp2CS.Spec.Catalog;
+using Cpp2CS.Spec.Runtime;
 
 namespace Cpp2CS.Kernel.Forward;
 
@@ -14,6 +15,11 @@ public sealed record TypeShape(StackKind Kind, int StorageBits, bool Signed, Ent
     public int StackBits => Kind == StackKind.Int32 ? 32 : StorageBits;
     /// <summary>存储只取 0 与 1：生成代码把 System.Boolean 写成 C++ 的 bool，调用约定规定它的取值只有这两个（设计 16.2）。</summary>
     public bool TwoValued { get; init; }
+    /// <summary>
+    /// 值类型按字段递归展开之后的各基本成员，按在值里的位偏移排列；其余类型为空。
+    /// 调用约定按它区分同质浮点聚合体与其他聚合体（AAPCS64 §6.8.2）。值类型的成员未知时也为空，这时传递方式不能判定。
+    /// </summary>
+    public ImmutableArray<AggregateMember> Members { get; init; } = [];
 }
 
 /// <summary>方法的形状。Parameters 含 this（实例方法的第 0 个）；Return 为空表示 void。</summary>
@@ -66,6 +72,8 @@ public interface ITokenResolver
     EntityRef Method(int token);
     EntityRef Field(int token);
     EntityRef Type(int token);
+    /// <summary>ldstr 的字面量记号：字符串实体（设计第 8 节：字面量表里内容相同的最小下标）。</summary>
+    EntityRef String(int token);
 }
 
 /// <summary>方法体不能按目录展开。Reason 是原因的类别，Offset 是指令的偏移（与指令无关时为 -1）。</summary>

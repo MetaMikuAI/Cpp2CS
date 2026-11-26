@@ -144,6 +144,21 @@ public sealed partial class CoExecution
                     Epoch = state.Epoch + 1, Serial = state.Serial + 1, NativeWrites = [], TemplateWrites = [],
                 });
                 return;
+            case (EventKind.Allocate, EventKind.Allocate) when onLeft.Effect!.Entity == onRight.Effect!.Entity:
+            {
+                // 新对象：同一个事件，双方的结果是同一个新引用，非空；该类的初始化已触发。此后是新的历元。
+                CompareWrites(state);
+                var (mine, theirs) = (leftGraph!.Results(onLeft.Occurrence)[0], templateGraph.Results(onRight.Occurrence)[0]);
+                var created = EventResult(state.Serial, 0, mine.Width);
+                Explore(state with
+                {
+                    Native = onLeft.After! with { Env = onLeft.After.Env.SetItem(mine, created) },
+                    Template = onRight.After! with { Env = onRight.After.Env.SetItem(theirs, created) },
+                    Conditions = conditions.WithInitialized(onLeft.Effect.Entity!.Value).With(terms.Eq(created, terms.Zero(created.Width)), false)!,
+                    Epoch = state.Epoch + 1, Serial = state.Serial + 1, NativeWrites = [], TemplateWrites = [],
+                });
+                return;
+            }
             default:
                 throw new Refuted(Verdict.Insufficient, $"事件不同：左 {Name(onLeft)}，右 {Name(onRight)}");
         }

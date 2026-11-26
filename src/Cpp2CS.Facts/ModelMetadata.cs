@@ -4,6 +4,7 @@ using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Model;
 using Cpp2CS.Snapshot;
 using Cpp2CS.Spec.Catalog;
+using Cpp2CS.Spec.Runtime;
 
 namespace Cpp2CS.Facts;
 
@@ -60,7 +61,36 @@ public sealed class ModelMetadata : IMetadataView
         if (!Model.Types[n.Definition].ValueType) return new(StackKind.Object, 64, false, entity);
         if (Primitive(n.Definition) is { } p) return new(p.Kind, p.Bits, p.Signed, entity) { TwoValued = IsCore(n.Definition, "Boolean") };
         if (EnumBase(n) is { } underlying) return Shape(underlying) with { Entity = entity, TwoValued = false };
-        return new(StackKind.Value, checked(ValueSize(n) * 8), false, entity);
+        return new(StackKind.Value, checked(ValueSize(n) * 8), false, entity) { Members = Members(n) };
+    }
+
+    /// <summary>
+    /// 值类型按实例字段递归展开之后的基本成员（在值里的位偏移、存储位宽、是否浮点），按偏移排列。
+    /// 调用约定按它区分同质浮点聚合体（AAPCS64 §6.8.2）。布局缺依据时为空，这时传递方式不能判定。
+    /// </summary>
+    private ImmutableArray<AggregateMember> Members(NamedType type)
+    {
+        var members = new List<AggregateMember>();
+        try { Flatten(type, 0); }
+        catch (ExpansionException) { return []; }
+        return [.. members.OrderBy(m => m.OffsetBits)];
+
+        void Flatten(NamedType owner, int start)
+        {
+            foreach (int i in Fields(owner))
+            {
+                if (Model.Fields[i].Storage != FieldStorage.Instance) continue;
+                int at = checked(start + (FieldOffset(i, owner, FieldStorage.Instance) ?? throw Missing($"字段 {i} 缺偏移")) - Header);
+                var t = EntityKeys.Inflate(Model.Fields[i].Type, owner);
+                if (t is NamedType n && Model.Types[n.Definition].ValueType && Primitive(n.Definition) is null && EnumBase(n) is null)
+                    Flatten(n, at);
+                else
+                {
+                    var shape = Shape(t);
+                    members.Add(new(checked(at * 8), shape.StorageBits, shape.Kind is StackKind.Float32 or StackKind.Float64));
+                }
+            }
+        }
     }
 
     private (StackKind Kind, int Bits, bool Signed)? Primitive(int index)

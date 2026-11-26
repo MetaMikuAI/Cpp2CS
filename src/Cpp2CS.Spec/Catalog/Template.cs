@@ -52,6 +52,8 @@ public enum VariantCondition : byte
     ReturnsValue,
     /// <summary>没有 this 的方法，所属的类有静态构造函数：调用点先确保该类已初始化（ECMA-335 I.8.9.5）。</summary>
     StaticMethodWithInitializer,
+    /// <summary>构造函数，所属的类型是引用类型（this 是对象引用）。</summary>
+    ReferenceTypeConstructor,
 }
 
 /// <summary>模板抛出的异常。</summary>
@@ -82,9 +84,15 @@ public enum RuntimeFunction : byte
     ArrayLength,
     /// <summary>对象的类。出处：il2cpp-object-internals.h 的 Il2CppObject::klass。</summary>
     ClassOf,
-    /// <summary>IsInst(对象, 类)：对象可以当作该类使用时是对象自己，否则为空。空对象得空。出处：il2cpp-codegen-il2cpp.h 的 IsInst、IsInstClass、IsInstSealed。</summary>
+    /// <summary>
+    /// IsInst(对象, 类)：对象可以当作该类使用时是对象自己，否则为空。空对象得空。类由模板写出，或取自指令的类型操作数。
+    /// 出处：il2cpp-codegen-il2cpp.h 的 IsInst、IsInstClass、IsInstSealed。
+    /// </summary>
     IsInstance,
-    /// <summary>字段所在的地址：所属值的地址加字段的偏移。出处：生成代码里的 &amp;p-&gt;field。</summary>
+    /// <summary>
+    /// 字段所在的地址：所属值的地址加字段在值里的偏移。所属值经地址给出，它的类型是值类型。出处：生成代码里的 &amp;p-&gt;field；
+    /// 二进制里的字段偏移表按装箱之后的对象登记（offsetof(T, f) + sizeof(RuntimeObject)），在值里的偏移要减去对象头。
+    /// </summary>
     FieldAddress,
     /// <summary>
     /// double 转 int32。范围内向零舍入；范围外与 NaN 的结果随目标而定：il2cpp-codegen-common.h 的
@@ -100,6 +108,13 @@ public enum RuntimeFunction : byte
     /// 与 GetInterfaceInvokeDataFromVTableSlowPath。
     /// </summary>
     InterfaceInvokeData,
+    /// <summary>
+    /// 数组的长度，按 il2cpp_array_size_t 读（指针位宽）：ldlen 的生成代码读 ((RuntimeArray*)a)-&gt;max_length。
+    /// 与 ArrayLength 是同一个字段；长度不超过 IL2CPP_ARRAY_MAX_INDEX，ArrayLength 是它的低 32 位。出处：il2cpp-object-internals.h 的 Il2CppArray::max_length。
+    /// </summary>
+    ArrayLengthNative,
+    /// <summary>数组类的元素类。出处：il2cpp-class-internals.h 的 Il2CppClass::element_class；il2cpp-codegen-il2cpp.h 的 ArrayElementTypeCheck 读 array-&gt;klass-&gt;element_class。</summary>
+    ElementClass,
 }
 
 /// <summary>模板里的值的构造方式。</summary>
@@ -116,6 +131,8 @@ public enum ValueOp : byte
     Argument, Local,
     /// <summary>空引用。</summary>
     Null,
+    /// <summary>指令的字面量操作数（ldstr 的字符串）：实体，位宽是指针位宽。</summary>
+    Literal,
     /// <summary>未定义，位宽同第一个参数。</summary>
     Undefined,
     // 整数运算，两个操作数同宽
@@ -152,7 +169,7 @@ public enum ValueOp : byte
 public sealed record TemplateValue(ValueOp Op, ImmutableArray<TemplateValue> Arguments, int A = 0, int B = 0, int C = 0,
     RuntimeFunction Function = RuntimeFunction.None);
 
-/// <summary>模板里一步的种类。前六种是效果；其后是数据的搬动与块末的去向，不是效果。</summary>
+/// <summary>模板里一步的种类。前八种是效果；其后是数据的搬动与块末的去向，不是效果。</summary>
 public enum StepKind : byte
 {
     /// <summary>条件成立时抛出。</summary>
@@ -164,6 +181,13 @@ public enum StepKind : byte
     RuntimeCall,
     /// <summary>确保字段所属的类、被调方法所属的类已初始化。</summary>
     ClassInitialize,
+    /// <summary>
+    /// 新对象：分配构造函数所属的类的一个对象，结果是新引用。含该类的类初始化分量（时机是否精确取自元数据）。
+    /// 它是事件；对象在首次被使用之前不可见（设计 6.1、7.5）。
+    /// </summary>
+    NewObject,
+    /// <summary>抛出第 0 个值给出的异常对象，不返回；块在这一步结束。</summary>
+    Throw,
     /// <summary>有定义条件：翻译只在条件成立时有定义（设计 9.1）。它不是效果；共同执行在这一步之后把条件并入路径条件。</summary>
     Require,
     /// <summary>写指令指定的局部变量、形参。</summary>
@@ -211,6 +235,10 @@ public sealed record CatalogEntry(string Id, string Il, string Summary, Immutabl
     public bool OperandsFromSignature { get; init; }
     /// <summary>助记符里写明的元素类型的存储位宽（ldelem.i4 的 32）；没有则为 0。</summary>
     public int ImpliedBits { get; init; }
+    /// <summary>助记符写明元素是对象引用（ldelem.ref、stelem.ref）：存储位宽是指针位宽。</summary>
+    public bool ImpliedReference { get; init; }
+    /// <summary>方法操作数是构造函数：this 由模板里“新对象”一步的结果给出，栈上只有其余的实参；结果是新对象。</summary>
+    public bool Constructs { get; init; }
     /// <summary>登记的实现偏差，与模板里的有定义条件对应。</summary>
     public ImmutableArray<Deviation> Deviations { get; init; } = [];
 }

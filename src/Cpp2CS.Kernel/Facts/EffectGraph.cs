@@ -9,11 +9,11 @@ using Cpp2CS.Spec.Runtime;
 namespace Cpp2CS.Kernel.Facts;
 
 /// <summary>出现在托管语义下的效果的种类（设计 7.5）。None 是不可观察的效果：帧对象、映像数据区、登记为不可观察或纯函数的运行时操作。</summary>
-public enum NativeEffectKind : byte { None, Read, Write, Call, ClassInitialize, Throw, Unnamed }
+public enum NativeEffectKind : byte { None, Read, Write, Call, ClassInitialize, NewObject, Throw, Unnamed }
 
 /// <summary>
 /// 一个出现的效果。项都是取定之后的写法（见 <see cref="EffectGraph.Resolve"/>）。
-/// 读：Address、Width，Value 是读取的结果；写：Address、Value；调用：Target、Callee，Arguments 按被调方法的签名、按栈上的位宽，
+/// 读：Address、Width，Value 是读取的结果；写：Address、Value；新对象：Class，Value 是新引用；调用：Target、Callee，Arguments 按被调方法的签名、按栈上的位宽，
 /// Result 是按返回类型取出的栈上的值；类初始化：Class；抛出：Exception；未命名：Detail 是原因。
 /// </summary>
 public sealed record NativeEffect(OccurrenceId Occurrence, NativeEffectKind Kind)
@@ -154,10 +154,9 @@ public sealed class EffectGraph
         Term? Entry(Slot slot) => snapshot.EntryParameters.FirstOrDefault(p => p.Slot == slot);
         for (int i = 0; i < convention.Value.Length; i++)
         {
-            var (slot, bits) = convention.Value[i];
-            if (Entry(slot) is not { } entry) { Failure = $"快照的入口没有声明槽位 {slot}"; return; }
-            arguments.Add((OnStack(terms.Slice(entry, 0, bits), host.Parameters[i]), ClaimTemplate.OnStack(host.Parameters[i]), i));
-            stored.Add(host.Parameters[i].TwoValued ? terms.ZeroExtend(terms.Slice(entry, 0, 1), bits) : terms.Slice(entry, 0, bits));
+            if (EngineFacts.Gather(terms, convention.Value[i], Entry) is not { } entry) { Failure = $"快照的入口没有声明第 {i} 个形参的槽位"; return; }
+            arguments.Add((OnStack(entry, host.Parameters[i]), ClaimTemplate.OnStack(host.Parameters[i]), i));
+            stored.Add(host.Parameters[i].TwoValued ? terms.ZeroExtend(terms.Slice(entry, 0, 1), entry.Width) : entry);
         }
 
         // 逆后序（按快照里写出的出口）。在抛出处结束的块没有后继，它写出的出口不计入可达。
@@ -279,14 +278,11 @@ public sealed class EffectGraph
             for (int e = 0; e < terminator.Exits.Length; e++)
             {
                 var exit = terminator.Exits[e];
-                if (exit.Kind == ExitKind.Return && returned is { } slot)
+                if (exit.Kind == ExitKind.Return && returned is { } pieces)
                 {
-                    int at = snapshot.ReturnSlots.IndexOf(slot.Slot);
-                    if (at >= 0)
-                    {
-                        returnSlots[index] = Resolve(exit.Arguments[at]);
-                        returns[index] = terms.Slice(returnSlots[index]!, 0, slot.Bits);
-                    }
+                    Term? Slot(Slot slot) => snapshot.ReturnSlots.IndexOf(slot) is var at && at >= 0 ? Resolve(exit.Arguments[at]) : null;
+                    returns[index] = EngineFacts.Gather(terms, pieces, Slot);
+                    if (pieces.Length == 1) returnSlots[index] = Slot(pieces[0].Slot);
                 }
                 if (exit.Kind != ExitKind.Target) continue;
                 live.Add(new(block, e));
@@ -354,16 +350,18 @@ public sealed class EffectGraph
             var arguments = ImmutableArray.CreateBuilder<Term>(slots.Length);
             for (int i = 0; i < slots.Length; i++)
             {
-                if (Argument(slots[i].Slot) is not { } given || given.Width < ClaimTemplate.StackBits(ClaimTemplate.OnStack(shape.Parameters[i])))
-                    return unnamed($"调用没有给出实参槽 {slots[i].Slot}");
+                // 实参按栈上的位宽取：不超过 32 位的整数取所在槽位的低 32 位（被调方法只用其中的低位）。
+                var type = ClaimTemplate.OnStack(shape.Parameters[i]);
+                var pieces = slots[i].Length == 1 ? [(slots[i][0].Slot, ClaimTemplate.StackBits(type))] : slots[i];
+                if (EngineFacts.Gather(terms, pieces, Argument) is not { } given) return unnamed($"调用没有给出第 {i} 个实参的槽位");
                 if (EngineFacts.MentionsStack(given, pointer)) return unnamed("帧地址作为实参：帧对象逃逸");
-                arguments.Add(terms.Slice(given, 0, ClaimTemplate.StackBits(ClaimTemplate.OnStack(shape.Parameters[i]))));
+                arguments.Add(given);
             }
             Term? result = null;
             if (returned is { } slot)
             {
-                if (Returned(slot.Slot) is not { } produced) return unnamed($"调用的结果里没有槽位 {slot.Slot}");
-                result = OnStack(terms.Slice(produced, 0, slot.Bits), shape.Return!);
+                if (EngineFacts.Gather(terms, slot, Returned) is not { } produced) return unnamed("调用的结果里没有返回值的槽位");
+                result = OnStack(produced, shape.Return!);
             }
             return new(id, NativeEffectKind.Call) { Target = address, Callee = shape, Arguments = arguments.MoveToImmutable(), Result = result };
         }
@@ -375,6 +373,9 @@ public sealed class EffectGraph
             case RuntimeEffect.ClassInitialize:
                 return Argument(new Slot(SlotKind.Integer, 0)) is { } initialized
                     ? new(id, NativeEffectKind.ClassInitialize) { Class = initialized } : unnamed("类初始化没有给出实参");
+            case RuntimeEffect.NewObject:
+                return Argument(new Slot(SlotKind.Integer, 0)) is { } allocated && Returned(new Slot(SlotKind.Integer, 0)) is { } created
+                    ? new(id, NativeEffectKind.NewObject) { Class = allocated, Value = created } : unnamed("新对象的调用没有给出类或结果的槽位");
             case RuntimeEffect.Unobservable:
                 return null;
             case RuntimeEffect.Pure:

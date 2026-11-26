@@ -55,7 +55,7 @@ public sealed partial class CoExecution
     /// Continue 是模板在这次调用之后的位置，Result 是模板里代表调用结果的项。
     /// </summary>
     private sealed record Inner(MethodSnapshot Snapshot, Side Side, Term StackPointer, int Instance,
-        ImmutableDictionary<long, Term> Frame, int FrameGeneration, Side Continue, Term? Result, (Slot Slot, int Bits)? Returned);
+        ImmutableDictionary<long, Term> Frame, int FrameGeneration, Side Continue, Term? Result, ImmutableArray<(Slot Slot, int Bits)>? Returned);
 
     private sealed record State(Side Native, Side Template, PathConditions Conditions, int Epoch, int Serial, int FrameGeneration,
         ImmutableList<Store> NativeWrites, ImmutableList<Store> TemplateWrites, ImmutableDictionary<long, Term> Frame)
@@ -70,7 +70,7 @@ public sealed partial class CoExecution
 
     private enum Role : byte { Native, Template, Inner }
 
-    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Landing }
+    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Allocate, Landing }
 
     private sealed record Event(EventKind Kind)
     {
@@ -147,28 +147,59 @@ public sealed partial class CoExecution
     }
 
     /// <summary>
-    /// 托管签名的各形参与返回值落在哪个槽位。整数、引用、地址依次占整数槽，浮点依次占向量槽；
-    /// 生成代码在末尾另有一个隐含的方法指针实参，不属于托管签名。值类型的传递方式与经栈传递的实参尚未登记。
+    /// 托管签名的各形参与返回值落在哪些槽位：每个值是一串（槽位，位宽），依次是值的低位到高位，各取所在槽位的低位。
+    /// 整数、引用、地址依次占整数槽，浮点依次占向量槽；值类型按规格登记的传递方式（AggregateConvention）。
+    /// 生成代码在末尾另有一个隐含的方法指针实参，不属于托管签名。经栈传递的实参尚未登记。
     /// </summary>
-    private static ImmutableArray<(Slot Slot, int Bits)> Convention(MethodShape method, out (Slot Slot, int Bits)? result)
+    private static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>> Convention(MethodShape method, out ImmutableArray<(Slot Slot, int Bits)>? result)
     {
-        static bool Float(TypeShape type) => type.Kind is StackKind.Float32 or StackKind.Float64;
-        var slots = ImmutableArray.CreateBuilder<(Slot, int)>(method.Parameters.Length);
+        var slots = ImmutableArray.CreateBuilder<ImmutableArray<(Slot, int)>>(method.Parameters.Length);
         int integers = 0, vectors = 0;
-        foreach (var parameter in method.Parameters)
-        {
-            if (parameter.Kind == StackKind.Value) throw new Refuted(Verdict.MissingFact, "值类型实参的传递方式没有登记");
-            slots.Add(Float(parameter) ? (new Slot(SlotKind.Vector, vectors++), parameter.StorageBits)
-                : (new Slot(SlotKind.Integer, integers++), parameter.StorageBits));
-        }
+        foreach (var parameter in method.Parameters) slots.Add(Place(parameter, ref integers, ref vectors, "实参"));
         if (integers > 7 || vectors > 8) throw new Refuted(Verdict.MissingFact, "经栈传递的实参没有登记");
         result = null;
         if (method.Return is { } returned)
         {
-            if (returned.Kind == StackKind.Value) throw new Refuted(Verdict.MissingFact, "值类型返回值的传递方式没有登记");
-            result = (new Slot(Float(returned) ? SlotKind.Vector : SlotKind.Integer, 0), returned.StorageBits);
+            // 返回值放在它作为第一个实参时所用的寄存器里（AAPCS64 §6.9）。
+            int first = 0, firstVector = 0;
+            result = Place(returned, ref first, ref firstVector, "返回值");
         }
         return slots.MoveToImmutable();
+    }
+
+    /// <summary>一个值从第 integers 个整数槽、第 vectors 个向量槽起放在哪里。</summary>
+    private static ImmutableArray<(Slot Slot, int Bits)> Place(TypeShape type, ref int integers, ref int vectors, string what)
+    {
+        if (type.Kind != StackKind.Value)
+            return type.Kind is StackKind.Float32 or StackKind.Float64 ? [(new Slot(SlotKind.Vector, vectors++), type.StorageBits)]
+                : [(new Slot(SlotKind.Integer, integers++), type.StorageBits)];
+        var rules = AggregateConvention.Aapcs64;
+        switch (rules.Classify(type.StorageBits, type.Members))
+        {
+            case AggregatePlacement.IntegerSlots:
+            {
+                int count = rules.SlotsFor(type.StorageBits), slotBits = rules.SlotBytes * 8;
+                var pieces = ImmutableArray.CreateBuilder<(Slot, int)>(count);
+                for (int k = 0; k < count; k++) pieces.Add((new Slot(SlotKind.Integer, integers + k), Math.Min(slotBits, type.StorageBits - k * slotBits)));
+                integers += count;
+                return pieces.MoveToImmutable();
+            }
+            case AggregatePlacement.VectorPerMember:
+                throw new Refuted(Verdict.MissingFact, $"同质浮点聚合体的{what}：放法已登记，语料里没有用例，尚未接入");
+            case AggregatePlacement.Reference:
+                throw new Refuted(Verdict.MissingFact, $"大于 {rules.MaximumInRegistersBytes} 字节的值类型{what}按引用传递，尚未接入");
+            default:
+                throw new Refuted(Verdict.MissingFact, $"值类型{what}的成员未知，传递方式不能判定");
+        }
+    }
+
+    /// <summary>按调用约定取出一个值：各段依次是值的低位到高位，每段取所在槽位的低位。</summary>
+    private Term Gather(ImmutableArray<(Slot Slot, int Bits)> pieces, Func<Slot, Term> value)
+    {
+        if (pieces.Length == 1) return terms.Slice(value(pieces[0].Slot), 0, pieces[0].Bits);
+        var parts = new Term[pieces.Length];
+        for (int i = 0; i < parts.Length; i++) parts[i] = terms.Slice(value(pieces[i].Slot), 0, pieces[i].Bits);
+        return terms.Concat(parts);
     }
 
     private void Run()
@@ -178,16 +209,16 @@ public sealed partial class CoExecution
         var env = ImmutableDictionary<Term, Term>.Empty;
         foreach (var parameter in template.EntryParameters)
         {
-            var (slot, bits) = convention[parameter.Slot.Index];
+            var pieces = convention[parameter.Slot.Index];
             // 入口事实：C++ 的 bool 只取 0 与 1，值就是最低位（设计 7.7、16.2）。
             env = env.SetItem(parameter, method.Parameters[parameter.Slot.Index].TwoValued
-                ? terms.ZeroExtend(terms.Slice(Entry(slot), 0, 1), bits) : terms.Slice(Entry(slot), 0, bits));
+                ? terms.ZeroExtend(terms.Slice(Entry(pieces[0].Slot), 0, 1), pieces[0].Bits) : Gather(pieces, Entry));
         }
         var conditions = PathConditions.Empty(terms);
         // 入口处成立的文字（设计 7.7）：实例方法的 this 非空；类型初始化器里所属类的初始化已触发。
         if (method.HasThis)
         {
-            var self = terms.Slice(Entry(convention[0].Slot), 0, convention[0].Bits);
+            var self = Gather(convention[0], Entry);
             conditions = conditions.With(terms.Eq(self, terms.Zero(self.Width)), false)!;
         }
         if (body.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
@@ -364,6 +395,19 @@ public sealed partial class CoExecution
                 result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.ArrayLengthBits, address, terms.Zero(32));
                 conditions = conditions.WithImmutable(address, layout.ArrayLengthBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
             }
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLengthNative)
+            {
+                // 同一个长度字段按 il2cpp_array_size_t 读（指针位宽），取值范围相同。
+                var layout = facts.Layout;
+                var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
+                result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.PointerBits, address, terms.Zero(32));
+                conditions = conditions.WithImmutable(address, layout.PointerBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+            }
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.FieldAddress && result.Operands[1].Kind == TermKind.Entity)
+            {
+                // 经地址取字段的地址：所属值的地址加字段在值里的偏移。
+                result = terms.Add(result.Operands[0], terms.Constant(OffsetInValue(result.Operands[1].Entity), result.Width));
+            }
             memo[t] = result;
             return result;
         }
@@ -515,6 +559,8 @@ public sealed partial class CoExecution
                             state = state with { Serial = state.Serial + 1 };
                             break;
                         }
+                        case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.NewObject:
+                            return new Event(EventKind.Allocate) { Class = Argument(call, operands, new Slot(SlotKind.Integer, 0)), Occurrence = id, After = after };
                         case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.Unobservable:
                             for (int k = 0; k < results.Length; k++) env = env.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
                             state = state with { Serial = state.Serial + 1 };
@@ -792,6 +838,9 @@ public sealed partial class CoExecution
                     ?? throw new Refuted(Verdict.MissingFact, $"字段 {effect.Entity} 的偏移未知");
                 return terms.Add(@base[0], terms.Constant(offset, layout.PointerBits));
             }
+            case LocationKind.FieldAtAddress:
+                // 经地址访问的字段：所属值的地址加字段在值里的偏移。
+                return terms.Add(@base[0], terms.Constant(OffsetInValue(effect.Entity!.Value), layout.PointerBits));
             case LocationKind.ArrayElement:
             {
                 // 元素的地址：数组对象里数据的起点，加下标（按有符号数扩到指针位宽）乘元素的字节数。
@@ -802,6 +851,18 @@ public sealed partial class CoExecution
             default:
                 throw new Refuted(Verdict.MissingFact, $"{effect.Location} 的位置尚未登记到布局");
         }
+    }
+
+    /// <summary>
+    /// 值类型的实例字段在值里的字节偏移。经地址访问的字段都属于值类型：托管指针指向值类型的实例。
+    /// 实例字段的偏移相对对象指针，值类型的字段按装箱之后的对象计（生成代码的偏移表写作 offsetof(T, f) + sizeof(RuntimeObject)），
+    /// 在值里的偏移要减去对象头。
+    /// </summary>
+    private int OffsetInValue(EntityRef field)
+    {
+        int offset = facts.InstanceFieldOffset(field) ?? throw new Refuted(Verdict.MissingFact, $"字段 {field} 的偏移未知");
+        int header = facts.Layout.ObjectHeaderBytes;
+        return offset >= header ? offset - header : throw new Refuted(Verdict.MissingFact, $"字段 {field} 的偏移 {offset} 小于对象头，不是值类型的字段");
     }
 
     private Event Template(ref State state)
@@ -817,9 +878,12 @@ public sealed partial class CoExecution
                 var resumed = inner.Continue;
                 if (inner.Returned is { } returned)
                 {
-                    int at = inner.Snapshot.ReturnSlots.IndexOf(returned.Slot);
-                    if (at < 0) throw new Refuted(Verdict.MissingFact, $"被展开方法的返回行没有槽位 {returned.Slot}");
-                    resumed = resumed with { Env = resumed.Env.SetItem(inner.Result!, terms.Slice(inside.Values[at], 0, returned.Bits)) };
+                    var value = Gather(returned, slot =>
+                    {
+                        int at = inner.Snapshot.ReturnSlots.IndexOf(slot);
+                        return at >= 0 ? inside.Values[at] : throw new Refuted(Verdict.MissingFact, $"被展开方法的返回行没有槽位 {slot}");
+                    });
+                    resumed = resumed with { Env = resumed.Env.SetItem(inner.Result!, value) };
                 }
                 state = state with { Inner = null, Template = resumed };
                 continue;
@@ -881,6 +945,8 @@ public sealed partial class CoExecution
                     // 幂等（设计 6.2）：该类的初始化已触发时等于不执行。
                     if (state.Conditions.Initialized(effect.Entity!.Value)) break;
                     return new Event(EventKind.Initialize) { Effect = effect, Occurrence = id, After = next };
+                case EffectKind.NewObject:
+                    return new Event(EventKind.Allocate) { Effect = effect, Occurrence = id, After = next };
                 default:
                     throw new Refuted(Verdict.Insufficient, $"模板效果 {effect.Kind}（{effect.Function}）的对照尚未实现");
             }
@@ -896,6 +962,7 @@ public sealed partial class CoExecution
         EventKind.Call => e.Effect is { } effect ? $"调用 {effect.Entity}" : $"调用 0x{e.Address:x}",
         EventKind.Return => "返回",
         EventKind.Initialize => "类初始化",
+        EventKind.Allocate => "新对象",
         _ => e.Kind.ToString(),
     };
 
@@ -924,9 +991,11 @@ public sealed partial class CoExecution
                 Convention(body.Method, out var result);
                 if (result is { } returned)
                 {
-                    int at = native.ReturnSlots.IndexOf(returned.Slot);
-                    if (at < 0) throw new Refuted(Verdict.MissingFact, $"返回行没有槽位 {returned.Slot}");
-                    var value = terms.Slice(onNative.Values[at], 0, returned.Bits);
+                    var value = Gather(returned, slot =>
+                    {
+                        int at = native.ReturnSlots.IndexOf(slot);
+                        return at >= 0 ? onNative.Values[at] : throw new Refuted(Verdict.MissingFact, $"返回行没有槽位 {slot}");
+                    });
                     if (!conditions.Same(value, onTemplate.Values[0]))
                         throw new Refuted(Verdict.Insufficient, $"返回值不同：现场 {conditions.Evaluate(value)}，模板 {conditions.Evaluate(onTemplate.Values[0])}");
                 }
@@ -947,8 +1016,8 @@ public sealed partial class CoExecution
                 var convention = Convention(shape, out _);
                 for (int i = 0; i < convention.Length; i++)
                 {
-                    var given = terms.Slice(Argument(call, onNative.Values, convention[i].Slot), 0, convention[i].Bits);
-                    var expected = terms.Slice(Argument(other, onTemplate.Values, convention[i].Slot), 0, convention[i].Bits);
+                    var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
+                    var expected = Gather(convention[i], slot => Argument(other, onTemplate.Values, slot));
                     if (!conditions.Same(given, expected))
                         throw new Refuted(Verdict.Insufficient,
                             $"第 {i} 个实参不同：现场 {conditions.Evaluate(given)}，被展开的方法里 {conditions.Evaluate(expected)}");
@@ -981,7 +1050,7 @@ public sealed partial class CoExecution
                 var convention = Convention(effect.Signature!, out var result);
                 for (int i = 0; i < convention.Length; i++)
                 {
-                    var given = terms.Slice(Argument(call, onNative.Values, convention[i].Slot), 0, convention[i].Bits);
+                    var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
                     if (!conditions.Same(given, onTemplate.Values[i]))
                         throw new Refuted(Verdict.Insufficient,
                             $"第 {i} 个实参不同：现场 {conditions.Evaluate(given)}，模板 {conditions.Evaluate(onTemplate.Values[i])}");
@@ -995,10 +1064,12 @@ public sealed partial class CoExecution
                 var templateEnv = onTemplate.After!.Env;
                 if (result is { } returned)
                 {
-                    int at = call.ResultSlots.IndexOf(returned.Slot);
-                    if (at < 0) throw new Refuted(Verdict.MissingFact, $"调用的结果里没有槽位 {returned.Slot}");
-                    templateEnv = templateEnv.SetItem(templateGraph.Results(onTemplate.Occurrence)[0],
-                        terms.Slice(EventResult(state.Serial, at, results[at].Width), 0, returned.Bits));
+                    int serial = state.Serial;
+                    templateEnv = templateEnv.SetItem(templateGraph.Results(onTemplate.Occurrence)[0], Gather(returned, slot =>
+                    {
+                        int at = call.ResultSlots.IndexOf(slot);
+                        return at >= 0 ? EventResult(serial, at, results[at].Width) : throw new Refuted(Verdict.MissingFact, $"调用的结果里没有槽位 {slot}");
+                    }));
                 }
                 Explore(state with
                 {
@@ -1036,6 +1107,54 @@ public sealed partial class CoExecution
                     var inner = state.Inner!;
                     var other = (CallOccurrence)inner.Snapshot[onTemplate.Occurrence];
                     var call = (CallOccurrence)native[onNative.Occurrence];
+                    next = next with
+                    {
+                        Inner = inner with
+                        {
+                            Side = onTemplate.After! with { Env = Bind(onTemplate.After.Env, inner.Snapshot.Results(onTemplate.Occurrence), other, call, state.Serial) },
+                        },
+                    };
+                }
+                Explore(next);
+                return;
+            }
+            case (EventKind.Allocate, EventKind.Allocate):
+            {
+                // 新对象（设计 7.5）：同一个事件。现场的实参是被分配的类的类指针；模板的类是被构造的类，或被展开方法里同一个运行时操作的实参。
+                // 之后双方的结果是同一个新引用，非空；分配含类初始化分量，该类的初始化已触发；类型初始化器可能改写堆，此后是新的历元。
+                EntityRef type;
+                if (onTemplate.Effect is { } declared) type = declared.Entity!.Value;
+                else
+                {
+                    var expected = conditions.Evaluate(onTemplate.Class!);
+                    if (expected.Kind != TermKind.Entity) throw new Refuted(Verdict.MissingFact, $"新对象的类不是已命名的类指针：{expected}");
+                    type = expected.Entity;
+                }
+                var given = conditions.Evaluate(onNative.Class!);
+                if (given.Kind != TermKind.Entity) throw new Refuted(Verdict.MissingFact, $"新对象的类不是已命名的类指针：{given}");
+                if (given.Entity != type) throw new Refuted(Verdict.Insufficient, $"新对象的类不同：现场 {given.Entity}，模板 {type}");
+                CompareWrites(state);
+                var call = (CallOccurrence)native[onNative.Occurrence];
+                int slot = call.ResultSlots.IndexOf(new Slot(SlotKind.Integer, 0));
+                if (slot < 0) throw new Refuted(Verdict.MissingFact, "新对象的调用没有给出结果槽 Integer0");
+                var results = nativeGraph.Results(onNative.Occurrence);
+                var created = EventResult(state.Serial, slot, results[slot].Width);
+                var next = state with
+                {
+                    Native = onNative.After! with { Env = Bind(onNative.After.Env, results, call, null, state.Serial) },
+                    Conditions = conditions.WithInitialized(type).With(terms.Eq(created, terms.Zero(created.Width)), false)!,
+                    Epoch = state.Epoch + 1, Serial = state.Serial + 1, NativeWrites = [], TemplateWrites = [],
+                };
+                if (onTemplate.Effect is not null)
+                {
+                    var result = templateGraph.Results(onTemplate.Occurrence)[0];
+                    if (result.Width != created.Width) throw new Refuted(Verdict.MissingFact, $"新对象的结果是 {created.Width} 位，模板是 {result.Width} 位");
+                    next = next with { Template = onTemplate.After! with { Env = onTemplate.After.Env.SetItem(result, created) } };
+                }
+                else
+                {
+                    var inner = state.Inner!;
+                    var other = (CallOccurrence)inner.Snapshot[onTemplate.Occurrence];
                     next = next with
                     {
                         Inner = inner with
@@ -1091,9 +1210,17 @@ public sealed partial class CoExecution
                 terms.Constant(state.Inlines, 32), terms.Constant((int)slot.Kind, 32), terms.Constant(slot.Index, 32));
             for (int i = 0; i < convention.Length; i++)
             {
-                if (convention[i].Slot != slot) continue;
-                var given = onTemplate.Values[i];
-                value = given.Width == parameter.Width ? given : terms.Concat(given, terms.Slice(value, given.Width, parameter.Width - given.Width));
+                int offset = 0;
+                foreach (var (at, bits) in convention[i])
+                {
+                    if (at == slot)
+                    {
+                        var whole = onTemplate.Values[i];
+                        var given = offset == 0 && bits == whole.Width ? whole : terms.Slice(whole, offset, bits);
+                        value = given.Width == parameter.Width ? given : terms.Concat(given, terms.Slice(value, given.Width, parameter.Width - given.Width));
+                    }
+                    offset += bits;
+                }
             }
             if (slot.Kind == SlotKind.StackPointer) pointer = value;
             env = env.SetItem(parameter, value);

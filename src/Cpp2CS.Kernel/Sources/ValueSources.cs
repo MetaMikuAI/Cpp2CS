@@ -36,9 +36,11 @@ public readonly record struct PathLiteral(LiteralKind Kind, Term? Term, long Val
 
 /// <summary>
 /// 情况：分情况得到的表的一行。Edges 是这一行选定的入边，从程序点向后依次列出；
-/// Conditions 是这一行选定的选择条件；Terms 是所求各项在这一行的取值，不再含展开范围内的合流。
-/// 已选定的条件（不含未定义的位时）在这一行的各项与其余条件里都换成它的取值。
-/// Origin 是展开停下的块：各项只含这个块的参数与结果，以及沿途各块的结果。
+/// Conditions 先列这一行选定的选择条件，再按 Edges 的次序列出所选各条入边的文字（分支的条件与方向、跳转表的取值、
+/// 调用的正常返回或展开），与走查的路径是同一种记录；Terms 是所求各项在这一行的取值，不再含展开范围内的合流。
+/// 已选定的选择条件（不含未定义的位时）在这一行的各项与其余选择条件里都换成它的取值。入边的文字只记录、只按边代入：
+/// 它们与其余条件能否同时成立、各项在它们之下的取值，由路径条件格判断（设计 7.7）。
+/// Origin 是展开停下的块：各项与各条文字只含这个块的参数与结果，以及沿途各块的结果。
 /// </summary>
 public sealed record Case(BlockId Origin, ImmutableArray<EdgeId> Edges, ImmutableArray<PathLiteral> Conditions, ImmutableArray<Term> Terms);
 
@@ -254,7 +256,8 @@ public sealed class ValueSources
         bool complete = true;
         var edges = new List<EdgeId>();
 
-        void Expand(BlockId block, ImmutableArray<Term> values, ImmutableArray<PathLiteral> conditions)
+        // taken：所选各条入边的文字，项在当前块的取值上。
+        void Expand(BlockId block, ImmutableArray<Term> values, ImmutableArray<PathLiteral> conditions, ImmutableArray<PathLiteral> taken)
         {
             if (++steps > budget) { complete = false; return; }
             // 代入之后，条件可能变成常量或互相矛盾：矛盾的情况不存在，已经成立的条件不必再列。
@@ -284,7 +287,7 @@ public sealed class ValueSources
                     foreach (var condition in conditions)
                         nextConditions.Add(condition.Term is null ? condition : condition with { Term = Rewrite(condition.Term, memo, Replace) });
                     nextConditions.Add(new(LiteralKind.Condition, test, polarity ? 1 : 0, default));
-                    Expand(block, next.MoveToImmutable(), nextConditions.ToImmutable());
+                    Expand(block, next.MoveToImmutable(), nextConditions.ToImmutable(), taken);
                 }
                 return;
             }
@@ -298,26 +301,50 @@ public sealed class ValueSources
                 if (condition.Term is not null) merged |= Mentions(condition.Term, graph, block.Index, seen);
             if (!merged || block == Graph.Entry || Shape.IsLoopHead(block))
             {
-                cases.Add(new Case(block, [.. edges], conditions, values));
+                cases.Add(new Case(block, [.. edges], [.. conditions, .. taken], values));
                 return;
             }
             foreach (var edge in Shape.InEdges(block))
             {
-                var conditionTerms = ImmutableArray.CreateBuilder<Term>(values.Length + conditions.Length);
+                var conditionTerms = ImmutableArray.CreateBuilder<Term>(values.Length + conditions.Length + taken.Length);
                 conditionTerms.AddRange(values);
                 foreach (var condition in conditions) conditionTerms.Add(condition.Term ?? Terms.False);
+                foreach (var chosen in taken) conditionTerms.Add(chosen.Term ?? Terms.False);
                 var substituted = SubstituteRow(Graph.Terminator(edge.Source).Exits[edge.Exit], conditionTerms.ToImmutable());
                 var nextConditions = ImmutableArray.CreateBuilder<PathLiteral>(conditions.Length);
                 for (int i = 0; i < conditions.Length; i++)
                     nextConditions.Add(conditions[i].Term is null ? conditions[i] : conditions[i] with { Term = substituted[values.Length + i] });
+                var nextTaken = ImmutableArray.CreateBuilder<PathLiteral>(taken.Length + 1);
+                for (int i = 0; i < taken.Length; i++)
+                    nextTaken.Add(taken[i].Term is null ? taken[i] : taken[i] with { Term = substituted[values.Length + conditions.Length + i] });
+                if (EdgeLiteral(edge) is { } literal) nextTaken.Add(literal);
                 edges.Add(edge);
-                Expand(edge.Source, substituted[..values.Length], nextConditions.MoveToImmutable());
+                Expand(edge.Source, substituted[..values.Length], nextConditions.MoveToImmutable(), nextTaken.ToImmutable());
                 edges.RemoveAt(edges.Count - 1);
             }
         }
 
-        Expand(point.Block, terms, []);
+        Expand(point.Block, terms, [], []);
         return new CaseTable(cases.ToImmutable(), complete, steps);
+    }
+
+    /// <summary>
+    /// 沿一条边成立的文字，项在边的源块的取值上；写法与走查的路径相同。单一出口的边没有文字。
+    /// </summary>
+    private PathLiteral? EdgeLiteral(EdgeId edge)
+    {
+        var terminator = Graph.Terminator(edge.Source);
+        int e = edge.Exit;
+        return terminator.Kind switch
+        {
+            TerminatorKind.Branch => new PathLiteral(LiteralKind.Condition, terminator.Condition, e == 0 ? 1 : 0, default),
+            TerminatorKind.Switch => e < terminator.Exits.Length - 1
+                ? new PathLiteral(LiteralKind.Selector, terminator.Condition, e, default)
+                : new PathLiteral(LiteralKind.SelectorDefault, terminator.Condition, e, default),
+            TerminatorKind.Invoke => new PathLiteral(e == 0 ? LiteralKind.InvokeNormal : LiteralKind.InvokeUnwind, null, 0,
+                new(edge.Source, Graph.OccurrenceCount(edge.Source) - 1)),
+            _ => null,
+        };
     }
 
     /// <summary>

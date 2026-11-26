@@ -79,6 +79,7 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
         public EntityRef Method(int token) => Entity;
         public EntityRef Field(int token) => Entity;
         public EntityRef Type(int token) => Entity;
+        public EntityRef String(int token) => Entity;
     }
 
     public static ClaimTemplate Build(Claim claim, IEntityMetadata metadata, TermPool terms, int pointerBits)

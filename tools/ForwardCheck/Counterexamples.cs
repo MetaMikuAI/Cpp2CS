@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Kernel.Sources;
 using Cpp2CS.Snapshot;
@@ -247,6 +248,45 @@ internal static class Counterexamples
                     : $"各情况：{string.Join(" | ", lifted.Cases.Select(r => r.Result))}";
             }),
 
+            // 设计 7.3、7.7：分情况只按结构展开，情况行带上所选各条入边的文字；可行与否、条件下的取值问路径条件格。
+            // 入口按 c 走两条平行边，分别把 (8, c)、(9, c) 传给 (v, k)，返回 Select(k, v, 0)：c 为 1 时是 8，为 0 时是 0。
+            // 结构上有四行。经假边而选择条件 c=1 的一行（结果 9）、经真边而选择条件 c=0 的一行（结果 0），入边的文字与选择条件矛盾，
+            // 格把这两行剔除；留下经真边的 8 与经假边的 0。
+            new("分情况的不可行行", "设计 7.3、7.7", () =>
+            {
+                var b = new SnapshotBuilder(64);
+                var p = b.Terms;
+                var c = b.EntryParameter(Integer(0), 1);
+                var ra = b.EntryParameter(Link, 64);
+                var sp = b.EntryParameter(Stack, 64);
+                var join = b.Block(8, 1, 64, 64);
+                b.Terminate(b.Entry, Terminator.Branch(c, Exit.To(join, p.Constant(8, 8), c, ra, sp), Exit.To(join, p.Constant(9, 8), c, ra, sp)));
+                var x = p.Select(b.Parameter(join, 1), b.Parameter(join, 0), p.Zero(8));
+                b.SetReturnSlots((Integer(0), 8), (Link, 64), (Stack, 64));
+                b.Return(join, x, b.Parameter(join, 2), b.Parameter(join, 3));
+                var graph = b.Build();
+                var table = new ValueSources(graph, p).SplitCases(new(join, 0), [x]);
+                var empty = PathConditions.Empty(p);
+                string Describe(Case row) => $"[{string.Join(" ", row.Edges)}] {string.Join(" ∧ ", row.Conditions)} → {row.Terms[0]}";
+                if (!table.Complete || table.Cases.Length != 4) return $"情况表应有四行：{string.Join(" | ", table.Cases.Select(Describe))}";
+                // 入边（真边为第 0 个出口）与结果 → 是否可行。
+                var expected = new Dictionary<(int Exit, Term Result), bool>
+                {
+                    [(0, p.Constant(8, 8))] = true, [(0, p.Zero(8))] = false, [(1, p.Constant(9, 8))] = false, [(1, p.Zero(8))] = true,
+                };
+                foreach (var row in table.Cases)
+                {
+                    if (row.Edges.Length != 1 || row.Edges[0].Source != graph.Entry || !expected.Remove((row.Edges[0].Exit, row.Terms[0]), out bool feasible))
+                        return $"多出的行：{Describe(row)}";
+                    var edge = new PathLiteral(LiteralKind.Condition, c, row.Edges[0].Exit == 0 ? 1 : 0, default);
+                    if (!row.Conditions.Contains(edge)) return $"情况行没有入边的文字：{Describe(row)}";
+                    var values = CaseRows.Evaluate(row, empty, p);
+                    if ((values is not null) != feasible) return $"{(feasible ? "剔除了可行的行" : "没有剔除不可行的行")}：{Describe(row)}";
+                    if (values is { } v && v[0] != row.Terms[0]) return $"可行的行求值之后变了：{Describe(row)} → {v[0]}";
+                }
+                return null;
+            }),
+
             // 设计 7.1：块只使用块内按次序产生的值；7.3 的分情况与走查在图里的程序点上进行。
             new("查询尚未产生的值与不存在的点", "设计 7.1、7.3", () =>
             {
@@ -473,6 +513,7 @@ internal static class Counterexamples
         public EntityRef Method(int token) => new(EntityKind.Method, token);
         public EntityRef Field(int token) => new(EntityKind.Field, token);
         public EntityRef Type(int token) => new(EntityKind.Type, token);
+        public EntityRef String(int token) => new(EntityKind.String, token);
     }
 
     /// <summary>字段一律是静态的、所属类有静态构造函数的元数据。</summary>

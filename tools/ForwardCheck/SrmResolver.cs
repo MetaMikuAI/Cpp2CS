@@ -175,6 +175,13 @@ internal sealed partial class SrmMetadata
             if (owner.Count == 0 && args.Count == 0) return new(EntityKind.Method, i);
             return new(EntityKind.Method, srm.Facts.Keys.MethodKey(new M.MethodInstance(i, owner, args)) ?? throw Unresolved($"方法 {i} 的实例未登记"));
         }
+        // ldstr 的记号指向用户字符串堆（ECMA-335 II.24.2.4）；字符串的身份是内容，Key 是模型字面量表里内容相同的最小下标。
+        public EntityRef String(int token)
+        {
+            if (token >>> 24 != 0x70) throw Unresolved($"字符串记号 0x{token:x8}");
+            string content = module.Md.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF));
+            return new(EntityKind.String, srm.Facts.Keys.StringKey(content) ?? throw Unresolved("字符串字面量不在模型的字面量表里"));
+        }
     }
 
     // 从托管映像取同一无参方法在两个不同所属实例上的引用。先用定义坐标选择反例，再交给记号解析器。

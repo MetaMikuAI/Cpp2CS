@@ -53,7 +53,8 @@ public sealed partial class CoExecution
 
     private ClaimRun? run;
 
-    internal static ImmutableArray<(Slot Slot, int Bits)>? ConventionOrReason(MethodShape method, out (Slot Slot, int Bits)? result, out string reason)
+    internal static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>>? ConventionOrReason(MethodShape method,
+        out ImmutableArray<(Slot Slot, int Bits)>? result, out string reason)
     {
         try
         {
@@ -124,7 +125,7 @@ public sealed partial class CoExecution
         // 入口处成立的文字（设计 7.7）。
         if (host.HasThis)
         {
-            var self = terms.Slice(Entry(convention[0].Slot), 0, convention[0].Bits);
+            var self = Gather(convention[0], Entry);
             conditions = conditions.With(terms.Eq(self, terms.Zero(self.Width)), false)!;
         }
         if (context.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
@@ -135,6 +136,13 @@ public sealed partial class CoExecution
             Trail = new Trail(false, [], [], [], [], 1, false, false, []),
         });
     }
+
+    private static EffectClass ClassOf(EventKind kind) => kind switch
+    {
+        EventKind.Call => EffectClass.Call,
+        EventKind.Allocate => EffectClass.NewObject,
+        _ => EffectClass.ClassInitialize,
+    };
 
     private static string Where(State state) => $"B{state.Native.Block.Index}.{state.Native.Index}";
 
@@ -163,8 +171,7 @@ public sealed partial class CoExecution
             default:
                 if (run!.Occurrences.Contains(onNative.Occurrence))
                 {
-                    var passed = new Passed(EffectRef.Of(onNative.Occurrence),
-                        onNative.Kind == EventKind.Call ? EffectClass.Call : EffectClass.ClassInitialize, null, 0, ExceptionKind.None);
+                    var passed = new Passed(EffectRef.Of(onNative.Occurrence), ClassOf(onNative.Kind), null, 0, ExceptionKind.None);
                     Synchronize(Occupy(state, passed), onNative);
                     return;
                 }
@@ -292,8 +299,7 @@ public sealed partial class CoExecution
     /// <summary>旁观的事件（调用、类初始化）：在两侧都发生，结果是同一个事件结果，此后是新的历元。</summary>
     private State BystanderEvent(State state, Event e)
     {
-        var passed = new Passed(EffectRef.Of(e.Occurrence), e.Kind == EventKind.Call ? EffectClass.Call : EffectClass.ClassInitialize,
-            null, 0, ExceptionKind.None);
+        var passed = new Passed(EffectRef.Of(e.Occurrence), ClassOf(e.Kind), null, 0, ExceptionKind.None);
         state = Bystander(state, passed);
         foreach (var value in e.Values)
             if (MentionsStack(value, stackPointer)) throw new Refuted(Verdict.MissingFact, "帧地址作为实参：帧对象逃逸");
@@ -301,7 +307,8 @@ public sealed partial class CoExecution
         var env = e.After!.Env;
         for (int k = 0; k < results.Length; k++) env = env.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
         var conditions = state.Conditions;
-        if (e.Kind == EventKind.Initialize && !run!.OwnOnly && conditions.Evaluate(e.Class!) is { Kind: TermKind.Entity } named)
+        // 事件的后置条件：该类的初始化已触发（类初始化、新对象）；它由这个旁观效果确立，只在并入其他效果的条件的那一遍使用。
+        if (e.Kind is EventKind.Initialize or EventKind.Allocate && !run!.OwnOnly && conditions.Evaluate(e.Class!) is { Kind: TermKind.Entity } named)
             conditions = conditions.WithInitialized(named.Entity);
         return state with
         {
@@ -403,8 +410,20 @@ public sealed partial class CoExecution
 /// <summary>事实层与引擎共用的几处判断：调用约定，帧上的常量偏移，地址是否由栈指针算出。各只有这一份实现。</summary>
 internal static class EngineFacts
 {
-    public static ImmutableArray<(Slot Slot, int Bits)>? Convention(MethodShape method, out (Slot Slot, int Bits)? result, out string reason) =>
-        CoExecution.ConventionOrReason(method, out result, out reason);
+    public static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>>? Convention(MethodShape method,
+        out ImmutableArray<(Slot Slot, int Bits)>? result, out string reason) => CoExecution.ConventionOrReason(method, out result, out reason);
+
+    /// <summary>按调用约定取出一个值：各段依次是值的低位到高位，每段取所在槽位的低位。某个槽位没有给出时为空。</summary>
+    public static Term? Gather(TermPool terms, ImmutableArray<(Slot Slot, int Bits)> pieces, Func<Slot, Term?> value)
+    {
+        var parts = new Term[pieces.Length];
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (value(pieces[i].Slot) is not { } whole || whole.Width < pieces[i].Bits) return null;
+            parts[i] = terms.Slice(whole, 0, pieces[i].Bits);
+        }
+        return parts.Length == 1 ? parts[0] : terms.Concat(parts);
+    }
     public static long? FrameOffset(Term address, Term pointer) => CoExecution.FrameOffsetOf(address, pointer);
     public static bool MentionsStack(Term term, Term pointer) => CoExecution.MentionsStackPointer(term, pointer);
 }
