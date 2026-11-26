@@ -12,6 +12,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 ///   terms [--seed N] [--rounds N]                       项的规范化的语义核对
 ///   snapshot                                            按前端约定抄写一个语料用例的原生代码，构造快照
 ///   il --cases 用例清单.json --assemblies 程序集目录     读语料的真实 IL，按操作目录展开，并在展开的图上核对合流的三个操作
+///   counterexamples --assemblies 程序集目录              逐项核对有出处的反例（核心库取自程序集目录）
 /// </summary>
 internal static class Program
 {
@@ -27,6 +28,8 @@ internal static class Program
                     .Run(int.Parse(options.GetValueOrDefault("--rounds", "60000")), depth: 4, samples: 16);
             case "snapshot":
                 return SnapshotExample.Run();
+            case "counterexamples" when options.ContainsKey("--assemblies"):
+                return Counterexamples.Run(options["--assemblies"]);
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -40,6 +43,7 @@ internal static class Program
         Console.Error.WriteLine("用法：ForwardCheck terms [--seed N] [--rounds N]");
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--pointer-bits 64] [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录");
         return 2;
     }
 

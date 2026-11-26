@@ -24,8 +24,10 @@ public sealed record MethodShape(EntityRef Entity, bool HasThis, ImmutableArray<
 public sealed record FieldShape(EntityRef Entity, EntityRef DeclaringType, TypeShape Type, bool IsStatic, bool HasInitializer,
     bool PreciseInitialization, int OffsetBits);
 
-/// <summary>方法体：签名、局部变量、IL 字节、异常处理区域的个数。</summary>
-public sealed record MethodBody(MethodShape Method, ImmutableArray<TypeShape> Locals, ImmutableArray<byte> Code, int ExceptionRegions);
+/// <summary>
+/// 方法体：签名、局部变量、IL 字节、异常处理区域的个数，以及方法头是否设置了 InitLocals（局部变量在进入时清零，ECMA-335 II.25.4.4）。
+/// </summary>
+public sealed record MethodBody(MethodShape Method, ImmutableArray<TypeShape> Locals, ImmutableArray<byte> Code, int ExceptionRegions, bool InitLocals);
 
 /// <summary>
 /// 展开时对元数据的全部需求。记号是方法体里的元数据记号；解析不了时抛出 <see cref="ExpansionException"/>。

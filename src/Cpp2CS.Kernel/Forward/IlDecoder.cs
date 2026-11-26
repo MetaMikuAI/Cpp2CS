@@ -31,19 +31,20 @@ public static class IlDecoder
                 value = (ushort)(0xFE00 | code[at++]);
             }
             var opcode = Opcodes.Find(value) ?? throw new ExpansionException("IL 无法解码", $"偏移 {start:x4} 处的编码 {value:x} 不是指令", start);
-            int length = opcode.Operand switch
+            long length = opcode.Operand switch
             {
                 OperandKind.None => 0,
                 OperandKind.Int8 or OperandKind.Variable8 or OperandKind.Branch8 => 1,
                 OperandKind.Variable16 => 2,
                 OperandKind.Int64 or OperandKind.Float64 => 8,
-                OperandKind.Switch => at + 4 <= code.Length ? 4 + 4 * BinaryPrimitives.ReadInt32LittleEndian(code[at..]) : 4,
+                // 表长是无符号 32 位的项数 N，其后 N 个 4 字节目标（ECMA-335 III.3.66）；按 64 位计算，超出剩余字节就是不完整。
+                OperandKind.Switch => at + 4 <= code.Length ? (long)4 + 4L * BinaryPrimitives.ReadUInt32LittleEndian(code[at..]) : 4,
                 _ => 4,
             };
-            if (length < 0 || at + length > code.Length)
+            if (length > code.Length - at)
                 throw new ExpansionException("IL 无法解码", $"偏移 {start:x4} 处的 {opcode.Name} 操作数不完整", start);
-            var bytes = code.Slice(at, length);
-            at += length;
+            var bytes = code.Slice(at, (int)length);
+            at += (int)length;
             long operand = opcode.Implied ?? 0;
             ImmutableArray<int> targets = [];
             switch (opcode.Operand)
@@ -56,8 +57,8 @@ public static class IlDecoder
                 case OperandKind.Int64 or OperandKind.Float64: operand = BinaryPrimitives.ReadInt64LittleEndian(bytes); break;
                 case OperandKind.Switch:
                 {
-                    var table = ImmutableArray.CreateBuilder<int>(length / 4 - 1);
-                    for (int i = 4; i < length; i += 4) table.Add(at + BinaryPrimitives.ReadInt32LittleEndian(bytes[i..]));
+                    var table = ImmutableArray.CreateBuilder<int>(bytes.Length / 4 - 1);
+                    for (int i = 4; i < bytes.Length; i += 4) table.Add(at + BinaryPrimitives.ReadInt32LittleEndian(bytes[i..]));
                     targets = table.MoveToImmutable();
                     break;
                 }

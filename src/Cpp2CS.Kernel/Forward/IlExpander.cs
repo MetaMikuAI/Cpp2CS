@@ -13,6 +13,7 @@ public sealed record Expansion(FlowGraph<TemplateEffect> Graph, ImmutableArray<(
 /// 把一个方法体的 IL 按操作目录展开成模板一侧的效果图（6.2 的“展开”）。
 ///
 /// 图的约定：入口块声明各形参（槽位类别为 Managed），把局部变量清零，转到偏移 0 处的块。
+/// 局部变量从零开始只在方法头设置了 InitLocals 时成立（ECMA-335 II.25.4.4、I.12.3.2.2）；有局部变量而没有设置时不展开。
 /// 其余每个块对应 IL 的一个基本块，参数依次是各形参、各局部变量、进入时求值栈上的各项，都按栈上的位宽。
 /// 每个块只用自己的参数，所以每个基本块只翻译一次；不同入边带来的栈的形状必须相同。
 /// </summary>
@@ -75,6 +76,8 @@ public sealed class IlExpander
 
         // 入口块：形参按存储位宽进入，扩到栈上的位宽；局部变量清零。
         var method = body.Method;
+        if (body.Locals.Length > 0 && !body.InitLocals)
+            throw new ExpansionException("局部变量没有初始化的保证", "方法头没有设置 InitLocals，局部变量的初值没有依据");
         var arguments = new Term[method.Parameters.Length];
         for (int i = 0; i < arguments.Length; i++)
         {
@@ -168,7 +171,7 @@ public sealed class IlExpander
         }
     }
 
-    private static bool Matches(StackClass required, StackKind kind) => required switch
+    private static bool Matches(StackClass required, StackKind kind, Context context) => required switch
     {
         StackClass.Int32 => kind == StackKind.Int32,
         StackClass.Int64 => kind == StackKind.Int64,
@@ -181,7 +184,20 @@ public sealed class IlExpander
         StackClass.ByRef => kind == StackKind.ByRef,
         StackClass.Value => kind == StackKind.Value,
         StackClass.Scalar => kind is StackKind.Int32 or StackKind.Int64 or StackKind.NativeInt or StackKind.Object or StackKind.ByRef,
+        StackClass.Assignable => context.Subject is { } subject && Assignable(kind, subject),
         _ => true,
+    };
+
+    /// <summary>栈上一个类别的值能否存入一个类型，按 ECMA-335 III.1.6 表 III.9。值类型只能核对大小：栈上不记录值类型的身份。</summary>
+    private static bool Assignable(StackKind kind, TypeShape type) => type.Kind switch
+    {
+        StackKind.Int32 => kind is StackKind.Int32 or StackKind.NativeInt,
+        StackKind.Int64 => kind == StackKind.Int64,
+        StackKind.NativeInt => kind is StackKind.Int32 or StackKind.NativeInt,
+        StackKind.Float32 or StackKind.Float64 => kind is StackKind.Float32 or StackKind.Float64,
+        StackKind.Object => kind == StackKind.Object,
+        StackKind.ByRef => kind is StackKind.ByRef or StackKind.NativeInt,
+        _ => kind == StackKind.Value,
     };
 
     /// <summary>一条指令的上下文：元数据操作数，以及“指令涉及的类型”。</summary>
@@ -233,7 +249,10 @@ public sealed class IlExpander
             {
                 var kind = state.Stack[state.Stack.Count - count + i].Kind;
                 if (candidate.OperandsFromSignature) fits = kind == context.Method!.Parameters[i].Kind;
-                else fits = Matches(candidate.Operands[i], kind) && (!candidate.SameKind || kind == state.Stack[^count].Kind);
+                else fits = Matches(candidate.Operands[i], kind, context) && (!candidate.SameKind || kind == state.Stack[^count].Kind)
+                    // 值类型的值只能核对大小：与要存入的类型同宽。
+                    && (candidate.Operands[i] != StackClass.Assignable || kind != StackKind.Value
+                        || state.Stack[state.Stack.Count - count + i].Value.Width == context.Subject!.StorageBits);
             }
             if (!fits) continue;
             if (chosen is not null)
@@ -278,7 +297,7 @@ public sealed class IlExpander
                 {
                     var method = context.Method ?? throw Missing(instruction, "被调方法");
                     var operands = new List<Term>(values);
-                    for (int i = 0; i < context.Operands.Length; i++) operands.Add(Narrow(context.Operands[i].Value, method.Parameters[i]));
+                    for (int i = 0; i < context.Operands.Length; i++) operands.Add(Store(context.Operands[i].Value, method.Parameters[i], instruction));
                     ImmutableArray<int> results = method.Return is { } returned ? [returned.StorageBits] : [];
                     var produced = Emit(block, new(EffectKind.Call, [.. operands], results, chosen.Id, instruction.Offset)
                         { Entity = method.Entity, Indirect = step.Indirect });
@@ -361,6 +380,7 @@ public sealed class IlExpander
         VariantCondition.None => true,
         VariantCondition.StaticWithoutInitializer => context.Field is { IsStatic: true, HasInitializer: false },
         VariantCondition.StaticWithInitializer => context.Field is { IsStatic: true, HasInitializer: true },
+        VariantCondition.InstanceField => context.Field is { IsStatic: false },
         VariantCondition.ReturnsVoid => context.Subject is null,
         VariantCondition.ReturnsValue => context.Subject is not null,
         _ => context.Method?.Dispatch == condition,
@@ -372,7 +392,19 @@ public sealed class IlExpander
         return type.Signed ? terms.SignExtend(value, 32) : terms.ZeroExtend(value, 32);
     }
 
-    private Term Narrow(Term value, TypeShape type) => value.Width > type.StorageBits ? terms.Truncate(value, type.StorageBits) : value;
+    /// <summary>
+    /// 把栈上的值转成类型的存储表示（ECMA-335 III.1.6 的隐式转换）：浮点按存储格式转换（I.12.1.3、III.3.63），
+    /// 整数截到存储位宽，本机整数接受 int32 时按类型的符号扩展；其余不变。
+    /// </summary>
+    private Term Store(Term value, TypeShape type, Instruction instruction)
+    {
+        int bits = type.StorageBits;
+        if (value.Width == bits) return value;
+        if (type.Kind is StackKind.Float32 or StackKind.Float64) return terms.Operation(Op.FConvert, bits, value);
+        if (type.Kind == StackKind.Int32 && value.Width > bits) return terms.Truncate(value, bits);
+        if (type.Kind == StackKind.NativeInt && value.Width < bits) return type.Signed ? terms.SignExtend(value, bits) : terms.ZeroExtend(value, bits);
+        throw new ExpansionException("类型不相容", $"{value.Width} 位的值不能存入 {bits} 位的 {type.Kind}", instruction.Offset);
+    }
 
     private Term Resized(Term amount, int width) =>
         amount.Width == width ? amount : amount.Width > width ? terms.Truncate(amount, width) : terms.ZeroExtend(amount, width);
@@ -421,7 +453,7 @@ public sealed class IlExpander
                 return template.C != 0 ? terms.SignExtend(low, template.B) : terms.ZeroExtend(low, template.B);
             }
             case ValueOp.FromStorage: return Widen(X(0), context.Subject ?? throw Missing(instruction, "涉及的类型"));
-            case ValueOp.ToStorage: return Narrow(X(0), context.Subject ?? throw Missing(instruction, "涉及的类型"));
+            case ValueOp.ToStorage: return Store(X(0), context.Subject ?? throw Missing(instruction, "涉及的类型"), instruction);
             case ValueOp.FieldOfValue:
             {
                 var field = context.Field ?? throw Missing(instruction, "字段");

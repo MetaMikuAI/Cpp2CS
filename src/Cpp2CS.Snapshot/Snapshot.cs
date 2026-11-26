@@ -138,7 +138,7 @@ public sealed class MethodSnapshot : IFlowGraph
     public ImmutableArray<FlowBlock<Occurrence>> Blocks => Flow.Blocks;
     /// <summary>入口参数，按抽象槽位区分。</summary>
     public ImmutableArray<Term> EntryParameters => Flow.EntryParameters;
-    /// <summary>内容摘要。</summary>
+    /// <summary>内容摘要：图的内容，加指针位宽与各返回槽。</summary>
     public ImmutableArray<byte> Digest => Flow.Digest;
     public string DigestText => Flow.DigestText;
     public Occurrence this[OccurrenceId occurrence] => Flow[occurrence];
@@ -151,6 +151,7 @@ public sealed class MethodSnapshot : IFlowGraph
     public ImmutableArray<Term> Parameters(BlockId block) => Flow.Parameters(block);
     public int OccurrenceCount(BlockId block) => Flow.OccurrenceCount(block);
     public IFlowOccurrence Occurrence(OccurrenceId occurrence) => Flow.Occurrence(occurrence);
+    public ImmutableArray<Term> Operands(OccurrenceId occurrence) => Flow.Operands(occurrence);
     public ImmutableArray<Term> Results(OccurrenceId occurrence) => Flow.Results(occurrence);
     public Terminator Terminator(BlockId block) => Flow.Terminator(block);
 }
@@ -227,36 +228,137 @@ public sealed class SnapshotBuilder
     public MethodSnapshot Build()
     {
         int pointerBits = PointerBits;
-        var graph = flow.Build((builder, violations) =>
+        var slots = returnSlots;
+        var graph = flow.Build(draft => Check(draft, pointerBits, slots), writer =>
         {
-            // 快照特有的契约：地址是指针位宽；带展开出口的调用与不返回的出口之前是一次调用。
-            for (int b = 0; b < builder.BlockCount; b++)
-            {
-                var block = new BlockId(b);
-                // 此处只读，借用构造中的状态。
-                var occurrences = builder.PendingOccurrences(block);
-                for (int i = 0; i < occurrences.Count; i++)
-                {
-                    var occurrence = occurrences[i];
-                    Term? location = occurrence switch
-                    {
-                        ReadOccurrence read => read.Location,
-                        WriteOccurrence write => write.Location,
-                        CallOccurrence { Target: { } target } => target,
-                        _ => null,
-                    };
-                    if (location is not null && location.Width != pointerBits)
-                        violations.Add($"B{b} 的出现 {i}：地址是 {location.Width} 位，指针是 {pointerBits} 位");
-                    if (occurrence is CallOccurrence call && call.Target is null == call.Primitive is null)
-                        violations.Add($"B{b} 的出现 {i}：调用须恰好给出代码地址与原语之一");
-                }
-                var terminator = builder.PendingTerminator(block);
-                bool afterCall = terminator.Kind == TerminatorKind.Invoke
-                    || (terminator.Kind == TerminatorKind.Single && terminator.Exits[0].Kind == ExitKind.NoReturn);
-                if (afterCall && (occurrences.Count == 0 || occurrences[^1] is not CallOccurrence))
-                    violations.Add($"B{b}：带展开出口的调用与不返回的出口之前须是一次调用");
-            }
+            // 返回槽的身份与指针位宽属于方法的契约，写入摘要。
+            writer.Write(pointerBits);
+            writer.Write(slots.Length);
+            foreach (var slot in slots) { writer.Write((int)slot.Kind); writer.Write(slot.Index); }
         });
-        return new MethodSnapshot(graph, pointerBits, returnSlots);
+        return new MethodSnapshot(graph, pointerBits, slots);
+    }
+
+    /// <summary>快照特有的契约，见 docs/前端.md 第 4、5 节。</summary>
+    private static void Check(FlowDraft<Occurrence> draft, int pointerBits, ImmutableArray<Slot> returnSlots)
+    {
+        // 槽位：Managed 只用于模板一侧；Unwind 只是带展开出口的调用的结果。
+        foreach (var parameter in draft.EntryParameters)
+            if (parameter.Slot.Kind is SlotKind.Managed or SlotKind.Unwind)
+                draft.Report($"入口参数不能用 {parameter.Slot.Kind} 槽位：{parameter.Slot}");
+        Slots(draft, "返回行", returnSlots, allowUnwind: false);
+
+        bool returns = false;
+        for (int b = 0; b < draft.BlockCount; b++)
+        {
+            var block = new BlockId(b);
+            var occurrences = draft.Occurrences(block);
+            var terminator = draft.Terminator(block);
+            bool invoke = terminator is { Kind: TerminatorKind.Invoke };
+            for (int i = 0; i < occurrences.Length; i++)
+            {
+                var occurrence = occurrences[i];
+                string where = $"B{b} 的出现 {i}";
+                // 地址是指针位宽。
+                Term? location = occurrence switch
+                {
+                    ReadOccurrence read => read.Location,
+                    WriteOccurrence write => write.Location,
+                    CallOccurrence { Target: { } target } => target,
+                    _ => null,
+                };
+                if (location is not null && location.Width != pointerBits)
+                    draft.Report($"{where}：地址是 {location.Width} 位，指针是 {pointerBits} 位");
+                if (occurrence is not CallOccurrence call) continue;
+                if (call.Target is null == call.Primitive is null)
+                    draft.Report($"{where}：调用须恰好给出代码地址与原语之一");
+                Slots(draft, $"{where} 的实参", call.ArgumentSlots, allowUnwind: false);
+                Slots(draft, $"{where} 的结果", call.ResultSlots, allowUnwind: invoke && i == occurrences.Length - 1);
+                // 对代码地址的调用列出栈指针：经栈传递的实参是相对它的读取。
+                if (call.Target is not null && !call.ArgumentSlots.Any(s => s.Kind == SlotKind.StackPointer))
+                    draft.Report($"{where}：调用没有列出栈指针");
+            }
+
+            if (terminator is null) continue;
+            bool afterCall = terminator.Kind == TerminatorKind.Invoke
+                || (terminator.Kind == TerminatorKind.Single && terminator.Exits[0].Kind == ExitKind.NoReturn);
+            if (afterCall && (occurrences.Length == 0 || occurrences[^1] is not CallOccurrence))
+                draft.Report($"B{b}：带展开出口的调用与不返回的出口之前须是一次调用");
+            returns |= terminator.Exits.Any(e => e.Kind == ExitKind.Return);
+
+            // 带展开出口的调用：正常返回的结果只在正常出口上存在，Unwind 槽的结果只在展开出口上存在。
+            if (invoke && terminator.Exits.Length == 2 && occurrences.Length > 0 && occurrences[^1] is CallOccurrence last)
+            {
+                var results = draft.Results(new OccurrenceId(block, occurrences.Length - 1));
+                var normal = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+                var unwind = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+                for (int k = 0; k < results.Length; k++) (last.ResultSlots[k].Kind == SlotKind.Unwind ? unwind : normal).Add(results[k]);
+                if (Mentions(terminator.Exits[0].Arguments, unwind) is { } early)
+                    draft.Report($"B{b} 的正常出口使用了展开时才有的结果 {early}");
+                if (Mentions(terminator.Exits[1].Arguments, normal) is { } late)
+                    draft.Report($"B{b} 的展开出口使用了正常返回才有的结果 {late}");
+            }
+        }
+
+        // 返回行列出实际返回到的地址与栈指针。
+        if (returns)
+            foreach (var kind in (ReadOnlySpan<SlotKind>)[SlotKind.ReturnAddress, SlotKind.StackPointer])
+                if (!returnSlots.Any(s => s.Kind == kind)) draft.Report($"返回行没有列出 {kind} 槽");
+
+        // 快照里没有实体与运行时属性：它们由事实层引入。
+        var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+        for (int b = 0; b < draft.BlockCount; b++)
+        {
+            var block = new BlockId(b);
+            var terms = new List<Term>();
+            for (int i = 0; i < draft.Occurrences(block).Length; i++) terms.AddRange(draft.Operands(new OccurrenceId(block, i)));
+            if (draft.Terminator(block) is { } terminator)
+            {
+                if (terminator.Condition is not null) terms.Add(terminator.Condition);
+                foreach (var exit in terminator.Exits) terms.AddRange(exit.Arguments);
+            }
+            foreach (var term in terms)
+                if (Named(term, seen) is { } named) draft.Report($"B{b} 使用了实体或运行时属性 {named}；快照里不含事实层的项");
+        }
+    }
+
+    /// <summary>一组槽位：不重复，不用 Managed；allowUnwind 为假时不用 Unwind。</summary>
+    private static void Slots(FlowDraft<Occurrence> draft, string where, ImmutableArray<Slot> slots, bool allowUnwind)
+    {
+        var distinct = new HashSet<Slot>();
+        foreach (var slot in slots)
+        {
+            if (!distinct.Add(slot)) draft.Report($"{where}：槽位 {slot} 重复");
+            if (slot.Kind == SlotKind.Managed) draft.Report($"{where}：Managed 槽位只用于模板一侧：{slot}");
+            if (slot.Kind == SlotKind.Unwind && !allowUnwind) draft.Report($"{where}：Unwind 槽位只出现在带展开出口的调用的结果里：{slot}");
+        }
+    }
+
+    /// <summary>一行实参里是否用到某组项，返回用到的第一个。</summary>
+    private static Term? Mentions(ImmutableArray<Term> row, HashSet<Term> targets)
+    {
+        if (targets.Count == 0) return null;
+        var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+        Term? Find(Term term)
+        {
+            if (!seen.Add(term)) return null;
+            if (targets.Contains(term)) return term;
+            foreach (var operand in term.Operands)
+                if (Find(operand) is { } found) return found;
+            return null;
+        }
+        foreach (var term in row)
+            if (Find(term) is { } found) return found;
+        return null;
+    }
+
+    /// <summary>项里的第一个实体或运行时属性。</summary>
+    private static Term? Named(Term term, HashSet<Term> seen)
+    {
+        if (!seen.Add(term)) return null;
+        if (term.Kind is TermKind.Entity or TermKind.Attribute) return term;
+        foreach (var operand in term.Operands)
+            if (Named(operand, seen) is { } found) return found;
+        return null;
     }
 }

@@ -11,7 +11,7 @@ public enum TerminatorKind : byte
     Single,
     /// <summary>两个出口：条件为 1 走第 0 个，否则走第 1 个。</summary>
     Branch,
-    /// <summary>跳转表：选择子等于 i 走第 i 个出口；最后一个出口是其余取值的去向。</summary>
+    /// <summary>跳转表：选择子等于 i 走第 i 个出口；最后一个出口是其余取值的去向。至少有这一个出口。</summary>
     Switch,
     /// <summary>带展开出口的调用：块内最后一个出现是这次调用，第 0 个出口是正常返回，第 1 个是展开。</summary>
     Invoke,
@@ -79,7 +79,10 @@ public sealed class Terminator
         new(TerminatorKind.Invoke, null, [normal, unwind], address);
 }
 
-/// <summary>图里占位置的一项。</summary>
+/// <summary>
+/// 图里占位置的一项。Operands、ResultWidths、DefinesMemory 在追加到图里时读取一次，图之后只用读到的值；
+/// WriteContent 在构造图时调用一次。实现应当不可变。
+/// </summary>
 public interface IFlowOccurrence
 {
     /// <summary>操作数，都是项。</summary>
@@ -97,12 +100,18 @@ public interface IFlowGraph
 {
     /// <summary>图号，区分同一个项池里的多张图。</summary>
     int Graph { get; }
+    /// <summary>图里的项所属的项池。</summary>
+    TermPool Terms { get; }
     int BlockCount { get; }
     /// <summary>入口块。它没有入边，使用入口参数而不是块参数。</summary>
     BlockId Entry { get; }
+    /// <summary>入口参数，按抽象槽位区分。</summary>
+    ImmutableArray<Term> EntryParameters { get; }
     ImmutableArray<Term> Parameters(BlockId block);
     int OccurrenceCount(BlockId block);
     IFlowOccurrence Occurrence(OccurrenceId occurrence);
+    /// <summary>某个出现的操作数：追加时读到的值。</summary>
+    ImmutableArray<Term> Operands(OccurrenceId occurrence);
     /// <summary>某个出现的各结果项。</summary>
     ImmutableArray<Term> Results(OccurrenceId occurrence);
     Terminator Terminator(BlockId block);
@@ -114,15 +123,21 @@ public sealed class FlowBlock<T> where T : class, IFlowOccurrence
     public BlockId Id { get; }
     public ImmutableArray<Term> Parameters { get; }
     public ImmutableArray<T> Occurrences { get; }
+    /// <summary>各出现的操作数：追加时读到的值。</summary>
+    public ImmutableArray<ImmutableArray<Term>> Operands { get; }
+    /// <summary>各出现是否产生新的内存版本：追加时读到的值。</summary>
+    public ImmutableArray<bool> DefinesMemory { get; }
     public ImmutableArray<ImmutableArray<Term>> Results { get; }
     public Terminator Terminator { get; }
 
-    internal FlowBlock(BlockId id, ImmutableArray<Term> parameters, ImmutableArray<T> occurrences,
-        ImmutableArray<ImmutableArray<Term>> results, Terminator terminator)
+    internal FlowBlock(BlockId id, ImmutableArray<Term> parameters, ImmutableArray<T> occurrences, ImmutableArray<ImmutableArray<Term>> operands,
+        ImmutableArray<bool> definesMemory, ImmutableArray<ImmutableArray<Term>> results, Terminator terminator)
     {
         Id = id;
         Parameters = parameters;
         Occurrences = occurrences;
+        Operands = operands;
+        DefinesMemory = definesMemory;
         Results = results;
         Terminator = terminator;
     }
@@ -157,6 +172,7 @@ public sealed class FlowGraph<T> : IFlowGraph where T : class, IFlowOccurrence
     public ImmutableArray<Term> Parameters(BlockId block) => Blocks[block.Index].Parameters;
     public int OccurrenceCount(BlockId block) => Blocks[block.Index].Occurrences.Length;
     public IFlowOccurrence Occurrence(OccurrenceId occurrence) => this[occurrence];
+    public ImmutableArray<Term> Operands(OccurrenceId occurrence) => Blocks[occurrence.Block.Index].Operands[occurrence.Index];
     public ImmutableArray<Term> Results(OccurrenceId occurrence) => Blocks[occurrence.Block.Index].Results[occurrence.Index];
     public Terminator Terminator(BlockId block) => Blocks[block.Index].Terminator;
     public string DigestText => Convert.ToHexString(Digest.AsSpan());
@@ -164,9 +180,9 @@ public sealed class FlowGraph<T> : IFlowGraph where T : class, IFlowOccurrence
     /// <summary>程序点处的内存版本：块内此前最近一个产生版本的出现；没有则是块入口的版本。</summary>
     public MemoryVersion VersionAt(ProgramPoint point)
     {
-        var occurrences = Blocks[point.Block.Index].Occurrences;
-        for (int i = Math.Min(point.Index, occurrences.Length) - 1; i >= 0; i--)
-            if (occurrences[i].DefinesMemory) return new(point.Block, i);
+        var defines = Blocks[point.Block.Index].DefinesMemory;
+        for (int i = Math.Min(point.Index, defines.Length) - 1; i >= 0; i--)
+            if (defines[i]) return new(point.Block, i);
         return new(point.Block, -1);
     }
 
@@ -254,8 +270,50 @@ public sealed class FlowException : Exception
 }
 
 /// <summary>
+/// 构造中的图的只读视图，交给附加的校验。它是构造器状态的副本：校验只能读它、追加违反之处，
+/// 不能删去已有的违反，也改不了将要冻结的图。没有终结的块，终结为空。
+/// </summary>
+public sealed class FlowDraft<T> where T : class, IFlowOccurrence
+{
+    internal sealed record Block(ImmutableArray<Term> Parameters, ImmutableArray<T> Occurrences, ImmutableArray<ImmutableArray<Term>> Operands,
+        ImmutableArray<bool> DefinesMemory, ImmutableArray<ImmutableArray<Term>> Results, Terminator? Terminator);
+
+    private readonly ImmutableArray<Block> blocks;
+    private readonly List<string> violations;
+
+    internal FlowDraft(int graph, TermPool terms, ImmutableArray<Block> blocks, ImmutableArray<Term> entryParameters,
+        ImmutableArray<int> returnWidths, List<string> violations)
+    {
+        Graph = graph;
+        Terms = terms;
+        this.blocks = blocks;
+        EntryParameters = entryParameters;
+        ReturnWidths = returnWidths;
+        this.violations = violations;
+    }
+
+    internal ImmutableArray<Block> Blocks => blocks;
+
+    public int Graph { get; }
+    public TermPool Terms { get; }
+    public int BlockCount => blocks.Length;
+    public BlockId Entry => new(0);
+    public ImmutableArray<Term> EntryParameters { get; }
+    public ImmutableArray<int> ReturnWidths { get; }
+    public ImmutableArray<Term> Parameters(BlockId block) => blocks[block.Index].Parameters;
+    public ImmutableArray<T> Occurrences(BlockId block) => blocks[block.Index].Occurrences;
+    public ImmutableArray<Term> Operands(OccurrenceId occurrence) => blocks[occurrence.Block.Index].Operands[occurrence.Index];
+    public ImmutableArray<Term> Results(OccurrenceId occurrence) => blocks[occurrence.Block.Index].Results[occurrence.Index];
+    /// <summary>块的终结；没有终结时为空。</summary>
+    public Terminator? Terminator(BlockId block) => blocks[block.Index].Terminator;
+
+    /// <summary>追加一处违反。</summary>
+    public void Report(string violation) => violations.Add(violation);
+}
+
+/// <summary>
 /// 图的构造。先声明块（给出各参数的位宽），再向块里追加出现、设置终结，最后 <see cref="Build"/>。
-/// Build 校验契约并计算摘要；校验不通过时抛出 <see cref="FlowException"/>，不产生图。
+/// Build 校验契约并计算摘要；校验不通过时抛出 <see cref="FlowException"/>，列出全部违反之处，不产生图。
 /// </summary>
 public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
 {
@@ -263,6 +321,8 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     {
         public ImmutableArray<Term> Parameters;
         public readonly List<T> Occurrences = [];
+        public readonly List<ImmutableArray<Term>> Operands = [];
+        public readonly List<bool> DefinesMemory = [];
         public readonly List<ImmutableArray<Term>> Results = [];
         public Terminator? Terminator;
     }
@@ -270,7 +330,7 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     private readonly List<Pending> blocks = [];
     private readonly List<Term> entryParameters = [];
     private ImmutableArray<int> returnWidths = [];
-    private bool built;
+    private bool built, building;
 
     public TermPool Terms { get; }
     public int Graph { get; }
@@ -286,9 +346,16 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     public BlockId Entry => new(0);
     public int BlockCount => blocks.Count;
 
+    private void Mutable()
+    {
+        if (built) throw new InvalidOperationException("图已经构造完成");
+        if (building) throw new InvalidOperationException("图正在校验，不能改动");
+    }
+
     /// <summary>声明一个入口参数。同一个槽位只能声明一次。</summary>
     public Term EntryParameter(Slot slot, int width)
     {
+        Mutable();
         var term = Terms.EntryParameter(Graph, slot, width);
         foreach (var existing in entryParameters)
             if (existing.Slot == slot) throw new ArgumentException($"入口槽位 {slot} 重复声明");
@@ -297,11 +364,16 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     }
 
     /// <summary>各返回槽的位宽。每个返回出口的实参行都要与它逐项相符。</summary>
-    public void SetReturnWidths(params ReadOnlySpan<int> widths) => returnWidths = [.. widths];
+    public void SetReturnWidths(params ReadOnlySpan<int> widths)
+    {
+        Mutable();
+        returnWidths = [.. widths];
+    }
 
     /// <summary>声明一个块，给出各参数的位宽。</summary>
     public BlockId Block(params ReadOnlySpan<int> parameterWidths)
     {
+        Mutable();
         var id = new BlockId(blocks.Count);
         var parameters = ImmutableArray.CreateBuilder<Term>(parameterWidths.Length);
         for (int i = 0; i < parameterWidths.Length; i++) parameters.Add(Terms.BlockParameter(Graph, id, i, parameterWidths[i]));
@@ -314,12 +386,6 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     public int OccurrenceCount(BlockId block) => At(block).Occurrences.Count;
     public bool IsTerminated(BlockId block) => At(block).Terminator is not null;
 
-    /// <summary>构造中某个块已有的出现，只读。</summary>
-    public IReadOnlyList<T> PendingOccurrences(BlockId block) => blocks[block.Index].Occurrences;
-    /// <summary>构造中某个块的终结；尚未终结时抛出。</summary>
-    public Terminator PendingTerminator(BlockId block) =>
-        blocks[block.Index].Terminator ?? throw new InvalidOperationException($"{block} 尚未终结");
-
     private Pending At(BlockId block)
     {
         if (built) throw new InvalidOperationException("图已经构造完成");
@@ -327,62 +393,87 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
         return blocks[block.Index];
     }
 
-    /// <summary>向块末追加一个出现，返回它的各结果项。</summary>
+    /// <summary>向块末追加一个出现，返回它的各结果项。出现的操作数、结果位宽与是否产生内存版本在此读取一次。</summary>
     public ImmutableArray<Term> Append(BlockId block, T occurrence)
     {
+        Mutable();
         var pending = At(block);
         if (pending.Terminator is not null) throw new InvalidOperationException($"{block} 已经终结");
+        var operands = occurrence.Operands;
+        var widths = occurrence.ResultWidths;
+        if (operands.IsDefault || widths.IsDefault) throw new ArgumentException("出现的操作数与结果位宽不能为空数组的默认值");
         var id = new OccurrenceId(block, pending.Occurrences.Count);
-        var results = ImmutableArray.CreateBuilder<Term>(occurrence.ResultWidths.Length);
-        for (int i = 0; i < occurrence.ResultWidths.Length; i++) results.Add(Terms.Result(Graph, id, i, occurrence.ResultWidths[i]));
+        var results = ImmutableArray.CreateBuilder<Term>(widths.Length);
+        for (int i = 0; i < widths.Length; i++) results.Add(Terms.Result(Graph, id, i, widths[i]));
         pending.Occurrences.Add(occurrence);
+        pending.Operands.Add(operands);
+        pending.DefinesMemory.Add(occurrence.DefinesMemory);
         pending.Results.Add(results.MoveToImmutable());
         return pending.Results[^1];
     }
 
     public void Terminate(BlockId block, Terminator terminator)
     {
+        Mutable();
         var pending = At(block);
         if (pending.Terminator is not null) throw new InvalidOperationException($"{block} 已经终结");
         pending.Terminator = terminator;
     }
 
-    /// <summary>校验并构造。additional 用于在通用契约之外追加检查。</summary>
-    public FlowGraph<T> Build(Action<FlowBuilder<T>, List<string>>? additional = null)
+    /// <summary>
+    /// 校验并构造。validate 在通用契约之外追加检查：它拿到构造器状态的只读副本，只能追加违反之处。
+    /// describe 把图层面的其余内容（例如快照的返回槽）写入摘要，写在通用内容之前。
+    /// 冻结的图取自交给校验的同一份副本。
+    /// </summary>
+    public FlowGraph<T> Build(Action<FlowDraft<T>>? validate = null, Action<DigestWriter>? describe = null)
     {
-        if (built) throw new InvalidOperationException("图已经构造完成");
+        Mutable();
+        var copies = ImmutableArray.CreateBuilder<FlowDraft<T>.Block>(blocks.Count);
+        foreach (var pending in blocks)
+            copies.Add(new(pending.Parameters, [.. pending.Occurrences], [.. pending.Operands], [.. pending.DefinesMemory],
+                [.. pending.Results], pending.Terminator));
         var violations = new List<string>();
-        Validate(violations);
-        additional?.Invoke(this, violations);
+        var draft = new FlowDraft<T>(Graph, Terms, copies.MoveToImmutable(), [.. entryParameters], returnWidths, violations);
+        building = true;
+        try
+        {
+            Validate(draft, violations);
+            validate?.Invoke(draft);
+        }
+        finally
+        {
+            building = false;
+        }
         if (violations.Count > 0) throw new FlowException([.. violations]);
 
         var writer = new DigestWriter();
-        writer.Write(entryParameters.Count);
-        foreach (var parameter in entryParameters)
+        describe?.Invoke(writer);
+        writer.Write(draft.EntryParameters.Length);
+        foreach (var parameter in draft.EntryParameters)
         {
             writer.Write((int)parameter.Slot.Kind);
             writer.Write(parameter.Slot.Index);
             writer.Write(parameter.Width);
         }
-        writer.Write(returnWidths.Length);
-        foreach (int width in returnWidths) writer.Write(width);
-        writer.Write(blocks.Count);
-        var frozen = ImmutableArray.CreateBuilder<FlowBlock<T>>(blocks.Count);
-        for (int b = 0; b < blocks.Count; b++)
+        writer.Write(draft.ReturnWidths.Length);
+        foreach (int width in draft.ReturnWidths) writer.Write(width);
+        writer.Write(draft.BlockCount);
+        var frozen = ImmutableArray.CreateBuilder<FlowBlock<T>>(draft.BlockCount);
+        for (int b = 0; b < draft.BlockCount; b++)
         {
-            var pending = blocks[b];
-            writer.Write(pending.Parameters.Length);
-            foreach (var parameter in pending.Parameters) writer.Write(parameter.Width);
-            writer.Write(pending.Occurrences.Count);
-            foreach (var occurrence in pending.Occurrences)
+            var block = draft.Blocks[b];
+            writer.Write(block.Parameters.Length);
+            foreach (var parameter in block.Parameters) writer.Write(parameter.Width);
+            writer.Write(block.Occurrences.Length);
+            for (int i = 0; i < block.Occurrences.Length; i++)
             {
-                writer.Write(occurrence.Operands);
-                writer.Write(occurrence.ResultWidths.Length);
-                foreach (int width in occurrence.ResultWidths) writer.Write(width);
-                writer.Write(occurrence.DefinesMemory ? 1 : 0);
-                occurrence.WriteContent(writer);
+                writer.Write(block.Operands[i]);
+                writer.Write(block.Results[i].Length);
+                foreach (var result in block.Results[i]) writer.Write(result.Width);
+                writer.Write(block.DefinesMemory[i] ? 1 : 0);
+                block.Occurrences[i].WriteContent(writer);
             }
-            var terminator = pending.Terminator!;
+            var terminator = block.Terminator!;
             writer.Write((int)terminator.Kind);
             writer.Write(terminator.Condition is null ? 0 : 1);
             if (terminator.Condition is not null) writer.Write(terminator.Condition);
@@ -393,16 +484,18 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                 writer.Write(exit.Kind == ExitKind.Target ? exit.Target.Index : -1);
                 writer.Write(exit.Arguments);
             }
-            frozen.Add(new FlowBlock<T>(new(b), pending.Parameters, [.. pending.Occurrences], [.. pending.Results], terminator));
+            frozen.Add(new FlowBlock<T>(new(b), block.Parameters, block.Occurrences, block.Operands, block.DefinesMemory, block.Results, terminator));
         }
         built = true;
-        return new FlowGraph<T>(Graph, Terms, frozen.MoveToImmutable(), [.. entryParameters], returnWidths, writer.Finish());
+        return new FlowGraph<T>(Graph, Terms, frozen.MoveToImmutable(), draft.EntryParameters, draft.ReturnWidths, writer.Finish());
     }
 
-    private void Validate(List<string> violations)
+    /// <summary>通用契约。各项检查互不依赖的部分都做完，列出全部违反之处；只跳过因别的违反而无从判断的项。</summary>
+    private void Validate(FlowDraft<T> draft, List<string> violations)
     {
+        var blocks = draft.Blocks;
         // 一、每个块都已终结；出口的形状与终结的种类相符。
-        for (int b = 0; b < blocks.Count; b++)
+        for (int b = 0; b < blocks.Length; b++)
         {
             var terminator = blocks[b].Terminator;
             if (terminator is null) { violations.Add($"B{b} 没有终结"); continue; }
@@ -417,28 +510,31 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                     if (terminator.Condition is not { Width: 1 }) violations.Add($"B{b} 的分支条件不是 1 位");
                     break;
                 case TerminatorKind.Switch:
-                    if (exits < 2) violations.Add($"B{b} 的跳转表少于 2 个出口");
+                    // 最后一个出口是其余取值的去向；只有它时，所有取值都走它。
+                    if (exits < 1) violations.Add($"B{b} 的跳转表没有出口");
                     if (terminator.Condition is null) violations.Add($"B{b} 的跳转表没有选择子");
                     break;
                 case TerminatorKind.Invoke:
                     if (exits != 2 || terminator.Exits.Any(e => e.Kind != ExitKind.Target)) violations.Add($"B{b} 的带展开出口的调用须有两个去往块的出口");
-                    if (blocks[b].Occurrences.Count == 0) violations.Add($"B{b} 以带展开出口的调用终结，但块内没有出现");
+                    if (blocks[b].Occurrences.Length == 0) violations.Add($"B{b} 以带展开出口的调用终结，但块内没有出现");
                     break;
             }
             if (terminator.Kind != TerminatorKind.Single && terminator.Exits.Any(e => e.Kind == ExitKind.NoReturn))
                 violations.Add($"B{b}：不返回的出口只能单独作为终结");
         }
-        if (violations.Count > 0) return;
 
         // 二、边：目标存在，入口块没有入边，整行实参与目标块的参数个数、位宽逐项相符。
-        var reached = new bool[blocks.Count];
+        // 可达的块里有没终结的，其后的块是否可达无从判断，不报不可达。
+        var reached = new bool[blocks.Length];
         var work = new Stack<int>();
+        bool open = false;
         reached[0] = true;
         work.Push(0);
         while (work.Count > 0)
         {
             int b = work.Pop();
-            var terminator = blocks[b].Terminator!;
+            var terminator = blocks[b].Terminator;
+            if (terminator is null) { open = true; continue; }
             for (int e = 0; e < terminator.Exits.Length; e++)
             {
                 var exit = terminator.Exits[e];
@@ -446,7 +542,7 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                 switch (exit.Kind)
                 {
                     case ExitKind.Target:
-                        if ((uint)exit.Target.Index >= (uint)blocks.Count) { violations.Add($"{edge} 的目标 {exit.Target} 不存在"); break; }
+                        if ((uint)exit.Target.Index >= (uint)blocks.Length) { violations.Add($"{edge} 的目标 {exit.Target} 不存在"); break; }
                         if (exit.Target.Index == 0) { violations.Add($"{edge} 指向入口块；原生代码跳回第一条指令时须另设循环头"); break; }
                         var parameters = blocks[exit.Target.Index].Parameters;
                         if (exit.Arguments.Length != parameters.Length)
@@ -458,12 +554,12 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                         if (!reached[exit.Target.Index]) { reached[exit.Target.Index] = true; work.Push(exit.Target.Index); }
                         break;
                     case ExitKind.Return:
-                        if (exit.Arguments.Length != returnWidths.Length)
-                            violations.Add($"{edge} 返回 {exit.Arguments.Length} 个值，返回槽有 {returnWidths.Length} 个");
+                        if (exit.Arguments.Length != draft.ReturnWidths.Length)
+                            violations.Add($"{edge} 返回 {exit.Arguments.Length} 个值，返回槽有 {draft.ReturnWidths.Length} 个");
                         else
-                            for (int i = 0; i < returnWidths.Length; i++)
-                                if (exit.Arguments[i].Width != returnWidths[i])
-                                    violations.Add($"{edge} 的第 {i} 个返回值是 {exit.Arguments[i].Width} 位，返回槽是 {returnWidths[i]} 位");
+                            for (int i = 0; i < draft.ReturnWidths.Length; i++)
+                                if (exit.Arguments[i].Width != draft.ReturnWidths[i])
+                                    violations.Add($"{edge} 的第 {i} 个返回值是 {exit.Arguments[i].Width} 位，返回槽是 {draft.ReturnWidths[i]} 位");
                         break;
                     default:
                         if (exit.Arguments.Length != 0) violations.Add($"{edge} 不带实参");
@@ -471,24 +567,26 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                 }
             }
         }
-        for (int b = 0; b < blocks.Count; b++)
-            if (!reached[b]) violations.Add($"B{b} 从入口不可达");
+        if (!open)
+            for (int b = 0; b < blocks.Length; b++)
+                if (!reached[b]) violations.Add($"B{b} 从入口不可达");
 
-        // 三、值的可见性：块只使用自己的参数和块内此前产生的值；入口参数只在入口块可见。
-        for (int b = 0; b < blocks.Count; b++)
+        // 三、值的可见性：块只使用本池的项、自己的参数和块内此前产生的值；入口参数只在入口块可见。
+        for (int b = 0; b < blocks.Length; b++)
         {
-            var pending = blocks[b];
+            var block = blocks[b];
             var need = new Dictionary<Term, int>(ReferenceEqualityComparer.Instance);
             void Use(Term term, int limit, string where)
             {
-                int required = Need(term, b, need, out string? reason);
+                if (!Terms.Owns(term)) { violations.Add($"B{b} {where} 使用了别的项池的项：{term}"); return; }
+                int required = Need(draft, term, b, need, out string? reason);
                 if (required < 0) violations.Add($"B{b} {where} 使用了不可见的值：{reason}");
                 else if (required > limit) violations.Add($"B{b} {where} 使用了块内其后才产生的结果");
             }
-            for (int i = 0; i < pending.Occurrences.Count; i++)
-                foreach (var operand in pending.Occurrences[i].Operands) Use(operand, i, $"的出现 {i}");
-            var terminator = pending.Terminator!;
-            int all = pending.Occurrences.Count;
+            for (int i = 0; i < block.Occurrences.Length; i++)
+                foreach (var operand in block.Operands[i]) Use(operand, i, $"的出现 {i}");
+            if (block.Terminator is not { } terminator) continue;
+            int all = block.Occurrences.Length;
             if (terminator.Condition is not null) Use(terminator.Condition, all, "的终结条件");
             for (int e = 0; e < terminator.Exits.Length; e++)
                 foreach (var argument in terminator.Exits[e].Arguments) Use(argument, all, $"的出口 {e}");
@@ -496,7 +594,7 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
     }
 
     /// <summary>项在块 b 里可见所需的“已产生的出现数”；不可见时返回 -1。</summary>
-    private int Need(Term term, int b, Dictionary<Term, int> memo, out string? reason)
+    private int Need(FlowDraft<T> draft, Term term, int b, Dictionary<Term, int> memo, out string? reason)
     {
         reason = null;
         if (memo.TryGetValue(term, out int known))
@@ -504,11 +602,12 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
             if (known < 0) reason = term.ToString();
             return known;
         }
+        var blocks = draft.Blocks;
         int result;
         switch (term.Kind)
         {
             case TermKind.EntryParameter:
-                result = term.Graph == Graph && b == 0 && entryParameters.Contains(term) ? 0 : -1;
+                result = term.Graph == Graph && b == 0 && draft.EntryParameters.Contains(term) ? 0 : -1;
                 if (result < 0) reason = b == 0 ? $"未声明的入口参数 {term}" : $"入口参数 {term} 只在入口块可见，须作为实参传入";
                 break;
             case TermKind.BlockParameter:
@@ -519,7 +618,7 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
             case TermKind.Result:
             {
                 var occurrence = term.Occurrence;
-                bool own = term.Graph == Graph && occurrence.Block.Index == b && occurrence.Index < blocks[b].Occurrences.Count
+                bool own = term.Graph == Graph && occurrence.Block.Index == b && occurrence.Index < blocks[b].Occurrences.Length
                     && term.ResultIndex < blocks[b].Results[occurrence.Index].Length
                     && ReferenceEquals(blocks[b].Results[occurrence.Index][term.ResultIndex], term);
                 result = own ? occurrence.Index + 1 : -1;
@@ -530,7 +629,7 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                 result = 0;
                 foreach (var operand in term.Operands)
                 {
-                    int inner = Need(operand, b, memo, out reason);
+                    int inner = Need(draft, operand, b, memo, out reason);
                     if (inner < 0) { result = -1; break; }
                     result = Math.Max(result, inner);
                 }

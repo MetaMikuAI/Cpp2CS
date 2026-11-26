@@ -19,6 +19,12 @@ public enum StackClass : byte
     Value,
     /// <summary>整数、对象引用或地址：可以与零比较、可以按无符号数比较的值。</summary>
     Scalar,
+    /// <summary>
+    /// 能存入指令涉及的类型（局部变量、形参、字段、返回值的类型）的值，按 ECMA-335 III.1.6 表 III.9：
+    /// 不超过 32 位的整数接受 int32 与本机整数；64 位整数只接受 int64；本机整数接受 int32 与本机整数；
+    /// 浮点接受浮点；类接受对象引用；值类型接受同样大小的值类型；托管指针接受托管指针与本机整数。
+    /// </summary>
+    Assignable,
     Any,
 }
 
@@ -30,6 +36,8 @@ public enum VariantCondition : byte
     StaticWithoutInitializer,
     /// <summary>静态字段，所属类有静态构造函数。</summary>
     StaticWithInitializer,
+    /// <summary>实例字段。经对象、值或地址访问静态字段时，对象被忽略，也不抛出 NullReference（ECMA-335 III.4.10、III.4.28）。</summary>
+    InstanceField,
     /// <summary>没有 this 的方法。</summary>
     StaticMethod,
     /// <summary>目标唯一的实例方法：非虚方法，或者密封类、值类型上的方法，或者 final 的虚方法。</summary>
@@ -84,8 +92,10 @@ public enum RuntimeFunction : byte
     /// <summary>虚表项：类的虚表里某个方法槽位上的调用数据。出处：il2cpp-codegen-il2cpp.h 的 il2cpp_codegen_get_virtual_invoke_data。</summary>
     VirtualInvokeData,
     /// <summary>
-    /// 接口查找（运行时操作，强制内联）：在类的接口偏移表里找到接口，取虚表里对应槽位的调用数据。
-    /// 出处：il2cpp-codegen-il2cpp.h 的 il2cpp_codegen_get_interface_invoke_data，vm/ClassInlines.h 的 GetInterfaceInvokeDataFromVTable。
+    /// 接口查找（运行时操作，强制内联）：参数是接收者对象，接口与槽号由效果所带的方法实体给出。
+    /// 在对象的类的接口偏移表里找到接口，取虚表里对应槽位的调用数据；找不到时调用以对象、接口、槽号为参数的慢路径。
+    /// 出处：il2cpp-codegen-il2cpp.h 的 il2cpp_codegen_get_interface_invoke_data，vm/ClassInlines.h 的 GetInterfaceInvokeDataFromVTable
+    /// 与 GetInterfaceInvokeDataFromVTableSlowPath。
     /// </summary>
     InterfaceInvokeData,
 }
@@ -119,7 +129,11 @@ public enum ValueOp : byte
     Flag,
     /// <summary>取低 A 位，再扩展到 B 位：C 为 1 按符号扩展，为 0 按零扩展。A 不小于 B 时只截断到 B 位。</summary>
     Resize,
-    /// <summary>从存储位宽扩到栈上的位宽、从栈上的位宽截到存储位宽，按指令涉及的类型（字段、元素、形参、局部变量、返回值的类型）。</summary>
+    /// <summary>
+    /// 从存储位宽扩到栈上的位宽；把栈上的值转成存储的表示。都按指令涉及的类型（字段、元素、形参、局部变量、返回值的类型）。
+    /// 存储：不超过 32 位的整数截断；本机整数接受 int32 时按类型的符号扩展（ECMA-335 III.1.6）；
+    /// 浮点按存储的格式转换（ECMA-335 I.12.1.3、III.3.63）；其余不变。
+    /// </summary>
     FromStorage, ToStorage,
     /// <summary>值类型的值里的一个字段：按字段的偏移与位宽切片。</summary>
     FieldOfValue,

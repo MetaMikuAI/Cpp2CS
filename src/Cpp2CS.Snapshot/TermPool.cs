@@ -10,6 +10,7 @@ namespace Cpp2CS.Snapshot;
 /// 只取 0 和 1 的值的各种写法归一；
 /// 比较的方向与严格性、常量的结合归一。
 /// 要求“两个操作数是同一个项”的恒等式，只在该项不含未定义的位时使用。
+/// 操作数只接受本池构造的项：同一个池里结构相同的项是同一个实例，引用相等就是结构相等。
 /// </summary>
 public sealed class TermPool
 {
@@ -33,11 +34,30 @@ public sealed class TermPool
     }
 
     private Term Make(TermKind kind, int width, ImmutableArray<Term> operands, Op op = Op.None, UInt128 payload = default,
-        int a = 0, int b = 0, int c = 0, int d = 0) => Intern(new Term(kind, width, operands, op, payload, a, b, c, d));
+        int a = 0, int b = 0, int c = 0, int d = 0)
+    {
+        foreach (var operand in operands) Own(operand);
+        return Intern(new Term(this, kind, width, operands, op, payload, a, b, c, d));
+    }
 
     private static void Require(bool condition, string message)
     {
         if (!condition) throw new ArgumentException(message);
+    }
+
+    /// <summary>项是否由本池构造。</summary>
+    public bool Owns(Term term) => ReferenceEquals(term.Pool, this);
+
+    private void Own(Term term)
+    {
+        if (!ReferenceEquals(term.Pool, this)) throw new ArgumentException($"项 {term} 来自别的项池");
+    }
+
+    private void Own(Term x, Term y) { Own(x); Own(y); }
+
+    private void Own(ReadOnlySpan<Term> terms)
+    {
+        foreach (var term in terms) Own(term);
     }
 
     private static UInt128 Mask(int width) => width >= 128 ? UInt128.MaxValue : (UInt128.One << width) - 1;
@@ -93,6 +113,7 @@ public sealed class TermPool
 
     public Term Attribute(AttributeId attribute, int width, params ReadOnlySpan<Term> operands)
     {
+        Own(operands);
         Require(width > 0, "位宽须为正");
         return Make(TermKind.Attribute, width, [.. operands], a: attribute.Value);
     }
@@ -101,7 +122,9 @@ public sealed class TermPool
 
     public Term Slice(Term x, int offset, int width)
     {
-        Require(offset >= 0 && width > 0 && offset + width <= x.Width, $"切片 [{offset}+:{width}] 超出位宽 {x.Width}");
+        Own(x);
+        // 先比宽度再比起点，避免 offset + width 在 32 位里溢出。
+        Require(offset >= 0 && width > 0 && width <= x.Width && offset <= x.Width - width, $"切片 [{offset}+:{width}] 超出位宽 {x.Width}");
         if (offset == 0 && width == x.Width) return x;
         switch (x.Kind)
         {
@@ -162,6 +185,7 @@ public sealed class TermPool
     public Term Concat(IReadOnlyList<Term> parts)
     {
         Require(parts.Count > 0, "拼接至少要有一个操作数");
+        foreach (var part in parts) Own(part);
         var merged = new List<Term>(parts.Count);
         void Push(Term part)
         {
@@ -211,6 +235,7 @@ public sealed class TermPool
 
     public Term ZeroExtend(Term x, int width)
     {
+        Own(x);
         Require(width >= x.Width, "零扩展的目标位宽不能更小");
         return width == x.Width ? x : Concat(x, Zeros(width - x.Width));
     }
@@ -228,6 +253,7 @@ public sealed class TermPool
 
     public Term SignExtend(Term x, int width)
     {
+        Own(x);
         Require(width >= x.Width, "符号扩展的目标位宽不能更小");
         if (width == x.Width) return x;
         if (x.Kind == TermKind.Constant && width <= 128) return Constant(unchecked((UInt128)Signed(x.Payload, x.Width)), width);
@@ -242,6 +268,7 @@ public sealed class TermPool
 
     public Term Select(Term condition, Term whenTrue, Term whenFalse)
     {
+        Own(condition); Own(whenTrue, whenFalse);
         Require(condition.Width == 1, "选择的条件须为 1 位");
         Require(whenTrue.Width == whenFalse.Width, "选择的两支位宽须相同");
         if (condition.Kind == TermKind.Constant) return condition.Payload != UInt128.Zero ? whenTrue : whenFalse;
@@ -258,26 +285,51 @@ public sealed class TermPool
 
     // ---- 运算 ----
 
-    /// <summary>不带规范化的运算：浮点、计数、高半乘积等。只检查操作数个数并驻留。</summary>
+    /// <summary>不带规范化的运算：浮点、计数、高半乘积等。按运算符的定义检查操作数个数与位宽（见 <see cref="Op"/>），然后驻留。</summary>
     public Term Operation(Op op, int width, params ReadOnlySpan<Term> operands)
     {
+        Own(operands);
         Require(width > 0, "位宽须为正");
         Require(op is not (Op.None or Op.Opaque or Op.Add or Op.Sub or Op.Mul or Op.Neg or Op.And or Op.Or or Op.Xor or Op.Not
             or Op.Shl or Op.LShr or Op.AShr or Op.SignExtend or Op.Eq or Op.Ult or Op.Slt or Op.UDiv or Op.SDiv or Op.URem or Op.SRem),
             $"{op} 有专门的构造方法");
+        CheckShape(op, width, operands);
         return Make(TermKind.Operation, width, [.. operands], op);
+    }
+
+    /// <summary>运算的形状：操作数个数，二元运算的两个操作数同宽，结果位宽与操作数的关系。</summary>
+    private static void CheckShape(Op op, int width, ReadOnlySpan<Term> operands)
+    {
+        (int count, int result) = op switch
+        {
+            // result：0 表示结果位宽不受操作数约束，-1 表示与操作数同宽，正数表示固定位宽。
+            Op.AddCarry or Op.AddOverflow or Op.SubOverflow => (2, 1),
+            Op.UMulHigh or Op.SMulHigh => (2, -1),
+            Op.CountLeadingZeros or Op.CountTrailingZeros or Op.PopCount => (1, 0),
+            Op.ByteSwap or Op.BitReverse => (1, -1),
+            Op.FAdd or Op.FSub or Op.FMul or Op.FDiv or Op.FRem => (2, -1),
+            Op.FNeg or Op.FAbs or Op.FSqrt => (1, -1),
+            Op.FEq or Op.FLt or Op.FLe or Op.FUnordered => (2, 1),
+            Op.FConvert or Op.SToF or Op.UToF or Op.FToSSaturate or Op.FToUSaturate or Op.FToSIndefinite => (1, 0),
+            _ => throw new ArgumentException($"{op} 没有登记形状"),
+        };
+        Require(operands.Length == count, $"{op} 要 {count} 个操作数，给了 {operands.Length} 个");
+        if (count == 2) Require(operands[0].Width == operands[1].Width, $"{op} 的两个操作数位宽须相同：{operands[0].Width} 与 {operands[1].Width}");
+        if (result > 0) Require(width == result, $"{op} 的结果是 {result} 位，不是 {width} 位");
+        if (result < 0) Require(width == operands[0].Width, $"{op} 的结果与操作数同宽：{operands[0].Width} 位，不是 {width} 位");
+        if (op == Op.ByteSwap) Require(width % 8 == 0, $"字节逆序的位宽须是 8 的倍数：{width}");
     }
 
     public Term Opaque(int code, int width, params ReadOnlySpan<Term> operands)
     {
+        Own(operands);
         Require(width > 0, "位宽须为正");
         return Make(TermKind.Operation, width, [.. operands], Op.Opaque, a: code);
     }
 
-    private static bool Before(Term x, Term y) =>
-        x.StructuralHash != y.StructuralHash ? x.StructuralHash < y.StructuralHash : x.Id < y.Id;
+    private static bool Before(Term x, Term y) => Term.CompareStructure(x, y) < 0;
 
-    /// <summary>可交换运算的操作数次序：常量在右，其余按结构散列。</summary>
+    /// <summary>可交换运算的操作数次序：常量在右，其余按结构上的全序（先比结构散列）。</summary>
     private Term Commutative(Op op, Term x, Term y)
     {
         if (x.Kind == TermKind.Constant || (y.Kind != TermKind.Constant && Before(y, x))) (x, y) = (y, x);
@@ -297,6 +349,7 @@ public sealed class TermPool
 
     public Term Add(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Width > 128) return Commutative(Op.Add, x, y);
         if (DisjointBits(x, y) is { } joined) return joined;
@@ -310,6 +363,7 @@ public sealed class TermPool
 
     public Term Sub(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (SameDefined(x, y)) return Zeros(x.Width);
         if (y.Kind == TermKind.Constant) return Add(x, Constant(unchecked(UInt128.Zero - y.Payload), y.Width));
@@ -318,6 +372,7 @@ public sealed class TermPool
 
     public Term Mul(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Kind == TermKind.Constant) (x, y) = (y, x);
         if (y.Kind == TermKind.Constant)
@@ -332,6 +387,7 @@ public sealed class TermPool
 
     public Term Neg(Term x)
     {
+        Own(x);
         if (x.Kind == TermKind.Constant) return Constant(unchecked(UInt128.Zero - x.Payload), x.Width);
         if (x.Kind == TermKind.Operation && x.Op == Op.Neg) return x.Operands[0];
         return Make(TermKind.Operation, x.Width, [x], Op.Neg);
@@ -341,6 +397,7 @@ public sealed class TermPool
     public Term Divide(Op op, Term x, Term y)
     {
         Require(op is Op.UDiv or Op.SDiv or Op.URem or Op.SRem, "须为除或余");
+        Own(x, y);
         SameWidth(x, y);
         if (y.Kind == TermKind.Constant && y.Payload != UInt128.Zero && x.Width <= 128)
         {
@@ -398,6 +455,7 @@ public sealed class TermPool
 
     public Term And(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Kind == TermKind.Constant) (x, y) = (y, x);
         if (SameDefined(x, y)) return x;
@@ -424,6 +482,7 @@ public sealed class TermPool
 
     public Term Or(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Kind == TermKind.Constant) (x, y) = (y, x);
         if (SameDefined(x, y)) return x;
@@ -438,6 +497,7 @@ public sealed class TermPool
 
     public Term Xor(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Kind == TermKind.Constant) (x, y) = (y, x);
         if (SameDefined(x, y)) return Zeros(x.Width);
@@ -452,6 +512,7 @@ public sealed class TermPool
 
     public Term Not(Term x)
     {
+        Own(x);
         if (x.Kind == TermKind.Constant) return Constant(~x.Payload, x.Width);
         if (x.Kind == TermKind.Operation && x.Op == Op.Not) return x.Operands[0];
         return Make(TermKind.Operation, x.Width, [x], Op.Not);
@@ -462,6 +523,7 @@ public sealed class TermPool
 
     private Term Shift(Op op, Term x, Term amount)
     {
+        Own(x, amount);
         SameWidth(x, amount);
         if (amount.Kind != TermKind.Constant) return Make(TermKind.Operation, x.Width, [x, amount], op);
         int width = x.Width;
@@ -483,6 +545,7 @@ public sealed class TermPool
 
     public Term Eq(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (x.Kind == TermKind.Constant) (x, y) = (y, x);
         if (SameDefined(x, y)) return True;
@@ -546,6 +609,7 @@ public sealed class TermPool
     /// <summary>无符号小于。常量归到右边：c &lt; x 写成 非(x &lt; c + 1)。</summary>
     public Term Ult(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (SameDefined(x, y)) return False;
         int width = x.Width;
@@ -584,6 +648,7 @@ public sealed class TermPool
     /// <summary>有符号小于。与 0 比较就是符号位。</summary>
     public Term Slt(Term x, Term y)
     {
+        Own(x, y);
         SameWidth(x, y);
         if (SameDefined(x, y)) return False;
         int width = x.Width;
@@ -621,6 +686,7 @@ public sealed class TermPool
     /// </summary>
     public Term Rebuild(Term t, ReadOnlySpan<Term> operands)
     {
+        Own(t); Own(operands);
         Require(operands.Length == t.Operands.Length, "操作数个数须相同");
         switch (t.Kind)
         {

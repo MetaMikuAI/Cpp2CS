@@ -42,20 +42,25 @@ public enum Op : ushort
     SignExtend,
     /// <summary>比较，结果 1 位。其余方向与严格性由这三个加取反表示。</summary>
     Eq, Ult, Slt,
-    /// <summary>加法的无符号进位、有符号溢出，减法的有符号溢出，结果 1 位。</summary>
+    /// <summary>加法的无符号进位、有符号溢出，减法的有符号溢出：两个同宽的操作数，结果 1 位。</summary>
     AddCarry, AddOverflow, SubOverflow,
-    /// <summary>乘积的高半部分。</summary>
+    /// <summary>乘积的高半部分：两个同宽的操作数，结果与操作数同宽。</summary>
     UMulHigh, SMulHigh,
-    CountLeadingZeros, CountTrailingZeros, PopCount, ByteSwap, BitReverse,
+    /// <summary>位计数：一个操作数，结果的位宽由项给出。</summary>
+    CountLeadingZeros, CountTrailingZeros, PopCount,
+    /// <summary>字节逆序、位逆序：一个操作数，结果与操作数同宽；字节逆序的位宽是 8 的倍数。</summary>
+    ByteSwap, BitReverse,
+    /// <summary>浮点运算：二元的两个操作数与结果同宽，一元的一个操作数与结果同宽。</summary>
     FAdd, FSub, FMul, FDiv, FRem, FNeg, FAbs, FSqrt,
-    /// <summary>浮点比较，结果 1 位；任一操作数为 NaN 时 FEq、FLt、FLe 为 0，FUnordered 为 1。</summary>
+    /// <summary>浮点比较：两个同宽的操作数，结果 1 位；任一操作数为 NaN 时 FEq、FLt、FLe 为 0，FUnordered 为 1。</summary>
     FEq, FLt, FLe, FUnordered,
-    /// <summary>浮点格式之间的转换，目标格式由项的位宽给出。</summary>
+    /// <summary>浮点格式之间的转换：一个操作数，目标格式由项的位宽给出。</summary>
     FConvert,
+    /// <summary>有符号、无符号整数转浮点：一个操作数，目标格式由项的位宽给出。</summary>
     SToF, UToF,
-    /// <summary>浮点转整数，向零舍入；越界与 NaN 时饱和（NaN 得 0）。</summary>
+    /// <summary>浮点转整数：一个操作数，向零舍入；越界与 NaN 时饱和（NaN 得 0）。</summary>
     FToSSaturate, FToUSaturate,
-    /// <summary>浮点转有符号整数，向零舍入；越界与 NaN 时得最小负数。</summary>
+    /// <summary>浮点转有符号整数：一个操作数，向零舍入；越界与 NaN 时得最小负数。</summary>
     FToSIndefinite,
     /// <summary>目标自定义的纯运算，以代码区分。相同的代码与操作数给出相同的值，除此之外不作解释。</summary>
     Opaque,
@@ -69,9 +74,9 @@ public sealed class Term
     public TermKind Kind { get; }
     /// <summary>位宽。</summary>
     public int Width { get; }
-    /// <summary>池内的驻留序号，按首次构造的次序分配。只在同一个池内有意义。</summary>
+    /// <summary>池内的驻留序号，按首次构造的次序分配。只在同一个池内有意义，不用于排序与摘要。</summary>
     public int Id { get; internal set; } = -1;
-    /// <summary>由结构决定的散列，与构造次序、图号无关。可交换运算的操作数按它排序；散列相同时按驻留序号。</summary>
+    /// <summary>由结构决定的散列，与构造次序、图号无关。可交换运算的操作数按它排序；散列相同时逐项比较结构。</summary>
     public ulong StructuralHash { get; }
     /// <summary>项里是否含未定义的位。靠“两个操作数是同一个项”得出结论的规则，要求此项为假。</summary>
     public bool HasUndefined { get; }
@@ -82,10 +87,13 @@ public sealed class Term
     internal int B { get; }
     internal int C { get; }
     internal int D { get; }
+    /// <summary>构造它的项池。项的操作数都来自同一个池。</summary>
+    internal TermPool Pool { get; }
 
-    internal Term(TermKind kind, int width, ImmutableArray<Term> operands, Op op = Op.None, UInt128 payload = default,
+    internal Term(TermPool pool, TermKind kind, int width, ImmutableArray<Term> operands, Op op = Op.None, UInt128 payload = default,
         int a = 0, int b = 0, int c = 0, int d = 0)
     {
+        Pool = pool;
         Kind = kind;
         Width = width;
         Operands = operands;
@@ -97,8 +105,7 @@ public sealed class Term
         h = Mix(h, (ulong)kind); h = Mix(h, (ulong)width); h = Mix(h, (ulong)op);
         h = Mix(h, (ulong)payload); h = Mix(h, (ulong)(payload >> 64));
         // 图号不进入结构散列：同一段代码在不同的图号下，可交换运算的操作数次序相同。
-        bool tagged = kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result;
-        h = Mix(h, tagged ? 0u : (uint)a); h = Mix(h, (uint)b); h = Mix(h, (uint)c); h = Mix(h, (uint)d);
+        h = Mix(h, Tagged ? 0u : (uint)a); h = Mix(h, (uint)b); h = Mix(h, (uint)c); h = Mix(h, (uint)d);
         foreach (var o in operands)
         {
             undefined |= o.HasUndefined;
@@ -139,6 +146,32 @@ public sealed class Term
     public int OpaqueCode => Kind == TermKind.Operation && Op == Op.Opaque ? A : throw Wrong(TermKind.Operation);
 
     private InvalidOperationException Wrong(TermKind expected) => new($"项的种类是 {Kind}，不是 {expected}");
+
+    /// <summary>项是否带图号：入口参数、块参数与出现的结果。图号不进入结构散列与摘要。</summary>
+    internal bool Tagged => Kind is TermKind.EntryParameter or TermKind.BlockParameter or TermKind.Result;
+
+    /// <summary>
+    /// 结构上的全序：先比结构散列，散列相同时依次比种类、位宽、运算、负载、各整数字段与操作数，图号最后比。
+    /// 只取决于结构，与构造次序无关；同一张图里的项图号相同，图号不影响它们之间的次序。
+    /// </summary>
+    internal static int CompareStructure(Term x, Term y)
+    {
+        if (ReferenceEquals(x, y)) return 0;
+        int c = x.StructuralHash.CompareTo(y.StructuralHash);
+        if (c != 0) return c;
+        if ((c = x.Kind.CompareTo(y.Kind)) != 0) return c;
+        if ((c = x.Width.CompareTo(y.Width)) != 0) return c;
+        if ((c = x.Op.CompareTo(y.Op)) != 0) return c;
+        if ((c = x.Payload.CompareTo(y.Payload)) != 0) return c;
+        if (!x.Tagged && (c = x.A.CompareTo(y.A)) != 0) return c;
+        if ((c = x.B.CompareTo(y.B)) != 0) return c;
+        if ((c = x.C.CompareTo(y.C)) != 0) return c;
+        if ((c = x.D.CompareTo(y.D)) != 0) return c;
+        if ((c = x.Operands.Length.CompareTo(y.Operands.Length)) != 0) return c;
+        for (int i = 0; i < x.Operands.Length; i++)
+            if ((c = CompareStructure(x.Operands[i], y.Operands[i])) != 0) return c;
+        return x.Tagged ? x.A.CompareTo(y.A) : 0;
+    }
 
     internal bool SameStructure(Term other)
     {

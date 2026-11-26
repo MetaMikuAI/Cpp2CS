@@ -99,8 +99,8 @@ public sealed class FlowShape
         return a;
     }
 
-    /// <summary>进入某个块的全部边，保留并行边。</summary>
-    public ImmutableArray<EdgeId> InEdges(BlockId block) => inEdges[block.Index];
+    /// <summary>进入某个块的全部边，保留并行边。只在内核里使用：内核之外拿不到入边（设计 7.3）。</summary>
+    internal ImmutableArray<EdgeId> InEdges(BlockId block) => inEdges[block.Index];
 
     public BlockId Target(EdgeId edge) => Graph.Terminator(edge.Source).Exits[edge.Exit].Target;
 

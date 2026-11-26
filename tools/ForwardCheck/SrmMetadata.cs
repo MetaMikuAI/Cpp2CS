@@ -52,7 +52,8 @@ internal sealed record GenericArguments(ImmutableArray<TypeShape?> Type, Immutab
 /// <summary>
 /// 用 System.Reflection.Metadata 读托管程序集，给展开提供元数据。只在核对工具里使用；
 /// 值类型的布局在这里按顺序布局与自然对齐推算，正式的布局来自元数据模型。
-/// 实体的 Key 是定义的身份字符串的散列，与解析的次序无关。
+/// 实体的 Key 是定义的身份字符串的散列，与解析的次序无关。核心库里的基本类型、Object 与 String
+/// 用签名里基本类型代码的同一个身份，经签名与经类型定义得到同一个 Key。
 /// </summary>
 internal sealed class SrmMetadata : IDisposable
 {
@@ -105,7 +106,31 @@ internal sealed class SrmMetadata : IDisposable
         return @namespace.Length == 0 ? name : @namespace + "." + name;
     }
 
-    private static string TypeIdentity(Module module, TypeDefinitionHandle handle) => $"T:{module.Name}:{TypeName(module, handle)}";
+    // 签名里有专门编码的类型（ECMA-335 II.23.1.16 的 ELEMENT_TYPE_*）：它们在核心库里的定义与签名里的编码是同一个类型。
+    private static readonly HashSet<string> builtIn =
+    [
+        "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64",
+        "Single", "Double", "IntPtr", "UIntPtr", "Object", "String",
+    ];
+
+    private readonly Dictionary<Module, bool> core = [];
+
+    /// <summary>核心库：定义了没有基类的 System.Object 的程序集。</summary>
+    private bool IsCore(Module module)
+    {
+        if (core.TryGetValue(module, out bool known)) return known;
+        bool result = module.FindTopLevel("System", "Object") is { } handle && module.Md.GetTypeDefinition(handle).BaseType.IsNil;
+        return core[module] = result;
+    }
+
+    private string TypeIdentity(Module module, TypeDefinitionHandle handle)
+    {
+        var definition = module.Md.GetTypeDefinition(handle);
+        if (definition.GetDeclaringType().IsNil && module.Md.GetString(definition.Namespace) == "System"
+            && builtIn.Contains(module.Md.GetString(definition.Name)) && IsCore(module))
+            return "T:System." + module.Md.GetString(definition.Name);
+        return $"T:{module.Name}:{TypeName(module, handle)}";
+    }
 
     /// <summary>基类的全名，不解析到定义。</summary>
     private static string BaseName(Module module, TypeDefinition definition)
@@ -343,9 +368,10 @@ internal sealed class SrmMetadata : IDisposable
                 var (target, handle, _, _) = Parent(module, generic);
                 int count = blob.ReadCompressedInteger();
                 var decoder = new SignatureDecoder<TypeShape?, GenericArguments>(new Provider(this, module), module.Md, GenericArguments.None);
-                var arguments = ImmutableArray.CreateBuilder<TypeShape?>(count);
-                for (int i = 0; i < count; i++) arguments.Add(decoder.DecodeType(ref blob));
-                return (target, handle, arguments.MoveToImmutable(), "<" + string.Join(",", arguments.Select(t => (t?.Entity.Key ?? 0).ToString("x"))) + ">");
+                var builder = ImmutableArray.CreateBuilder<TypeShape?>(count);
+                for (int i = 0; i < count; i++) builder.Add(decoder.DecodeType(ref blob));
+                var arguments = builder.MoveToImmutable();
+                return (target, handle, arguments, "<" + string.Join(",", arguments.Select(t => (t?.Entity.Key ?? 0).ToString("x"))) + ">");
             }
             default:
                 throw Unresolved($"成员引用的所属 {parent.Kind}");
@@ -461,7 +487,7 @@ internal sealed class SrmMetadata : IDisposable
             locals = [.. decoded.Select(local => local ?? throw Unresolved("void 局部变量"))];
         }
         var code = block.GetILContent();
-        return new MethodBody(Method(module, token), locals, code, block.ExceptionRegions.Length);
+        return new MethodBody(Method(module, token), locals, code, block.ExceptionRegions.Length, block.LocalVariablesInitialized);
     }
 
     /// <summary>某个模块上的元数据视图。</summary>
