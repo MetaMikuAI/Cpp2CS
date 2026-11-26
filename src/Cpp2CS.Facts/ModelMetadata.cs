@@ -51,6 +51,20 @@ public sealed class ModelMetadata : IMetadataView
         return Shape(t);
     }
 
+    /// <summary>vm/Class.cpp 的 Class::IsAssignableFrom：普通引用类按继承层级判断，密封类只与自身相符。</summary>
+    public RuntimeTypeCondition? TypeTestCondition(EntityRef type)
+    {
+        if (type.Kind != EntityKind.Type || type.Key < 0 || type.Key >= Model.RuntimeTypes.Count
+            || EntityKeys.Element(Model.RuntimeTypes[(int)type.Key]) is not NamedType named) return null;
+        var definition = Model.Types[named.Definition];
+        if (definition.ValueType || definition.Flags.HasFlag(TypeAttributes.Interface) || definition.Parent is null
+            || definition.GenericParameters.Count != named.Arguments.Count) return null;
+        // 泛型委托可能按变体匹配。数组不是 NamedType，Nullable 是值类型。
+        if (definition.Parent is NamedType parent && IsCore(parent.Definition, "MulticastDelegate")
+            && definition.GenericParameters.Any(p => (p.Flags & GenericParameterAttributes.VarianceMask) != 0)) return null;
+        return definition.Flags.HasFlag(TypeAttributes.Sealed) ? RuntimeTypeCondition.SealedOrdinaryClass : RuntimeTypeCondition.OrdinaryClass;
+    }
+
     public TypeShape Shape(TypeReference t)
     {
         var entity = TypeEntity(t);

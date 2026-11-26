@@ -59,6 +59,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     }
 
     public RuntimeLayout Layout => RuntimeLayout.Unity2022Lp64;
+    public RuntimeTypeCondition? TypeTestCondition(EntityRef type) => metadata.TypeTestCondition(type);
 
     public string Symbol(ulong address) => symbols.GetValueOrDefault(address, $"0x{address:x}");
 
