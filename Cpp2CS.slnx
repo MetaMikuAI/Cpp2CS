@@ -3,6 +3,7 @@
     <Project Path="src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
     <Project Path="src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <Project Path="src/Cpp2CS.Snapshot/Cpp2CS.Snapshot.csproj" />
+    <Project Path="src/Cpp2CS.Target/Cpp2CS.Target.csproj" />
     <Project Path="src/Cpp2CS.Spec/Cpp2CS.Spec.csproj" />
     <Project Path="src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
   </Folder>
@@ -10,5 +11,6 @@
     <Project Path="tools/CanonicalExport/CanonicalExport.csproj" />
     <Project Path="tools/ArchCheck/ArchCheck.csproj" />
     <Project Path="tools/ForwardCheck/ForwardCheck.csproj" />
+    <Project Path="tools/LiftCheck/LiftCheck.csproj" />
   </Folder>
 </Solution>
