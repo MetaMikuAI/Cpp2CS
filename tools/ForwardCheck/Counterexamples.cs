@@ -11,12 +11,6 @@ using MethodBody = Cpp2CS.Kernel.Forward.MethodBody;
 
 namespace Cpp2CS.Tools.ForwardCheck;
 
-/// <summary>泛型实例的身份用到的夹具：同一个泛型类型的两个实例上的同名方法。</summary>
-internal static class CounterexampleBox<T>
-{
-    public static void Call() { }
-}
-
 /// <summary>
 /// 反例核对：每一项是一个具体输入，以及按出处应得的结论。出处写在各项的注释与输出里：
 /// ECMA-335 的条款、CLR 上执行同一段 IL 的结果，或 docs/前端.md、docs/设计.md 的条款。
@@ -35,8 +29,9 @@ internal static class Counterexamples
     private static readonly Slot Stack = new(SlotKind.StackPointer, 0);
     private static readonly Slot Link = new(SlotKind.ReturnAddress, 0);
 
-    public static int Run(string assemblies)
+    public static int Run(string assemblies, Dictionary<string, string> options)
     {
+        using var metadata = ModelInput.Load(assemblies, options);
         var items = new List<Item>
         {
             // ---- IL 一侧的展开 ----
@@ -87,15 +82,15 @@ internal static class Counterexamples
 
             // ECMA-335 II.25.4.4：CorILMethod_InitLocals 表示进入时初始化全部局部变量；I.12.3.2.2：是否初始化由方法的元数据说明。
             // 设置了这一位的方法读未赋值的 int32 局部变量得 0；没有设置的方法没有得出 0 的依据，不展开。
-            new("局部变量的初始化标志", "ECMA-335 II.25.4.4、I.12.3.2.2", InitLocals),
+            new("局部变量的初始化标志", "ECMA-335 II.25.4.4、I.12.3.2.2", () => InitLocals(metadata)),
 
             // ---- 核对工具的元数据 ----
 
             // docs/前端.md 第 7 节：模型里每个类型、方法、字段有一个稳定的编号。Box<int>.Call 与 Box<uint>.Call 是两个方法。
-            new("泛型实例的方法身份", "docs/前端.md 第 7 节", GenericMembers),
+            new("泛型实例的方法身份", "docs/前端.md 第 7 节", () => GenericMembers(metadata)),
 
             // docs/前端.md 第 7 节：同一个类型只有一个编号。签名里的 int32、string 与核心库里的 System.Int32、System.String 是同一个类型。
-            new("基本类型的身份", "docs/前端.md 第 7 节", () => CoreTypes(assemblies)),
+            new("基本类型的身份", "docs/前端.md 第 7 节", () => CoreTypes(metadata)),
 
             // ---- 快照的构造 ----
 
@@ -341,7 +336,7 @@ internal static class Counterexamples
     {
         var method = new MethodShape(default, false, [.. parameters ?? []], returns, VariantCondition.StaticMethod);
         var body = new MethodBody(method, [.. locals ?? []], [.. code], 0, InitLocals: true);
-        return IlExpander.Expand(body, metadata ?? new StaticFieldView(), new TermPool(), 1, 64).Graph;
+        return IlExpander.Expand(body, metadata ?? new StaticFieldView(), new FixtureTokens(), new TermPool(), 1, 64).Graph;
     }
 
     private static ImmutableArray<WalkPath> Walk(IFlowGraph graph)
@@ -371,7 +366,7 @@ internal static class Counterexamples
         return "错误的快照通过了构造";
     }
 
-    private static string? InitLocals()
+    private static string? InitLocals(SrmMetadata metadata)
     {
         string directory = Path.Combine(Path.GetTempPath(), "cpp2cs-counterexample-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -391,23 +386,22 @@ internal static class Counterexamples
             type.CreateType();
             assembly.Save(Path.Combine(directory, "InitLocalsFixture.dll"));
 
-            using var metadata = new SrmMetadata(directory, 64);
-            var module = metadata.Load("InitLocalsFixture") ?? throw new InvalidOperationException("夹具程序集没有写出");
+            using var module = new Module(Path.Combine(directory, "InitLocalsFixture.dll"));
             string? result = null;
             foreach (var handle in module.Md.MethodDefinitions)
             {
                 string name = module.Md.GetString(module.Md.GetMethodDefinition(handle).Name);
-                var body = metadata.Body(module, MetadataTokens.GetToken(handle));
+                var body = metadata.FixtureBody(module, handle);
                 if (name == "Initialized")
                 {
                     if (!body.InitLocals) return "设置了 InitLocals 的方法读出的标志为假";
-                    var returned = Walk(IlExpander.Expand(body, metadata.View(module), new TermPool(), 1, 64).Graph).Single().Outcome[0];
+                    var returned = Walk(IlExpander.Expand(body, metadata.Facts, metadata.Tokens(module), new TermPool(), 1, 64).Graph).Single().Outcome[0];
                     if (!returned.IsZero) result ??= $"设置了 InitLocals 的方法返回 {returned}";
                 }
                 else if (name == "Uninitialized")
                 {
                     if (body.InitLocals) return "没有设置 InitLocals 的方法读出的标志为真";
-                    result ??= Rejected(() => IlExpander.Expand(body, metadata.View(module), new TermPool(), 1, 64), "局部变量没有初始化的保证");
+                    result ??= Rejected(() => IlExpander.Expand(body, metadata.Facts, metadata.Tokens(module), new TermPool(), 1, 64), "局部变量没有初始化的保证");
                 }
             }
             return result;
@@ -418,36 +412,25 @@ internal static class Counterexamples
         }
     }
 
-    private static void TwoCalls()
+    private static string? GenericMembers(SrmMetadata metadata)
     {
-        CounterexampleBox<int>.Call();
-        CounterexampleBox<uint>.Call();
-    }
-
-    private static string? GenericMembers()
-    {
-        string path = typeof(Counterexamples).Assembly.Location;
-        using var metadata = new SrmMetadata(Path.GetDirectoryName(path)!, 64);
-        var module = metadata.Load(Path.GetFileNameWithoutExtension(path)) ?? throw new InvalidOperationException("读不到核对工具自己的程序集");
-        int token = typeof(Counterexamples).GetMethod(nameof(TwoCalls), BindingFlags.NonPublic | BindingFlags.Static)!.MetadataToken;
-        var calls = IlDecoder.Decode(metadata.Body(module, token).Code.AsSpan()).Where(i => i.Opcode.Canonical == "call").ToList();
-        if (calls.Count != 2) return $"夹具里有 {calls.Count} 次调用";
-        var first = metadata.Method(module, (int)calls[0].Operand).Entity;
-        var second = metadata.Method(module, (int)calls[1].Operand).Entity;
+        if (metadata.GenericMemberPair() is not { } pair) return "没有同一个方法在不同类型实例上的两个引用";
+        var tokens = metadata.Tokens(pair.Module);
+        var first = tokens.Method(pair.First);
+        var second = tokens.Method(pair.Second);
         return first != second ? null : $"两个实例上的方法都是 {first}";
     }
 
-    private static string? CoreTypes(string assemblies)
+    private static string? CoreTypes(SrmMetadata metadata)
     {
-        using var metadata = new SrmMetadata(assemblies, 64);
-        var core = metadata.Load("mscorlib") ?? throw new InvalidOperationException($"{assemblies} 里没有核心库");
+        var core = metadata.Load("mscorlib") ?? throw new InvalidOperationException("程序集目录里没有核心库");
         string? Compare(string type, string field)
         {
             var handle = core.FindTopLevel("System", type) ?? throw new InvalidOperationException($"核心库里没有 System.{type}");
             var fieldHandle = core.Md.GetTypeDefinition(handle).GetFields().FirstOrDefault(f => core.Md.GetString(core.Md.GetFieldDefinition(f).Name) == field);
             if (fieldHandle.IsNil) throw new InvalidOperationException($"System.{type} 里没有字段 {field}");
-            var bySignature = metadata.Field(core, MetadataTokens.GetToken(fieldHandle)).Type.Entity;
-            var byDefinition = metadata.Type(core, MetadataTokens.GetToken(handle)).Entity;
+            var bySignature = metadata.SignatureFieldType(core, fieldHandle);
+            var byDefinition = metadata.Tokens(core).Type(MetadataTokens.GetToken(handle));
             return bySignature == byDefinition ? null : $"System.{type}：签名得 {bySignature}，定义得 {byDefinition}";
         }
         // System.Int32 的 m_value 是签名里的 int32；System.String 的 Empty 是签名里的 string。
@@ -485,20 +468,27 @@ internal static class Counterexamples
         return forward == backward ? null : "两种构造次序的摘要不同";
     }
 
+    private sealed class FixtureTokens : ITokenResolver
+    {
+        public EntityRef Method(int token) => new(EntityKind.Method, token);
+        public EntityRef Field(int token) => new(EntityKind.Field, token);
+        public EntityRef Type(int token) => new(EntityKind.Type, token);
+    }
+
     /// <summary>字段一律是静态的、所属类有静态构造函数的元数据。</summary>
     private sealed class StaticFieldView : IMetadataView
     {
-        public TypeShape Type(int token) => Int32;
-        public FieldShape Field(int token) => new(new(EntityKind.Field, 11), default, Int32, IsStatic: true, HasInitializer: true, PreciseInitialization: true, -1);
-        public MethodShape Method(int token) => new(new(EntityKind.Method, 17), false, [], null, VariantCondition.StaticMethod);
+        public TypeShape Type(EntityRef entity) => Int32;
+        public FieldShape Field(EntityRef entity) => new(entity, default, Int32, IsStatic: true, HasInitializer: true, PreciseInitialization: true, -1);
+        public MethodShape Method(EntityRef entity) => new(entity, false, [], null, VariantCondition.StaticMethod);
     }
 
     /// <summary>方法一律是接口上的、无参无返回值的实例方法。</summary>
     private sealed class InterfaceView : IMetadataView
     {
-        public TypeShape Type(int token) => Int32;
-        public FieldShape Field(int token) => throw new ExpansionException("夹具里没有字段", "");
-        public MethodShape Method(int token) => new(new(EntityKind.Method, 5), true, [Reference], null, VariantCondition.InterfaceMethod);
+        public TypeShape Type(EntityRef entity) => Int32;
+        public FieldShape Field(EntityRef entity) => throw new ExpansionException("夹具里没有字段", "");
+        public MethodShape Method(EntityRef entity) => new(entity, true, [Reference], null, VariantCondition.InterfaceMethod);
     }
 
     /// <summary>调用方持有、构造之后仍可改动的出现。</summary>

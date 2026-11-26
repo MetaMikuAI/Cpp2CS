@@ -25,7 +25,7 @@ internal static class Program
         new("Cpp2CS.Target", ["Cpp2CS.Snapshot", "Cpp2CS.Input"], Trusted: true, ForbidReflection: false),
         new("Cpp2CS.Spec", ["Cpp2CS.Snapshot"], Trusted: true, ForbidReflection: false),
         new("Cpp2CS.Kernel", ["Cpp2CS.Snapshot", "Cpp2CS.Spec"], Trusted: true, ForbidReflection: false),
-        new("Cpp2CS.Facts", ["Cpp2CS.Kernel"], Trusted: true, ForbidReflection: false),
+        new("Cpp2CS.Facts", ["Cpp2CS.Kernel", "Cpp2CS.Model"], Trusted: true, ForbidReflection: false),
         new("Cpp2CS.Discovery", ["Cpp2CS.Kernel"], Trusted: false, ForbidReflection: true),
         new("Cpp2CS.Output", ["Cpp2CS.Kernel"], Trusted: true, ForbidReflection: false),
     ];

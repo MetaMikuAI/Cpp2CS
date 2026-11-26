@@ -60,7 +60,7 @@ public sealed class Il2CppInput
                 types[t] = new(metadata.Name(Int(row, 4)), metadata.Name(Int(row)), declaringType,
                     parent == -1 ? null : runtime.At(parent), (TypeAttributes)Elf64.U32(row, 28), valueType,
                     Enumerable.Range(0, nInterfaces).Select(j => runtime.At(Int(metadata.Row(Table.Interface, firstInterface + j)))).ToArray(),
-                    runtime.Parameters(container, false, t), firstField, nFields, firstMethod, nMethods);
+                    runtime.Parameters(container, false, t), firstField, nFields, firstMethod, nMethods, Elf64.U32(row, 84));
                 for (int j = 0; j < nFields; j++)
                 {
                     int index = firstField + j;
@@ -69,7 +69,7 @@ public sealed class Il2CppInput
                     int type = Int(f, 4);
                     var flags = (FieldAttributes)runtime.Flags(type);
                     var (storage, offset) = FieldLayout(elf, fieldTables[t], j, flags, valueType, container != -1);
-                    fields[index] = new(t, j, metadata.Name(Int(f)), runtime.At(type), flags, storage, offset);
+                    fields[index] = new(t, j, metadata.Name(Int(f)), runtime.At(type), flags, storage, offset, Elf64.U32(f, 8));
                 }
                 for (int j = 0; j < nMethods; j++)
                 {

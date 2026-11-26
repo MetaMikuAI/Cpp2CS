@@ -30,6 +30,7 @@ public sealed class IlExpander
 
     private readonly MethodBody body;
     private readonly IMetadataView metadata;
+    private readonly ITokenResolver tokens;
     private readonly TermPool terms;
     private readonly int pointerBits;
     private readonly FlowBuilder<TemplateEffect> flow;
@@ -41,10 +42,11 @@ public sealed class IlExpander
     private readonly List<(int Offset, string Entry)> used = [];
     private readonly List<int> blockOffsets = [-1];
 
-    private IlExpander(MethodBody body, IMetadataView metadata, TermPool terms, int graph, int pointerBits)
+    private IlExpander(MethodBody body, IMetadataView metadata, ITokenResolver tokens, TermPool terms, int graph, int pointerBits)
     {
         this.body = body;
         this.metadata = metadata;
+        this.tokens = tokens;
         this.terms = terms;
         this.pointerBits = pointerBits;
         flow = new FlowBuilder<TemplateEffect>(terms, graph);
@@ -53,11 +55,11 @@ public sealed class IlExpander
     }
 
     /// <summary>展开一个方法体。不能展开时抛出 <see cref="ExpansionException"/>，写明原因。</summary>
-    public static Expansion Expand(MethodBody body, IMetadataView metadata, TermPool terms, int graph, int pointerBits)
+    public static Expansion Expand(MethodBody body, IMetadataView metadata, ITokenResolver tokens, TermPool terms, int graph, int pointerBits)
     {
         if (graph <= 0) throw new ArgumentException("模板一侧的图号须大于 0");
         if (body.ExceptionRegions > 0) throw new ExpansionException("异常处理区域不在首批范围内", $"{body.ExceptionRegions} 个区域");
-        var expander = new IlExpander(body, metadata, terms, graph, pointerBits);
+        var expander = new IlExpander(body, metadata, tokens, terms, graph, pointerBits);
         return expander.Run();
     }
 
@@ -229,9 +231,9 @@ public sealed class IlExpander
         int token = unchecked((int)instruction.Operand);
         switch (opcode.Operand)
         {
-            case OperandKind.Method: context.Method = metadata.Method(token); context.Subject = context.Method.Return; break;
-            case OperandKind.Field: context.Field = metadata.Field(token); context.Subject = context.Field.Type; break;
-            case OperandKind.Type: context.Type = metadata.Type(token); break;
+            case OperandKind.Method: context.Method = metadata.Method(tokens.Method(token)); context.Subject = context.Method.Return; break;
+            case OperandKind.Field: context.Field = metadata.Field(tokens.Field(token)); context.Subject = context.Field.Type; break;
+            case OperandKind.Type: context.Type = metadata.Type(tokens.Type(token)); break;
         }
         if (opcode.Canonical is "ldarg" or "starg")
             context.Subject = Indexed(body.Method.Parameters, instruction, "形参");

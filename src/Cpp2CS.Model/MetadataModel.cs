@@ -16,12 +16,12 @@ public sealed record AssemblyDefinition(string Name, string Culture, int Major, 
 public sealed record ImageDefinition(string Name, int Assembly, int FirstType, int TypeCount);
 public sealed record TypeDefinition(string Namespace, string Name, int? DeclaringType, TypeReference? Parent,
     TypeAttributes Flags, bool ValueType, IReadOnlyList<TypeReference> Interfaces, IReadOnlyList<GenericParameter> GenericParameters,
-    int FirstField, int FieldCount, int FirstMethod, int MethodCount);
+    int FirstField, int FieldCount, int FirstMethod, int MethodCount, uint Token);
 
 public enum FieldStorage { Instance, Static, ThreadStatic, Literal }
 /// <summary>偏移相对实例数据、静态区或线程静态区。开放泛型没有实例布局。</summary>
 public sealed record FieldDefinition(int Owner, int Ordinal, string Name, TypeReference Type, FieldAttributes Flags,
-    FieldStorage Storage, int? Offset);
+    FieldStorage Storage, int? Offset, uint Token);
 public sealed record ParameterDefinition(string Name, TypeReference Type, ParameterAttributes Flags);
 public sealed record MethodDefinition(int Owner, string Name, uint Token, MethodAttributes Flags, MethodImplAttributes ImplFlags,
     TypeReference ReturnType, IReadOnlyList<ParameterDefinition> Parameters, IReadOnlyList<GenericParameter> GenericParameters);

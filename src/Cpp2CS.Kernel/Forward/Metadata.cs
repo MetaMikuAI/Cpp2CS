@@ -19,6 +19,8 @@ public sealed record TypeShape(StackKind Kind, int StorageBits, bool Signed, Ent
 /// <summary>方法的形状。Parameters 含 this（实例方法的第 0 个）；Return 为空表示 void。</summary>
 public sealed record MethodShape(EntityRef Entity, bool HasThis, ImmutableArray<TypeShape> Parameters, TypeShape? Return, VariantCondition Dispatch)
 {
+    /// <summary>方法是所属类的类型初始化器。</summary>
+    public bool IsTypeInitializer { get; init; }
     /// <summary>所属的类。</summary>
     public EntityRef DeclaringType { get; init; }
     /// <summary>所属的类有静态构造函数。</summary>
@@ -32,7 +34,11 @@ public sealed record MethodShape(EntityRef Entity, bool HasThis, ImmutableArray<
 /// OffsetBits：值类型的实例字段在值里的位偏移，未知时为 -1。
 /// </summary>
 public sealed record FieldShape(EntityRef Entity, EntityRef DeclaringType, TypeShape Type, bool IsStatic, bool HasInitializer,
-    bool PreciseInitialization, int OffsetBits);
+    bool PreciseInitialization, int OffsetBits)
+{
+    /// <summary>相对对象指针或普通静态区的字节偏移。</summary>
+    public int? Offset { get; init; }
+}
 
 /// <summary>
 /// 方法体：签名、局部变量、IL 字节、异常处理区域的个数，以及方法头是否设置了 InitLocals（局部变量在进入时清零，ECMA-335 II.25.4.4）。
@@ -44,14 +50,22 @@ public sealed record MethodBody(MethodShape Method, ImmutableArray<TypeShape> Lo
 }
 
 /// <summary>
-/// 展开时对元数据的全部需求。记号是方法体里的元数据记号；解析不了时抛出 <see cref="ExpansionException"/>。
+/// 按模型实体读取形状。缺少依据时抛出 <see cref="ExpansionException"/>。
 /// 实体身份由实现分配，内核只比较与传递。
 /// </summary>
 public interface IMetadataView
 {
-    MethodShape Method(int token);
-    FieldShape Field(int token);
-    TypeShape Type(int token);
+    MethodShape Method(EntityRef entity);
+    FieldShape Field(EntityRef entity);
+    TypeShape Type(EntityRef entity);
+}
+
+/// <summary>把一个模块内的记号解析为模型实体。</summary>
+public interface ITokenResolver
+{
+    EntityRef Method(int token);
+    EntityRef Field(int token);
+    EntityRef Type(int token);
 }
 
 /// <summary>方法体不能按目录展开。Reason 是原因的类别，Offset 是指令的偏移（与指令无关时为 -1）。</summary>

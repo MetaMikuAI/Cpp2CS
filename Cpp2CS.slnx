@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Cpp2CS.Facts/Cpp2CS.Facts.csproj" />
     <Project Path="src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
     <Project Path="src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <Project Path="src/Cpp2CS.Snapshot/Cpp2CS.Snapshot.csproj" />
