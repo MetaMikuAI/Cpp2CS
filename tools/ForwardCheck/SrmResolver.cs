@@ -40,16 +40,20 @@ internal sealed partial class SrmMetadata
         return new(new(Facts.Model.Methods[m.Definition].Owner, m.TypeArguments), m);
     }
 
-    private sealed class Provider(SrmMetadata owner, Module module) : ISignatureTypeProvider<Sig, Scope?>
+    private sealed class Provider(ModelMetadata facts, Func<TypeDefinitionHandle, int> definition,
+        Func<TypeReferenceHandle, int> reference) : ISignatureTypeProvider<Sig, Scope?>
     {
-        private Sig Named(int i) => new($"D{i}", new M.NamedType(i, []));
-        public Sig GetPrimitiveType(PrimitiveTypeCode code) => Named(owner.Facts.CoreType(code.ToString()).Definition);
-        public Sig GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle h, byte kind) => Named(Index(owner.types, module, h));
-        public Sig GetTypeFromReference(MetadataReader reader, TypeReferenceHandle h, byte kind)
+        public Provider(SrmMetadata owner, Module module) : this(owner.Facts, h => Index(owner.types, module, h), h =>
         {
             var (target, handle) = owner.Resolve(module, h);
-            return Named(Index(owner.types, target, handle));
-        }
+            return Index(owner.types, target, handle);
+        }) { }
+
+        private Sig Named(int i) => new($"D{i}", new M.NamedType(i, []));
+        public Sig GetPrimitiveType(PrimitiveTypeCode code) => Named(facts.CoreType(code.ToString()).Definition);
+        public Sig GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle h, byte kind) => Named(definition(h));
+        public Sig GetTypeFromReference(MetadataReader reader, TypeReferenceHandle h, byte kind)
+            => Named(reference(h));
         public Sig GetTypeFromSpecification(MetadataReader r, Scope? c, TypeSpecificationHandle h, byte kind) =>
             r.GetTypeSpecification(h).DecodeSignature(this, c);
         public Sig GetGenericInstantiation(Sig definition, ImmutableArray<Sig> args) =>

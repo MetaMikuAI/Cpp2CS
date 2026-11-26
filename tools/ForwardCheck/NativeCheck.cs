@@ -27,14 +27,14 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     private readonly Dictionary<ulong, ElfRela> relocations = [];
     private readonly byte[] file;
 
-    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string symbolFile, byte[] file)
+    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string? symbolFile, byte[] file)
     {
         this.input = input;
         this.metadata = metadata;
         this.file = file;
         foreach (var relocation in input.Elf.Relocations) relocations[relocation.Address] = relocation;
         native = new(metadata, input.Code);
-        ReadSymbols(symbolFile);
+        if (symbolFile != null) ReadSymbols(symbolFile);
     }
 
     /// <summary>读符号表（.symtab）：函数符号的地址到名字。</summary>

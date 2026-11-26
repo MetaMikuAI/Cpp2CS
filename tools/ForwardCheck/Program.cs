@@ -25,6 +25,8 @@ internal static class Program
         for (int i = 1; i + 1 < arguments.Length; i += 2) options[arguments[i]] = arguments[i + 1];
         switch (arguments[0])
         {
+            case "sample":
+                return Sample.Run(arguments);
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
                 using (var metadata = ModelInput.Load(assemblies, options))
                     return arguments[0] == "keys" ? MetadataAudit.Keys(metadata, options.GetValueOrDefault("--order") == "reverse", options.GetValueOrDefault("--keys-file"))

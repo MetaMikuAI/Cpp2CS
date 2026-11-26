@@ -17,6 +17,9 @@ internal static class ModelInput
     }
 
     public static SrmMetadata Open(string assemblies, Il2CppInput input, byte[] file)
+        => new(assemblies, Facts(input, file, assemblies));
+
+    public static ModelMetadata Facts(Il2CppInput input, byte[] file, string? assemblies = null)
     {
         // vm/GlobalMetadata.cpp::FromTypeDefinition：登记表中每个定义有一个含对象头的 instance_size。
         var model = input.Model;
@@ -25,7 +28,7 @@ internal static class ModelInput
         var layouts = new LayoutDefinition[model.Types.Count];
         foreach (var image in model.Images)
         {
-            string path = Path.Combine(assemblies, image.Name);
+            string? path = assemblies == null ? null : Path.Combine(assemblies, image.Name);
             using var module = File.Exists(path) ? new Module(path) : null;
             if (module != null && module.Image != image.Name) throw new InvalidDataException($"程序集映像名称不符 {image.Name}");
             for (int i = image.FirstType; i < image.FirstType + image.TypeCount; i++)
@@ -48,6 +51,6 @@ internal static class ModelInput
             }
         }
         var raw = Enumerable.Range(0, model.Fields.Count).Select(i => input.FieldOffsetSource(i)?.Value).ToArray();
-        return new(assemblies, new ModelMetadata(new EntityKeys(model), new(layouts, raw)));
+        return new ModelMetadata(new EntityKeys(model), new(layouts, raw));
     }
 }
