@@ -53,14 +53,23 @@ public sealed class Explanation
 /// </summary>
 public static class Selection
 {
-    public static Explanation Select(FactView facts, IReadOnlyList<ProofOutcome> outcomes, int budget = 2_000)
+    public static Explanation Select(FactView facts, IReadOnlyList<ProofOutcome> outcomes, int budget = 2_000) =>
+        Select(facts, outcomes, null, budget)!;
+
+    /// <summary>
+    /// 指定一条必须采纳的声明再选择：其余声明里与它占用重叠的不参加。没有一组满足约束的声明包含它时为空。
+    /// 供验证使用（设计第 15 节的对抗声明）：一条拿到凭据的声明并入解释之后，写出的方法体仍须与真实 IL 等价。
+    /// </summary>
+    public static Explanation? Select(FactView facts, IReadOnlyList<ProofOutcome> outcomes, Certificate? pinned, int budget = 2_000)
     {
         var graph = facts.Effects;
         string digest = graph.Snapshot.DigestText;
         var certificates = new List<Certificate>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var outcome in outcomes)
-            if (outcome.Certificate is { } certificate && certificate.SnapshotDigest == digest && seen.Add(certificate.Claim.Key)) certificates.Add(certificate);
+            if (outcome.Certificate is { } certificate && certificate.SnapshotDigest == digest && seen.Add(certificate.Claim.Key)
+                && (pinned is null || (certificate != pinned && !certificate.Claim.Occupied.Any(pinned.Claim.Occupied.Contains)))) certificates.Add(certificate);
+        if (pinned is not null && pinned.SnapshotDigest != digest) return null;
         var rule = new Dictionary<Certificate, int>();
         foreach (var certificate in certificates) rule[certificate] = OperationCatalog.Entries.IndexOf(OperationCatalog.Get(certificate.Claim.Operation));
         certificates.Sort((a, b) => rule[a] != rule[b] ? rule[a].CompareTo(rule[b]) : string.CompareOrdinal(a.Claim.Key, b.Claim.Key));
@@ -71,16 +80,17 @@ public static class Selection
         // 试写：不满足约束时为空；否则是这组声明写出之后的洞。
         IReadOnlyList<Hole>? Evaluate(IReadOnlyList<Certificate> selection)
         {
+            if (pinned is not null) selection = [.. selection, pinned];
             if (!Consistent(graph, selection)) return null;
             evaluations++;
             var writer = new Writer(graph, facts.Metadata, selection, all);
             writer.Run();
             return writer.Unwritable.Count > 0 ? null : writer.Holes;
         }
-        static int Count(IReadOnlyList<Hole> holes) => holes.Count(h => !h.Derived);
+        static int Count(IReadOnlyList<Hole>? holes) => holes?.Count(h => !h.Derived) ?? int.MaxValue;
 
         var current = new List<Certificate>();
-        var holes = Evaluate(current)!;
+        var holes = Evaluate(current);
         foreach (int level in rule.Values.Distinct().Order())
         {
             if (Count(holes) == 0) break;
@@ -125,6 +135,8 @@ public static class Selection
                 if (best is not null) (current, holes) = ([.. others, .. best], bestHoles);
             }
         }
+        if (holes is null) return null;
+        if (pinned is not null) current.Add(pinned);
         current.Sort((a, b) => string.CompareOrdinal(a.Claim.Key, b.Claim.Key));
         return new Explanation(graph, facts.Metadata, all, [.. current], [.. holes], inexact, evaluations);
     }

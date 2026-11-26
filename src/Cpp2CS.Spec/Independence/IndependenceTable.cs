@@ -39,12 +39,6 @@ public static class IndependenceTable
         new("throw-throw", EffectClass.ConditionalThrow, EffectClass.ConditionalThrow, IndependenceCondition.SameException,
             "两个检查同时成立时抛出的是同一种运行时异常，分不出先后；运行时构造的同种异常彼此不可区分（设计 16.2）",
             "checks/ArrayBounds：两次越界检查共用一个只抛出尾"),
-        new("read-write", EffectClass.Read, EffectClass.Write, IndependenceCondition.LocationsDisjoint,
-            "位置不重叠时写入不改变读取的结果（设计 7.4 的别名判定）；ECMA-335 I.12.6.4：对不同位置的访问互不影响",
-            "fields/WriteArray 一类：同一对象上常量偏移不同的两个位置"),
-        new("write-write", EffectClass.Write, EffectClass.Write, IndependenceCondition.LocationsDisjoint,
-            "位置不重叠时两次写入的结果与次序无关（设计 7.4 的别名判定）",
-            "inlining/PushOnce 一类：计数字段与数组元素的两次写入"),
     ];
 
     public static ImmutableArray<IndependenceRow> Rows => rows;

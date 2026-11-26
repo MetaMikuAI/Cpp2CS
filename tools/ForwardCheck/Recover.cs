@@ -44,6 +44,12 @@ internal static partial class Recover
 
         IDiscoverer[] discoverers = [new GenericDiscoverer()];
         int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
+        var adversary = new Adversary();
+        // 交叉对照的素材：已证明等价的用例的恢复结果，与签名相同的另一个用例的真实 IL 对照，应当被反驳。
+        var recoveredBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens)>();
+        var realBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens, TermPool Terms, int PointerBits)>();
+        static string Signature(MethodShape shape) =>
+            $"{shape.HasThis}({string.Join(",", shape.Parameters.Select(p => $"{p.Kind}/{p.StorageBits}/{p.Signed}/{p.TwoValued}"))})→{shape.Return?.Kind}/{shape.Return?.StorageBits}";
         var byReason = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var refuted = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var rows = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
@@ -150,6 +156,20 @@ internal static partial class Recover
             }
             if (verdict.Length == 0) equivalent++;
             else different++;
+            // 对抗声明：只在恢复结果已被真实 IL 证明等价的用例上做，参照是这份解释。
+            if (verdict.Length == 0)
+            {
+                recoveredBodies.Add((name, Signature(real.Method), recovered, tokens));
+                realBodies.Add((name, Signature(real.Method), real, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, snapshot.PointerBits));
+            }
+            if (verdict.Length == 0)
+                adversary.Run(name, view, context, explanation, outcomes, candidate =>
+                {
+                    var (body2, tokens2) = candidate.Encode()!.Value;
+                    var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
+                    var actual = IlExpander.Expand(body2, entities, tokens2, snapshot.Terms, 2, snapshot.PointerBits);
+                    return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts).Verdict == Verdict.Proved;
+                });
             lines.Add($"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
                 + $"、指令 {body.Instructions.Count(i => i.Opcode[0] != '.')} 条{(verdict.Length == 0 ? "" : "；" + Short(verdict))}");
         }
@@ -160,7 +180,23 @@ internal static partial class Recover
         Console.WriteLine($"  被反驳的声明按层与义务：{string.Join("，", refuted.Select(k => $"{k.Key} {k.Value}"))}");
         Console.WriteLine($"  用到的独立关系的行：{string.Join("，", rows.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
         foreach (string line in lines.Order(StringComparer.Ordinal)) Console.WriteLine(line);
-        return different == 0 ? 0 : 1;
+
+        int pairs = 0, rejected = 0, number = 3;
+        var passed = new List<string>();
+        foreach (var expected in realBodies)
+            foreach (var other in recoveredBodies)
+            {
+                if (other.Name == expected.Name || other.Signature != expected.Signature) continue;
+                pairs++;
+                var left = IlExpander.Expand(expected.Body, metadata.Facts, expected.Tokens, expected.Terms, number++, expected.PointerBits);
+                var right = IlExpander.Expand(other.Body, entities, other.Tokens, expected.Terms, number++, expected.PointerBits);
+                if (CoExecution.Equivalent(left.Graph, right.Graph, expected.Body, facts).Verdict == Verdict.Proved) passed.Add($"{expected.Name} 的真实 IL ≡ {other.Name} 的恢复结果");
+                else rejected++;
+            }
+        Console.WriteLine($"交叉对照：{pairs} 对（一个用例的真实 IL 配上签名相同的另一个用例的恢复结果），被反驳 {rejected} 对，被证明 {passed.Count} 对");
+        foreach (string line in passed) Console.WriteLine($"  被证明：{line}");
+        adversary.Report();
+        return different == 0 && adversary.Failures == 0 ? 0 : 1;
     }
 
     private static void Tally(SortedDictionary<string, int> counts, string key) => counts[key] = counts.GetValueOrDefault(key) + 1;

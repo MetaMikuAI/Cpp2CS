@@ -76,12 +76,13 @@ internal static class Program
             "InitBlock", "InitBlockUnaligned"]),
     ];
 
-    // 现在还没有检查对象的条目，列出来以免被当成已经检查过。
-    private static readonly string[] pending =
-    [
-        "入边与来源图的遍历接口不在只读查询面上（只读查询面尚未建立；这些成员不公开另有一条检查）",
-        "下降的代码不引用走查与独立关系（下降尚未建立）",
-    ];
+    // 下降只读解释与事实，照着写出（设计第 10 节）：这些类型（连同嵌套类型）的方法体不引用走查、证明入口、来源关系与独立关系表。
+    private static readonly (string Assembly, string[] Types, string[] Forbidden) lowering =
+        ("Cpp2CS.Kernel", ["Cpp2CS.Kernel.Writer", "Cpp2CS.Kernel.Lowering", "Cpp2CS.Kernel.ManagedBody"],
+        ["Cpp2CS.Kernel.Engine.CoExecution", "Cpp2CS.Kernel.Proof", "Cpp2CS.Kernel.Sources.ValueSources", "Cpp2CS.Spec.Independence."]);
+
+    // 现在还没有检查对象的条目，列出来以免被当成已经检查过。只读查询面就是内核公开的成员：入边与来源关系不在其中由第六项检查。
+    private static readonly string[] pending = [];
 
     /// <summary>一份产物。</summary>
     private sealed record Artifact(string Path, string Name, Guid Version, PEReader Pe, MetadataReader Md);
@@ -194,7 +195,34 @@ internal static class Program
             }
         }
 
+        // 七、下降的代码不引用走查与独立关系。
+        var lowered = new HashSet<string>();
+        foreach (var artifact in artifacts)
+        {
+            if (artifact.Name != lowering.Assembly) continue;
+            var md = artifact.Md;
+            foreach (var handle in md.TypeDefinitions)
+            {
+                var type = md.GetTypeDefinition(handle);
+                string full = FullName(md, type);
+                string? root = Array.Find(lowering.Types, t => full == t || full.StartsWith(t + "/", StringComparison.Ordinal));
+                if (root is null) continue;
+                if (lowered.Add(root)) checks++;
+                foreach (var methodHandle in type.GetMethods())
+                {
+                    var method = md.GetMethodDefinition(methodHandle);
+                    if (method.RelativeVirtualAddress == 0) continue;
+                    foreach (string referenced in Referenced(md, artifact.Pe.GetMethodBody(method.RelativeVirtualAddress)))
+                        if (lowering.Forbidden.Any(f => f.EndsWith('.') ? referenced.StartsWith(f, StringComparison.Ordinal)
+                            : referenced == f || referenced.StartsWith(f + "/", StringComparison.Ordinal)))
+                            violations.Add($"下降的代码 {full}.{md.GetString(method.Name)} 引用了 {referenced}");
+                }
+            }
+        }
+
         var seen = artifacts.Select(a => a.Name).Distinct().Order(StringComparer.Ordinal).ToList();
+        foreach (string type in lowering.Types)
+            if (seen.Contains(lowering.Assembly) && !lowered.Contains(type)) absent.Add($"{type} 不引用走查与独立关系（类型尚未建立）");
         foreach (var layer in layers)
             if (!seen.Any(s => s == layer.Name || s.StartsWith(layer.Name + ".", StringComparison.Ordinal))) absent.Add($"程序集 {layer.Name} 的各条规则（程序集尚未建立）");
         foreach (var item in sealedConstruction)
@@ -211,6 +239,49 @@ internal static class Program
         foreach (var artifact in artifacts) artifact.Pe.Dispose();
         return violations.Count == 0 ? 0 : 1;
     }
+
+    private static readonly Dictionary<ushort, System.Reflection.Emit.OperandType> operandTypes = typeof(System.Reflection.Emit.OpCodes)
+        .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+        .Select(f => (System.Reflection.Emit.OpCode)f.GetValue(null)!).ToDictionary(o => unchecked((ushort)o.Value), o => o.OperandType);
+
+    /// <summary>一个方法体里的指令引用到的类型：被调方法与被访问字段所属的类型，以及直接引用的类型。</summary>
+    private static IEnumerable<string> Referenced(MetadataReader md, MethodBodyBlock body)
+    {
+        var il = body.GetILReader();
+        var names = new HashSet<string>();
+        while (il.RemainingBytes > 0)
+        {
+            ushort code = il.ReadByte();
+            if (code == 0xFE) code = (ushort)(0xFE00 | il.ReadByte());
+            switch (operandTypes[code])
+            {
+                case System.Reflection.Emit.OperandType.InlineNone: break;
+                case System.Reflection.Emit.OperandType.ShortInlineBrTarget or System.Reflection.Emit.OperandType.ShortInlineI
+                    or System.Reflection.Emit.OperandType.ShortInlineVar: il.ReadByte(); break;
+                case System.Reflection.Emit.OperandType.InlineVar: il.ReadUInt16(); break;
+                case System.Reflection.Emit.OperandType.InlineI8 or System.Reflection.Emit.OperandType.InlineR: il.ReadInt64(); break;
+                case System.Reflection.Emit.OperandType.InlineSwitch: for (uint n = il.ReadUInt32(); n > 0; n--) il.ReadInt32(); break;
+                case System.Reflection.Emit.OperandType.InlineMethod or System.Reflection.Emit.OperandType.InlineField
+                    or System.Reflection.Emit.OperandType.InlineType or System.Reflection.Emit.OperandType.InlineTok:
+                    if (Owner(md, System.Reflection.Metadata.Ecma335.MetadataTokens.EntityHandle(il.ReadInt32())) is { } owner) names.Add(owner);
+                    break;
+                default: il.ReadInt32(); break;
+            }
+        }
+        return names;
+    }
+
+    /// <summary>一个记号所属的类型的全名；泛型实例与数组等构造出的类型不展开。</summary>
+    private static string? Owner(MetadataReader md, EntityHandle handle) => handle.Kind switch
+    {
+        HandleKind.TypeDefinition => FullName(md, md.GetTypeDefinition((TypeDefinitionHandle)handle)),
+        HandleKind.TypeReference => FullName(md, md.GetTypeReference((TypeReferenceHandle)handle)),
+        HandleKind.MethodDefinition => FullName(md, md.GetTypeDefinition(md.GetMethodDefinition((MethodDefinitionHandle)handle).GetDeclaringType())),
+        HandleKind.FieldDefinition => FullName(md, md.GetTypeDefinition(md.GetFieldDefinition((FieldDefinitionHandle)handle).GetDeclaringType())),
+        HandleKind.MemberReference => Owner(md, md.GetMemberReference((MemberReferenceHandle)handle).Parent),
+        HandleKind.MethodSpecification => Owner(md, md.GetMethodSpecification((MethodSpecificationHandle)handle).Method),
+        _ => null,
+    };
 
     /// <summary>对别的程序集可见：公开、受保护，或受保护与程序集内二者之一。</summary>
     private static bool Exposed(MethodAttributes attributes) =>
