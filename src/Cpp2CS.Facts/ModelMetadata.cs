@@ -41,14 +41,11 @@ public sealed class ModelMetadata : IMetadataView
     private bool IsCore(int index, string name) => core.TryGetValue(name, out int i) && i == index;
     public NamedType CoreType(string name) => core.TryGetValue(name, out int i) ? new(i, []) : throw Missing($"核心库类型 {name}");
     internal static ExpansionException Missing(string what) => new("元数据事实不足", what);
-    public EntityRef TypeEntity(TypeReference t) => new(EntityKind.Type, Keys.TypeKey(t) ?? throw Missing($"运行时类型表缺少 {t}"));
+    public EntityRef TypeEntity(TypeReference t) => new(EntityKind.Type, Keys.TypeKey(t) ?? throw Missing($"模型缺少类型结构 {EntityKeys.Structure(t)}"));
 
     public TypeShape Type(EntityRef entity)
     {
-        if (entity.Kind != EntityKind.Type || entity.Key < 0 || entity.Key >= Model.RuntimeTypes.Count) throw Missing($"类型实体 {entity}");
-        var t = EntityKeys.Element(Model.RuntimeTypes[(int)entity.Key]);
-        if (TypeEntity(t) != entity) throw Missing($"非规范类型实体 {entity}");
-        return Shape(t);
+        return Shape(Keys.DescribeType(entity) ?? throw Missing($"未知或非规范类型实体 {entity}"));
     }
 
     /// <summary>vm/Class.cpp 的 Class::IsAssignableFrom：普通引用类按继承层级判断，密封类只与自身相符。</summary>
