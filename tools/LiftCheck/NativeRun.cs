@@ -21,7 +21,6 @@ internal sealed unsafe class NativeRun : IDisposable
     readonly int budget;
     readonly TextWriter? instructions;
     readonly UndefinedSource? undefined;
-    ulong defined = 0xfful | 1ul << 8 | 1ul << 31 | 0xfful << 32;
     readonly IReadOnlyDictionary<ulong, JumpTableInfo>? tables;
     readonly HashSet<ulong>? tableLoads;
     (ulong Pc, ulong Address, int Bytes)? lastTableRead;
@@ -103,7 +102,7 @@ internal sealed unsafe class NativeRun : IDisposable
         Arg(31);
         void Arg(int r)
         {
-            if ((defined & (1ul << r)) != 0) trace.Add("实参", width: r >= 32 ? 128 : 64, value: Get(r), slot: r);
+            trace.Add("实参", width: r >= 32 ? 128 : 64, value: Get(r), slot: r);
         }
         calls++;
         for (int r = 0; r < 64; r++)
@@ -115,7 +114,6 @@ internal sealed unsafe class NativeRun : IDisposable
         }
         ulong flags = EnvironmentState.Mix(seed + (uint)calls) & 0xf0000000;
         Status(uc_reg_write(engine, 3, &flags));
-        defined = 3ul | 0xful << 32 | 1ul << 31;
     }
     void End(string kind)
     {
@@ -131,16 +129,33 @@ internal sealed unsafe class NativeRun : IDisposable
         for (int r = 19; r <= 29; r++) Slot(r, 64, Get(r));
         for (int r = 40; r < 48; r++) Slot(r, 64, (ulong)Get(r));
     }
+    void JumpOutside(ulong target)
+    {
+        ulong link = (ulong)Get(30);
+        EventCall(target);
+        if (link == EnvironmentState.Register(seed, 30)) Return(link);
+        else if (link >= frame.Start && link < frame.End)
+        {
+            resume = link;
+            uc_emu_stop(engine);
+        }
+        else
+        {
+            trace.Error = "跳转调用返回地址越出函数且非入口返回地址";
+            trace.Diagnostic = $"PC {pc:x}，目标 {target:x}，返回地址 {link:x}";
+            uc_emu_stop(engine);
+        }
+    }
     static int BranchReg(string op) => op switch { "lr" => 30, "fp" => 29, "xzr" => -1, _ => int.Parse(op.AsSpan(1)) };
     void OnCode(nint _, ulong address, uint size, nint data)
     {
         if (vectorTransfers != 0 || lowHalf != null) { trace.Error = "Q 访存回调缺失"; uc_emu_stop(engine); return; }
         pc = trace.Pc = address;
-        if (++steps > budget) { trace.Exhausted = true; uc_emu_stop(engine); return; }
         if (address < frame.Start || address >= frame.End)
         {
-            var link = Get(30); EventCall(address); Return(link); return;
+            JumpOutside(address); return;
         }
+        if (++steps > budget) { trace.Exhausted = true; uc_emu_stop(engine); return; }
         uint word = 0; Status(uc_mem_read(engine, address, &word, 4));
         executed.Add(word);
         var i = disassembly.At(address, word);
@@ -177,10 +192,13 @@ internal sealed unsafe class NativeRun : IDisposable
                 trace.Add("表项", pc, index, Get(BranchReg(i.Operands)));
                 lastTableRead = null;
                 break;
+            case "br":
+                ulong dest = BranchReg(i.Operands) is int reg && reg >= 0 ? (ulong)Get(reg) : 0;
+                if (dest < frame.Start || dest >= frame.End) JumpOutside(dest);
+                break;
             case "ret":
                 Return(i.Operands.Length == 0 ? Get(30) : BranchReg(i.Operands) is int ret && ret >= 0 ? Get(ret) : 0); break;
             case "brk": case "udf": End("Trap"); break;
-            default: defined |= (ulong)i.Written; break;
         }
     }
     static ulong ParseAddress(string text)

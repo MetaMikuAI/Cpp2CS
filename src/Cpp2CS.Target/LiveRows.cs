@@ -12,6 +12,8 @@ internal static class LiveRows
     static readonly UInt128 volatileRegs = Mask(Enumerable.Range(0, 19).Append(30).Concat(Enumerable.Range(32, 8))
         .Concat(Enumerable.Range(48, 16))) | flags;
 
+    static readonly UInt128 tailInputs = Mask(Abi.TailInputs);
+
     public static (UInt128 Read, UInt128 Write) Description(Instruction i)
     {
         UInt128 d = G(i.D), n = G(i.N), m = G(i.M), a = G(i.A);
@@ -82,31 +84,36 @@ internal static class LiveRows
         }
     }
 
-    public static Dictionary<ulong, (int[] Registers, ulong CallMask)> Compute(HashSet<ulong> heads, Dictionary<ulong, Instruction> code,
+    public static Dictionary<ulong, int[]> Compute(HashSet<ulong> heads, Dictionary<ulong, Instruction> code,
         Dictionary<ulong, ulong> pads, Dictionary<ulong, JumpTableInfo> tables, ulong end)
     {
-        var blocks = new Dictionary<ulong, (UInt128 Use, UInt128 Def, ulong Calls, List<ulong> Next)>();
+        var blocks = new Dictionary<ulong, (UInt128 Use, UInt128 Def, List<ulong> Next)>();
         var live = new Dictionary<ulong, UInt128>();
-        var calls = new Dictionary<ulong, ulong>();
+
         foreach (ulong start in heads)
         {
             UInt128 use = 0, def = 0; var next = new List<ulong>();
-            ulong callUse = 0;
-            if (!code.ContainsKey(start)) { use = arguments | (returns & ~volatileRegs) | Bit(30); callUse = (ulong)arguments; }
-            else for (ulong pc = start; ; pc += 4)
+            for (ulong pc = start; ; pc += 4)
+            {
+                var i = code[pc]; var (read, write) = Description(i);
+                if (i.Form == Form.BranchRegister && !tables.ContainsKey(pc))
+                    read |= G(i.N) | tailInputs;
+                if ((i.Form == Form.Branch || i.Conditional) && !code.ContainsKey(i.Destination(pc)))
+                    read |= tailInputs;
+                if ((write & Bit(31)) != 0) read |= Bit(31);
+                use |= read & ~def; def |= write;
+                if (i.Form is Form.Trap or Form.Return) break;
+                if (i.Form == Form.BranchRegister)
                 {
-                    var i = code[pc]; var (read, write) = Description(i);
-                    if (i.IsCall) callUse |= (ulong)(arguments & ~def);
-                    use |= read & ~def; def |= write;
-                    if (i.Form is Form.Trap or Form.Return) break;
-                    if (i.Form == Form.BranchRegister)
-                    { var t = tables[pc]; next.AddRange(t.Arms); break; }
-                    if (i.Form == Form.Branch || i.Conditional) next.Add(i.Destination(pc));
-                    if (i.Form == Form.Branch || pc + 4 == end) break;
-                    if (pads.TryGetValue(pc, out var pad)) next.Add(pad);
-                    if (heads.Contains(pc + 4)) { next.Add(pc + 4); break; }
+                    if (tables.TryGetValue(pc, out var t)) next.AddRange(t.Arms);
+                    break;
                 }
-            blocks.Add(start, (use, def, callUse, next)); live.Add(start, use); calls.Add(start, callUse);
+                if ((i.Form == Form.Branch || i.Conditional) && code.ContainsKey(i.Destination(pc))) next.Add(i.Destination(pc));
+                if (i.Form == Form.Branch || pc + 4 == end) break;
+                if (pads.TryGetValue(pc, out var pad)) next.Add(pad);
+                if (heads.Contains(pc + 4)) { next.Add(pc + 4); break; }
+            }
+            blocks.Add(start, (use, def, next)); live.Add(start, use);
         }
         ulong[] order = heads.OrderDescending().ToArray();
         bool changed;
@@ -116,12 +123,10 @@ internal static class LiveRows
             foreach (ulong pc in order)
             {
                 var b = blocks[pc]; UInt128 need = b.Use;
-                ulong callNeed = b.Calls;
-                foreach (ulong next in b.Next) { need |= live[next] & ~b.Def; callNeed |= calls[next] & ~(ulong)b.Def; }
-                if (calls[pc] != callNeed) { calls[pc] = callNeed; changed = true; }
+                foreach (ulong next in b.Next) need |= live[next] & ~b.Def;
                 if (live[pc] != need) { live[pc] = need; changed = true; }
             }
         } while (changed);
-        return live.ToDictionary(pair => pair.Key, pair => (Enumerable.Range(0, Abi.Count).Where(r => (pair.Value & Bit(r)) != 0).ToArray(), calls[pair.Key]));
+        return live.ToDictionary(pair => pair.Key, pair => Enumerable.Range(0, Abi.Count).Where(r => (pair.Value & Bit(r)) != 0).ToArray());
     }
 }

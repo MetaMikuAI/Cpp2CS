@@ -47,7 +47,52 @@ def switch_results(prefix, functions, suspects):
     return summary
 
 
-def report(prefix, symbols, cases, suspects=None):
+def change_results(prefix, previous, functions):
+    old = {int(a, 16): status for a, _, _, status in rows(previous)}
+    if old.keys() != functions.keys():
+        raise ValueError("两次扫描的去重入口集合不同")
+    outcomes = {int(a, 16): (result, int(hit), int(total))
+                for a, _, _, result, _, hit, total in rows(prefix + ".followup.local.tsv")}
+    groups = defaultdict(Counter)
+    coverage = defaultdict(lambda: [0, 0])
+    blocks = Counter()
+    sites = Counter()
+    for a, count, indirect, direct, stack, split, merged in rows(prefix + ".features.local.tsv"):
+        entry = int(a, 16)
+        count, indirect, direct, stack, split, merged = map(int, (count, indirect, direct, stack, split, merged))
+        blocks["当前全部"] += count
+        blocks["按槽分块"] += split
+        blocks["按地址合并"] += merged
+        added = old[entry] != "成功"
+        if not added:
+            blocks["原有快照按槽分块"] += split
+            blocks["原有快照按地址合并"] += merged
+            blocks["原有快照现布局"] += count
+        for key, n in (("间接跳转调用", indirect), ("直接跳转调用", direct), ("动态栈分配", stack)):
+            sites[key] += n
+            sites[key + "快照"] += int(n > 0)
+        keys = []
+        if stack:
+            keys.append("动态栈分配")
+        if added:
+            keys.extend(("新增", "原因为" + old[entry]))
+            if indirect or direct:
+                keys.append("新增含跳转调用")
+            if indirect:
+                keys.append("新增含间接跳转调用")
+            if stack:
+                keys.append("新增含动态栈分配")
+        for key in keys:
+            result, hit, total = outcomes[entry]
+            groups[key][result] += 1
+            coverage[key][0] += hit
+            coverage[key][1] += total
+    changes = Counter((old[a], status) for a, (_, _, status) in functions.items() if old[a] != status)
+    return dict(blocks=blocks, sites=sites, groups=dict(groups), edges=dict(coverage),
+                changes=[(a, b, n) for (a, b), n in changes.items()])
+
+
+def report(prefix, symbols, cases, suspects=None, previous=None):
     functions = {int(a, 16): (s, e, result) for a, s, e, result in rows(prefix + ".functions.local.tsv")}
     checked = {int(a, 16): (r, int(covered), int(total)) for a, r, covered, total in rows(prefix + ".execution.local.tsv")}
     lift = Counter(row[2] for row in functions.values())
@@ -77,9 +122,11 @@ def report(prefix, symbols, cases, suspects=None):
                 classes[dimension][value] += 1
                 if len(examples[(dimension, value)]) < 3:
                     examples[(dimension, value)].append(entry)
-        if sum(classes["来源"].values()) != lift["间接跳转目标未证实"]:
+        if sum(classes["来源"].values()) != sum(1 for _ in rows(prefix + ".rejected.local.tsv")):
             raise ValueError("间接跳转分类与提升清单不一致")
         summary["branches"] = {k: {v: [count, examples[(k, v)]] for v, count in c.items()} for k, c in classes.items()}
+    if previous:
+        summary["changes"] = change_results(prefix, previous, functions)
     if symbols:
         sizes = defaultdict(set)
         with open(symbols, "rb") as source:
@@ -123,5 +170,6 @@ if __name__ == "__main__":
     parser.add_argument("--symbols")
     parser.add_argument("--cases")
     parser.add_argument("--suspects", help="前次间接跳转分类清单，按入口和 BR 地址核实疑表去向")
+    parser.add_argument("--previous", help="逐入口对比的历史提升清单")
     args = parser.parse_args()
-    report(args.prefix, args.symbols, args.cases, args.suspects)
+    report(args.prefix, args.symbols, args.cases, args.suspects, args.previous)

@@ -17,7 +17,8 @@ public readonly record struct Instruction(Form Form, string Name, int Width = 64
     int M = 31, int A = 31, long Imm = 0, int Mode = 0, int Shift = 0, int Size = 0, bool Vector = false)
 {
     public string? Extension => Form < Form.ConditionalCompare ? null : $"{Form}/{Name}" + (Form == Form.SimdCopy ? $"/{Mode}" : "");
-    public uint WrittenGeneralRegisters => (uint)LiveRows.Description(this).Write;
+    public UInt128 WrittenRegisters => LiveRows.Description(this).Write;
+    public uint WrittenGeneralRegisters => (uint)WrittenRegisters;
     public bool Conditional => Form is Form.Condition or Form.CompareBranch or Form.TestBranch;
     public bool IsCall => Form is Form.Call or Form.CallRegister;
     public ulong Destination(ulong pc) => unchecked(pc + (ulong)Imm);

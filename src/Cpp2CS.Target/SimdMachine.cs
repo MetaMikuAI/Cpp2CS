@@ -144,7 +144,7 @@ internal sealed partial class Machine
                     var loaded = builder.Read(block, address, s, pc);
                     Vector(i.D, i.Name == "ld1r" ? Map(_ => loaded) : Insert(i.D, i.Shift, loaded));
                 }
-                if (i.Mode != 0) Put(i.N, T.Add(address, increment), true);
+                if (i.Mode != 0) PutBase(i.N, T.Add(address, increment), pc, T.Neg(increment));
                 return;
             default: throw new InvalidOperationException("指令不是块内计算");
         }

@@ -27,9 +27,8 @@ internal static class BranchSurvey
     public static void Write(Scan scan, string prefix)
     {
         using var rows = new StreamWriter(prefix + ".branches.local.tsv");
-        foreach (string line in File.ReadLines(prefix + ".functions.local.tsv"))
+        foreach (string line in File.ReadLines(prefix + ".rejected.local.tsv"))
         {
-            if (!line.EndsWith("\t间接跳转目标未证实", StringComparison.Ordinal)) continue;
             ulong entry = ulong.Parse(line.AsSpan(0, line.IndexOf('\t')), NumberStyles.HexNumber);
             var locations = new LiftLocations(false);
             scan.Target.Lift(entry, locations);

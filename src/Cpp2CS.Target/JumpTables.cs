@@ -206,9 +206,6 @@ internal sealed class JumpTables
         }
         if (loadPc == 0) return null;
         var load = code[loadPc];
-        var stack = AddressOf(branch, 31);
-        reason = stack is { Stack: true, Offset: 0 } ? "SP 已归位" : "SP 偏移未证实";
-        if (stack is not { Stack: true, Offset: not 0 }) return null;
         reason = "上界或索引同一性未证实";
         if (!Bounded(loadPc, load, out int count)) return null;
         reason = "表地址或目标基址未证实";
