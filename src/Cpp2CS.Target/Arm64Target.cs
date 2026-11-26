@@ -25,9 +25,7 @@ public sealed class Arm64Target
 {
     readonly Elf64 elf;
     readonly byte[] file;
-    readonly HashSet<ulong> entries;
     readonly HashSet<ulong> relocated;
-    readonly HashSet<ulong> linkageEntries = [];
     public UnwindIndex Unwind { get; }
     public IReadOnlyList<ulong> Entries { get; }
 
@@ -37,27 +35,8 @@ public sealed class Arm64Target
         if (elf.Machine != 183) throw new InvalidDataException("需要 AArch64 ELF");
         this.file = file;
         Unwind = new(elf, file);
-        entries = entryRvas.Select(rva => checked(elf.ImageBase + rva)).ToHashSet();
-        Entries = entries.Order().ToArray();
+        Entries = entryRvas.Select(rva => checked(elf.ImageBase + rva)).Distinct().Order().ToArray();
         relocated = elf.Relocations.Select(r => r.Address).ToHashSet();
-        var jumpSlots = elf.Relocations.Where(r => r.Type == 1026).Select(r => r.Address).ToHashSet();
-        foreach (var plt in elf.Sections.Where(s => s.Name == ".plt" && (s.Flags & 4) != 0))
-        {
-            // AAELF64 的短 PLT 项以 x16 建立 GOT 槽地址，取槽中 x17 并跳转。
-            for (ulong offset = 0; offset + 16 <= plt.Size; offset += 16)
-            {
-                ulong pc = plt.Address + offset;
-                var page = Cached(Word(pc));
-                var load = Cached(Word(pc + 4));
-                var add = Cached(Word(pc + 8));
-                var branch = Cached(Word(pc + 12));
-                if (page is not { Form: Form.Address, Name: "adrp", D: 16 } ||
-                    load is not { Form: Form.Memory, Name: "ldr", Vector: false, Width: 64, D: 17, N: 16, Mode: 0 } ||
-                    add is not { Form: Form.Immediate, Name: "add", Width: 64, D: 16, N: 16 } ||
-                    branch is not { Form: Form.BranchRegister, N: 17 } || load.Imm != (add.Imm << add.Shift)) continue;
-                if (jumpSlots.Contains(page.Destination(pc & ~4095ul) + (ulong)load.Imm)) linkageEntries.Add(pc);
-            }
-        }
     }
 
     [ThreadStatic] static (uint Word, Instruction Value, bool Valid)[]? decodeCache;
@@ -79,20 +58,24 @@ public sealed class Arm64Target
         return machine.Row;
     }
 
+    public Instruction InstructionAt(ulong pc) => Cached(Word(pc));
+
     public uint Word(ulong pc) => BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(elf.FileOffset(pc, 4) ??
         throw new InvalidDataException("指令地址没有文件内容")));
-    bool Tail(ulong pc) => entries.Contains(pc) || Unwind.Find(pc)?.Start == pc || linkageEntries.Contains(pc);
-
-    static readonly ulong arguments = Abi.Arguments.Aggregate(0ul, (mask, r) => mask | (1ul << r));
-    static readonly ulong results = Abi.Results.Append(31).Aggregate(0ul, (mask, r) => mask | (1ul << r));
     public LiftResult Lift(ulong entry, LiftLocations? locations = null)
     {
         if (Unwind.Find(entry) is not Frame f) return new(null, "缺少 FDE");
         if ((entry & 3) != 0 || ((f.End - f.Start) & 3) != 0 || elf.FileOffset(f.Start, f.End - f.Start) == null)
             return new(null, "FDE 代码范围无效");
+        return Lift(entry, f, locations, []);
+    }
+
+    LiftResult Lift(ulong entry, Frame f, LiftLocations? locations, Dictionary<ulong, string> unconfirmed)
+    {
+        if (locations != null) { locations.UnresolvedBranch = null; locations.BranchReason = null; }
         var sites = Unwind.Sites(f);
         var targets = new HashSet<ulong>();
-        var tails = new HashSet<ulong>();
+        var tails = new Dictionary<ulong, ulong>();
         var instructions = new Dictionary<ulong, Instruction>();
         var tables = new Dictionary<ulong, JumpTableInfo>();
         var pads = new Dictionary<ulong, ulong>();
@@ -106,29 +89,26 @@ public sealed class Arm64Target
             {
                 var i = Cached(Word(pc));
                 if (i.Form == Form.Unknown) return new(null, "不支持指令");
-                if (i is { Form: Form.Extended, Name: "sub", D: 31, N: 31 })
-                    return new(null, "动态栈分配缺少当前栈基址");
                 instructions.Add(pc, i);
                 if (i.Form == Form.BranchRegister)
                 {
                     // 相对表分派的目标最后由 64 位 ADD 生成。普通间接尾跳无需建前驱图。
-                    string reason = "目标无相对表项加法";
+                    string reason = unconfirmed.GetValueOrDefault(pc, "目标无相对表项加法");
                     JumpTableInfo? table = null;
                     for (ulong back = pc; back >= f.Start + 4 && instructions.TryGetValue(back - 4, out var writer); back -= 4)
                     {
                         if (writer.IsCall || writer.Conditional || writer.Form is Form.Branch or Form.BranchRegister or Form.Return or Form.Trap) break;
                         if ((writer.WrittenGeneralRegisters & (1u << i.N)) == 0) continue;
-                        if (writer is { Name: "add", Width: 64, Shift: 2 })
+                        if (!unconfirmed.ContainsKey(pc) && writer is { Name: "add", Width: 64, Shift: 2 })
                             table = new JumpTables(entry, instructions, pads, tables).Resolve(pc, f, elf, file, relocated, out reason);
                         break;
                     }
                     if (table == null)
                     {
-                        if (locations != null) { locations.UnresolvedBranch = pc; locations.BranchReason = reason; }
-                        return new(null, "间接跳转目标未证实");
+                        if (locations != null && locations.UnresolvedBranch == null) { locations.UnresolvedBranch = pc; locations.BranchReason = reason; }
+                        break;
                     }
                     tables.Add(pc, table);
-                    locations?.TracedTargets.Add(pc, table.Arms);
                     foreach (var arm in table.Arms.Distinct()) Edge(arm);
                     break;
                 }
@@ -137,8 +117,7 @@ public sealed class Arm64Target
                 {
                     ulong dest = i.Destination(pc);
                     if (Inside(dest)) Edge(dest);
-                    else if (Tail(dest)) tails.Add(dest);
-                    else return new(null, "外部分支目标未证实");
+                    else tails[pc] = dest;
                     if (!i.Conditional) break;
                     if (!Inside(pc + 4)) return new(null, "落空边越出 FDE");
                     Edge(pc + 4); break;
@@ -161,21 +140,27 @@ public sealed class Arm64Target
         if (tables.Count != 0)
         {
             var complete = new JumpTables(entry, instructions, pads, tables);
+            bool retry = false;
             foreach (var (pc, t) in tables)
             {
                 var proof = complete.Resolve(pc, f, elf, file, relocated, out string reason);
                 if (proof == null || proof.Load != t.Load || proof.Address != t.Address || proof.Basis != t.Basis ||
                     !proof.Arms.AsSpan().SequenceEqual(t.Arms))
                 {
-                    if (locations != null) { locations.UnresolvedBranch = pc; locations.BranchReason = proof == null ? reason : "补全入边后表定义不唯一"; }
-                    return new(null, "跳转表边界未证实");
+                    retry |= unconfirmed.TryAdd(pc, proof == null ? reason : "补全入边后表定义不唯一");
                 }
             }
+            // 失去证明的表按间接调用终结，重新追踪以剔除仅由其表项可达的块。
+            if (retry) return Lift(entry, f, locations, unconfirmed);
             if (locations != null)
-                foreach (var (pc, t) in tables) locations.Tables.Add(pc, t);
+                foreach (var (pc, t) in tables)
+                {
+                    locations.Tables.Add(pc, t);
+                    locations.TracedTargets.Add(pc, t.Arms);
+                }
         }
 
-        var heads = targets.Append(entry).Concat(tails).ToHashSet();
+        var heads = targets.Append(entry).ToHashSet();
         // 选择子取自读表前的索引。之后即使机器指令复用了该寄存器，块内的项仍然有效。
         var loads = tables.Values.ToDictionary(t => t.Load);
         heads.UnionWith(loads.Keys);
@@ -197,14 +182,15 @@ public sealed class Arm64Target
         var builder = new SnapshotBuilder(64);
         builder.SetReturnSlots(Abi.Slots(Abi.Return));
         int[] widths = Enumerable.Range(0, Abi.Count).Select(Abi.Width).ToArray();
-        var ids = new Dictionary<(ulong Pc, ulong Defined), BlockId>();
-        var work = new Queue<(ulong Pc, ulong Defined)>();
-        BlockId Block(ulong pc, ulong defined)
+        var ids = new Dictionary<ulong, BlockId>();
+        var work = new Queue<ulong>();
+        BlockId Block(ulong pc)
         {
-            var key = (pc, defined & live[pc].CallMask);
-            if (ids.TryGetValue(key, out var existing)) return existing;
-            var id = pc == entry && !targets.Contains(entry) ? builder.Entry : builder.Block(live[pc].Registers.Select(Abi.Width).ToArray());
-            ids.Add(key, id); work.Enqueue(key); return id;
+            if (ids.TryGetValue(pc, out var existing)) return existing;
+            var id = pc == entry && !targets.Contains(entry) ? builder.Entry : builder.Block(live[pc].Select(Abi.Width).ToArray());
+            ids.Add(pc, id);
+            work.Enqueue(pc);
+            return id;
         }
         var initial = new Term[Abi.Count];
         for (int r = 0; r < initial.Length; r++)
@@ -213,61 +199,73 @@ public sealed class Arm64Target
             else if (r is >= 40 and < 48) initial[r] = builder.Terms.Concat(builder.EntryParameter(slot, 64), builder.Terms.Undefined(64));
             else initial[r] = builder.EntryParameter(slot, widths[r]);
         }
-        Term[] Out(ulong dest, Term[] row) => live[dest].Registers.Select(r => row[r]).ToArray();
+        Term[] Out(ulong dest, Term[] row) => live[dest].Select(r => row[r]).ToArray();
         var empty = widths.Select(builder.Terms.Undefined).ToArray();
-        var first = Block(entry, arguments);
+        var first = Block(entry);
         if (first != builder.Entry) builder.Jump(builder.Entry, first, Out(entry, initial));
 
-        // 有定义的调用槽随边传播；同一地址只在槽位集合不同时另建块。
-        while (work.TryDequeue(out var key))
+        while (work.TryDequeue(out ulong start))
         {
-            var (start, defined) = key;
-            var b = ids[key];
+            var b = ids[start];
             var row = b == builder.Entry ? initial : (Term[])empty.Clone();
             if (b != builder.Entry)
             {
-                var layout = live[start].Registers;
+                var layout = live[start];
                 for (int j = 0; j < layout.Length; j++) row[layout[j]] = builder.Parameter(b, j);
             }
             var state = new Machine(builder, b, row);
-            Exit To(ulong dest) => Exit.To(Block(dest, defined), Out(dest, state.Row));
+            Exit To(ulong dest) => Exit.To(Block(dest), Out(dest, state.Row));
             Term? selector = null;
             int instructionCount = 0;
             for (ulong pc = start; ; pc += 4)
             {
                 instructionCount++;
-                if (tails.Contains(pc))
-                {
-                    var link = state.G(30);
-                    state.Call(builder.Terms.Bits(pc, 64), pc, defined, false);
-                    builder.Return(b, state.ReturnValues(link)); break;
-                }
                 var i = instructions[pc];
                 if (loads.TryGetValue(pc, out var loaded)) selector = state.G(loaded.Index, 32);
                 if (i.Form == Form.Return) { builder.Return(b, state.ReturnValues(state.G(i.N))); break; }
                 if (i.Form == Form.Trap) { builder.Terminate(b, Terminator.Single(Exit.Trap, pc)); break; }
                 if (i.Form == Form.BranchRegister)
                 {
-                    var t = tables[pc];
+                    if (!tables.TryGetValue(pc, out var t))
+                    {
+                        state.TailCall(state.G(i.N), pc);
+                        break;
+                    }
                     // 末项兼作默认出口；支配此处的有界比较排除了所有越界值。
                     var arms = t.Arms.Select(To).ToImmutableArray();
                     builder.Terminate(b, Terminator.Switch(selector ?? throw new InvalidOperationException("读表与跳转不在同一块"), arms, pc)); break;
                 }
                 if (i.Conditional)
                 {
-                    builder.Terminate(b, Terminator.Branch(state.Predicate(i), To(i.Destination(pc)), To(pc + 4), pc)); break;
+                    Exit taken;
+                    if (tails.TryGetValue(pc, out ulong target))
+                    {
+                        var regs = Abi.TailInputs;
+                        var tail = builder.Block(regs.Select(Abi.Width).ToArray());
+                        var input = (Term[])empty.Clone();
+                        for (int j = 0; j < regs.Length; j++) input[regs[j]] = builder.Parameter(tail, j);
+                        new Machine(builder, tail, input).TailCall(builder.Terms.Bits(target, 64), pc);
+                        if (locations?.CollectBlocks == true) locations.Blocks.Add(tail, (pc, 0));
+                        taken = Exit.To(tail, regs.Select(r => state.Row[r]).ToArray());
+                    }
+                    else taken = To(i.Destination(pc));
+                    builder.Terminate(b, Terminator.Branch(state.Predicate(i), taken, To(pc + 4), pc)); break;
                 }
-                if (i.Form == Form.Branch) { builder.Terminate(b, Terminator.Single(To(i.Destination(pc)), pc)); break; }
+                if (i.Form == Form.Branch)
+                {
+                    if (tails.TryGetValue(pc, out ulong target)) state.TailCall(builder.Terms.Bits(target, 64), pc);
+                    else builder.Terminate(b, Terminator.Single(To(i.Destination(pc)), pc));
+                    break;
+                }
                 if (i.IsCall)
                 {
                     var target = i.Form == Form.Call ? builder.Terms.Bits(i.Destination(pc), 64) : state.G(i.N);
                     bool invoke = pads.TryGetValue(pc, out ulong pad);
-                    var unwind = state.Call(target, pc, defined, invoke);
-                    defined = results;
-                    if (invoke) { builder.Terminate(b, Terminator.Invoke(To(pc + 4), Exit.To(Block(pad, (1ul << 31) | 3), Out(pad, unwind)), pc)); break; }
+                    var unwind = state.Call(target, pc, invoke);
+                    if (invoke) { builder.Terminate(b, Terminator.Invoke(To(pc + 4), Exit.To(Block(pad), Out(pad, unwind)), pc)); break; }
                     if (pc + 4 == f.End) { builder.Terminate(b, Terminator.Single(Exit.NoReturn, pc)); break; }
                 }
-                else { state.Apply(i, pc); ulong bits = (ulong)LiveRows.Description(i).Write & arguments; defined |= bits; }
+                else state.Apply(i, pc);
                 if (heads.Contains(pc + 4)) { builder.Terminate(b, Terminator.Single(To(pc + 4), pc)); break; }
             }
             if (locations?.CollectBlocks == true) locations.Blocks.Add(b, (start, instructionCount));

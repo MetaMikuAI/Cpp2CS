@@ -100,6 +100,7 @@ internal sealed unsafe class Disassembly : IDisposable
                 if (RegisterName(source) is int reg && reg >= 0) read |= UInt128.One << reg;
         }
         NativeApi.cs_free(raw, 1);
+        if (cache.Count >= 65536) cache.Clear();
         return cache[(pc, word)] = new(name, operands, read, written);
     }
     public void Dispose() => NativeApi.cs_close(ref handle);

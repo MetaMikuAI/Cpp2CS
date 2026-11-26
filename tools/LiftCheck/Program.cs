@@ -36,9 +36,17 @@ switch (args[0])
             break;
         }
         var options = args.Skip(7).ToArray();
+        ulong from = 0, until = ulong.MaxValue;
+        if (options is [.., "--range", var first, var last])
+        {
+            from = Convert.ToUInt64(first, 16); until = Convert.ToUInt64(last, 16);
+            options = options[..^3];
+        }
+        string? newSnapshots = null;
+        if (options is [.., "--new-snapshots", var previousLift]) { newSnapshots = previousLift; options = options[..^2]; }
         string? baseline = null;
         if (options is [.., "--new-tables", var inventory]) { baseline = inventory; options = options[..^2]; }
-        if (options.Length > 1) throw new ArgumentException("check 的可选参数是历史执行清单和 --new-tables 历史提升清单");
-        Execution.Check(scan, args[3], int.Parse(args[4]), options.FirstOrDefault(), baseline); break;
+        if (options.Length > 1) throw new ArgumentException("check 的可选参数是历史执行清单、--new-tables 清单、--new-snapshots 清单、--range 起点 终点");
+        Execution.Check(scan, args[3], int.Parse(args[4]), options.FirstOrDefault(), baseline, newSnapshots, from, until); break;
     default: throw new ArgumentException("未知核对模式");
 }

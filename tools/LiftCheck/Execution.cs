@@ -38,10 +38,10 @@ internal static class Execution
             output.WriteLine($"{j}\t{native.Events.ElementAtOrDefault(j)}\t{interpreted.Events.ElementAtOrDefault(j)}");
     }
 
-    public static void Check(Scan scan, string prefix, int limit, string? previous, string? baseline)
+    public static void Check(Scan scan, string prefix, int limit, string? previous, string? baseline, string? previousLift, ulong from, ulong until)
     {
         var image = new Image(scan.Elf, scan.FileBytes);
-        using var disassembly = new Disassembly();
+        using var disassemblers = new ThreadLocal<Disassembly>(() => new Disassembly(), true);
         using var rows = new StreamWriter(prefix + ".execution.local.tsv");
         using var details = new StreamWriter(prefix + ".failures.local.tsv");
         using var coverage = new StreamWriter(prefix + ".coverage.local.tsv");
@@ -57,31 +57,53 @@ internal static class Execution
             foreach (var line in File.ReadLines(baseline))
                 if (line.EndsWith("\t成功", StringComparison.Ordinal))
                     tableEntries.Remove(ulong.Parse(line.AsSpan(0, line.IndexOf('\t')), NumberStyles.HexNumber));
+        var added = new HashSet<ulong>();
+        if (previousLift != null)
+        {
+            var previousSuccess = File.ReadLines(previousLift).Where(l => l.EndsWith("\t成功", StringComparison.Ordinal))
+                .Select(l => ulong.Parse(l.AsSpan(0, l.IndexOf('\t')), NumberStyles.HexNumber)).ToHashSet();
+            foreach (string line in File.ReadLines(prefix + ".features.local.tsv"))
+            {
+                var fields = line.Split('\t');
+                ulong entry = ulong.Parse(fields[0], NumberStyles.HexNumber);
+                if (!previousSuccess.Contains(entry) || fields[4] != "0") added.Add(entry);
+            }
+        }
         var executed = new HashSet<uint>();
         var observed = new HashSet<string>();
         var selected = scan.Sample(limit, SampleSeed).ToHashSet();
         var historical = previous == null ? [] : File.ReadLines(previous).Select(l => l.Split('\t'))
             .ToDictionary(r => ulong.Parse(r[0], NumberStyles.HexNumber), r => r[1]);
         var checkedEntries = new HashSet<ulong>();
-        foreach (ulong entry in selected.Concat(tableEntries).Concat(historical.Where(p => p.Value != "通过").Select(p => p.Key)).Distinct().Order()) Run(entry);
-        var candidates = File.ReadLines(prefix + ".candidates.local.tsv").Select(l => l.Split('\t')).OrderBy(r => int.Parse(r[1]));
-        foreach (var row in candidates)
+        var entries = selected.Concat(tableEntries).Concat(added)
+            .Concat(historical.Where(p => p.Value != "通过").Select(p => p.Key)).Where(e => e >= from && e < until).Distinct().Order();
+        try
         {
-            var entry = ulong.Parse(row[0], NumberStyles.HexNumber);
-            if (row[2].Split(',').Any(key => !observed.Contains(key)) && !checkedEntries.Contains(entry)) Run(entry);
+            foreach (var record in entries.AsParallel().AsOrdered().WithDegreeOfParallelism(2)
+                .WithMergeOptions(ParallelMergeOptions.NotBuffered).Select(Run)) Write(record);
+            var candidates = File.ReadLines(prefix + ".candidates.local.tsv").Select(l => l.Split('\t')).OrderBy(r => int.Parse(r[1]));
+            foreach (var row in candidates)
+            {
+                var entry = ulong.Parse(row[0], NumberStyles.HexNumber);
+                if (entry >= from && entry < until && !checkedEntries.Contains(entry) && row[2].Split(',').Any(key => !observed.Contains(key))) Write(Run(entry));
+            }
+        }
+        finally
+        {
+            foreach (var disassembly in disassemblers.Values) disassembly.Dispose();
         }
 
-        void Run(ulong entry)
+        CheckRecord Run(ulong entry)
         {
-            checkedEntries.Add(entry);
+            var record = new CheckRecord(entry);
             var locations = new LiftLocations();
-            string group = selected.Contains(entry) ? "主核对" : tableEntries.Contains(entry) ? "跳转表核对" : historical.ContainsKey(entry) ? "旧入口复核" : "编码补测";
-            var lift = scan.Lift(entry, locations, violations);
+            using var errors = new StringWriter();
+            var lift = scan.Lift(entry, locations, errors);
             if (lift.Reason == Scan.InvalidSnapshot)
             {
-                if (selected.Contains(entry)) rows.WriteLine($"{entry:x}\t{lift.Reason}\t0\t0");
-                followup.WriteLine($"{entry:x}\t{group}\t{historical.GetValueOrDefault(entry)}\t{lift.Reason}\t0\t0\t0");
-                return;
+                record.Outcome = lift.Reason;
+                record.Violation = errors.ToString();
+                return record;
             }
             var snapshot = lift.Snapshot ?? throw new InvalidDataException($"清单与提升结果不同 0x{entry:x}");
             var hits = new HashSet<(ulong Branch, int Item)>();
@@ -96,7 +118,7 @@ internal static class Execution
                 var interpreted = new Interpreter(image, seed, covered).Run(snapshot, locations);
                 int budget = interpreted.Exhausted ? interpreted.Instructions : EnvironmentState.StepLimit;
                 var undefined = interpreted.Error == "依赖未定义" ? new UndefinedSource(interpreted) : null;
-                using var emulator = new NativeRun(image, disassembly, frame, seed, budget, words, undefined: undefined, tables: locations.Switches);
+                using var emulator = new NativeRun(image, disassemblers.Value!, frame, seed, budget, words, undefined: undefined, tables: locations.Switches);
                 var native = emulator.Run(entry);
                 string? reason = Compare(native, interpreted, out int first);
                 if (locations.Switches.Count != 0)
@@ -107,32 +129,56 @@ internal static class Execution
                             if (!EnvironmentState.Biased(seed)) ordinaryItems.Add((item.Address, item.Width));
                         }
                 if (reason == "依赖未定义" && undefined != null)
-                    undefinedRows.WriteLine($"{entry:x}\t{seed}\t{interpreted.Diagnostic}\t{undefined.Describe()}");
+                    record.Undefined.Add($"{entry:x}\t{seed}\t{interpreted.Diagnostic}\t{undefined.Describe()}");
                 if (reason != null)
                 {
                     if (failure == null || failure == Budget) failure = reason;
-                    details.WriteLine($"{entry:x}\t{seed}\t{reason}\t{first}\t{native.Events.ElementAtOrDefault(first)}\t{interpreted.Events.ElementAtOrDefault(first)}\t{interpreted.Diagnostic ?? native.Diagnostic}");
+                    record.Failures.Add($"{entry:x}\t{seed}\t{reason}\t{first}\t{native.Events.ElementAtOrDefault(first)}\t{interpreted.Events.ElementAtOrDefault(first)}\t{interpreted.Diagnostic ?? native.Diagnostic}");
                 }
                 if (!EnvironmentState.Biased(seed)) ordinary = covered.Count;
             }
-            int edges = snapshot.Blocks.Sum(b => b.Terminator.Exits.Length);
-            var outcome = failure ?? "通过";
-            if (selected.Contains(entry))
-            {
-                rows.WriteLine($"{entry:x}\t{outcome}\t{covered.Count}\t{edges}");
-                coverage.WriteLine($"{entry:x}\t{ordinary}\t{covered.Count}\t{edges}");
-            }
+            record.Edges = snapshot.Blocks.Sum(b => b.Terminator.Exits.Length);
+            record.Outcome = failure ?? "通过";
+            record.Covered = covered.Count;
+            record.Ordinary = ordinary;
             if (tableEntries.Contains(entry))
                 foreach (var (branch, table) in locations.Switches)
-                    items.WriteLine($"{entry:x}\t{branch:x}\t{ordinaryItems.Count(h => h.Branch == branch)}\t{hits.Count(h => h.Branch == branch)}\t{table.Arms.Length}\t{outcome}");
-            followup.WriteLine($"{entry:x}\t{group}\t{historical.GetValueOrDefault(entry)}\t{outcome}\t{ordinary}\t{covered.Count}\t{edges}");
-            foreach (uint word in words)
+                    record.Items.Add($"{entry:x}\t{branch:x}\t{ordinaryItems.Count(h => h.Branch == branch)}\t{hits.Count(h => h.Branch == branch)}\t{table.Arms.Length}\t{record.Outcome}");
+            record.Words = words;
+            return record;
+        }
+
+        void Write(CheckRecord record)
+        {
+            ulong entry = record.Entry;
+            checkedEntries.Add(entry);
+            string group = selected.Contains(entry) ? "主核对" : tableEntries.Contains(entry) ? "跳转表核对" :
+                added.Contains(entry) ? "跳转与栈分配核对" : historical.ContainsKey(entry) ? "旧入口复核" : "编码补测";
+            if (record.Violation != null) violations.Write(record.Violation);
+            foreach (string line in record.Failures) details.WriteLine(line);
+            foreach (string line in record.Undefined) undefinedRows.WriteLine(line);
+            foreach (string line in record.Items) items.WriteLine(line);
+            if (selected.Contains(entry))
             {
+                rows.WriteLine($"{entry:x}\t{record.Outcome}\t{record.Covered}\t{record.Edges}");
+                coverage.WriteLine($"{entry:x}\t{record.Ordinary}\t{record.Covered}\t{record.Edges}");
+            }
+            followup.WriteLine($"{entry:x}\t{group}\t{historical.GetValueOrDefault(entry)}\t{record.Outcome}\t{record.Ordinary}\t{record.Covered}\t{record.Edges}");
+            foreach (uint word in record.Words)
                 if (executed.Add(word) && Decoder.Decode(word).Extension is { } key)
                 {
-                    observed.Add(key); witnesses.WriteLine($"{key}\t{word:x8}\t{entry:x}\t{group}\t{outcome}");
+                    observed.Add(key); witnesses.WriteLine($"{key}\t{word:x8}\t{entry:x}\t{group}\t{record.Outcome}");
                 }
-            }
         }
+    }
+
+    sealed class CheckRecord(ulong entry)
+    {
+        public ulong Entry => entry;
+        public string Outcome = "";
+        public int Ordinary, Covered, Edges;
+        public string? Violation;
+        public List<string> Items = [], Failures = [], Undefined = [];
+        public HashSet<uint> Words = [];
     }
 }

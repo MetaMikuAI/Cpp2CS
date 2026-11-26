@@ -13,9 +13,18 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
         return r == 31 && !sp ? T.Zero(w) : T.Truncate(registers[r], w);
     }
     Term V(int r, int w) => T.Truncate(registers[32 + r], w);
-    void Put(int r, Term v, bool sp = false)
+    void Put(int r, Term v)
     {
-        if (r != 31 || sp) registers[r] = T.ZeroExtend(v, 64);
+        if (r != 31) registers[r] = T.ZeroExtend(v, 64);
+    }
+    // size 恒为改写前的 SP 减去新值；寄存器寻址和立即数寻址共用同一约定。
+    void PutBase(int r, Term value, ulong pc, Term? size = null)
+    {
+        if (r != 31) { Put(r, value); return; }
+        var basis = registers[31];
+        var next = T.ZeroExtend(value, 64);
+        size ??= T.Sub(basis, next);
+        registers[31] = size.IsConstant ? next : builder.StackAllocate(block, basis, size, pc);
     }
     void Vector(int r, Term v) => registers[32 + r] = T.ZeroExtend(v, 128);
     Term K(long v, int w) => T.Constant(v, w);
@@ -98,7 +107,10 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
                     registers[Abi.Carry] = sub ? T.Uge(x, y) : T.Operation(Op.AddCarry, 1, x, y);
                     registers[Abi.Overflow] = T.Operation(sub ? Op.SubOverflow : Op.AddOverflow, 1, x, y);
                 }
-                Put(i.D, value, !flags && i.Form != Form.Shifted); return;
+                if (!flags && i.Form != Form.Shifted && i.D == 31)
+                    PutBase(31, value, pc, w == 64 && i.N == 31 ? (sub ? y : T.Neg(y)) : null);
+                else Put(i.D, value);
+                return;
             case Form.Logical:
             case Form.Mask:
                 x = G(i.N, w);
@@ -106,7 +118,9 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
                 if (i.Name is "bic" or "orn" or "eon" or "bics") y = T.Not(y);
                 value = i.Name switch { "orr" or "orn" => T.Or(x, y), "eor" or "eon" => T.Xor(x, y), _ => T.And(x, y) };
                 if (i.Name is "ands" or "bics") { comparison = null; Nz(value); registers[Abi.Carry] = registers[Abi.Overflow] = T.False; }
-                Put(i.D, value, i.Form == Form.Mask && i.Name != "ands"); return;
+                if (i.Form == Form.Mask && i.Name != "ands") PutBase(i.D, value, pc);
+                else Put(i.D, value);
+                return;
             case Form.Bitfield:
                 int r = (int)i.Imm, s = i.Shift, offset = r <= s ? 0 : w - r, count = r <= s ? s - r + 1 : s + 1;
                 value = T.Slice(G(i.N, w), r <= s ? r : 0, count);
@@ -219,18 +233,26 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
         }
         Access(i.D, address);
         if (i.Form == Form.Pair) Access(i.A, T.Add(address, K(i.Size / 8, 64)));
-        if (i.Mode is 1 or 3) Put(i.N, updated, true);
+        if (i.Mode is 1 or 3) PutBase(i.N, updated, pc, T.Neg(offset));
     }
 
     public Term[] ReturnValues(Term link) => Abi.Return.Select(r => r == 30 ? link : r is >= 40 and < 48 ? T.Truncate(registers[r], 64) : registers[r]).ToArray();
 
-    public Term[] Call(Term target, ulong pc, ulong defined, bool unwind)
+    (Slot, Term)[] Arguments() => Abi.Arguments.Select(r => (Abi.Entry(r)!.Value, registers[r])).ToArray();
+
+    public void TailCall(Term target, ulong pc)
+    {
+        var results = builder.TailCall(block, target, Arguments(), Abi.Slots(Abi.Results), pc);
+        for (int j = 0; j < Abi.Results.Length; j++) registers[Abi.Results[j]] = results[j];
+        builder.Return(block, ReturnValues(registers[30]));
+    }
+
+    public Term[] Call(Term target, ulong pc, bool unwind)
     {
         comparison = null;
-        var arguments = Abi.Arguments.Where(r => r == 31 || (defined & (1ul << r)) != 0).Select(r => (Abi.Entry(r)!.Value, registers[r])).ToArray();
         var resultSlots = Abi.Slots(Abi.Results);
         if (unwind) resultSlots = [.. resultSlots, (new(SlotKind.Unwind, 0), 64), (new(SlotKind.Unwind, 1), 64)];
-        var results = builder.Call(block, target, arguments, resultSlots, pc);
+        var results = builder.Call(block, target, Arguments(), resultSlots, pc);
         for (int r = 0; r < Abi.Count; r++)
         {
             if (r is >= 19 and <= 29 or 31 or Abi.Thread) continue;

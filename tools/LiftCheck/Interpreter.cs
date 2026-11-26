@@ -258,6 +258,13 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
                         trace.Add("写", address, write.Value.Width, value);
                         for (int k = 0; k < write.Value.Width / 8; k++) writes[address + (uint)k] = (byte)(value >> (k * 8));
                         break;
+                    case StackAllocateOccurrence { Base: { } basis } allocation:
+                        var oldStack = Eval(basis);
+                        var size = Eval(allocation.Size);
+                        Store(results[0], (oldStack.Undefined | size.Undefined) == 0
+                            ? new((ulong)(oldStack.Value - size.Value))
+                            : Add(oldStack, size, basis.Width, true));
+                        break;
                     case CallOccurrence call:
                         var target = (ulong)Observe(call.Target!, "调用目标", call.Address);
                         if (trace.Error != null) return trace;

@@ -41,12 +41,16 @@ internal sealed class Scan
         using var listing = new StreamWriter(prefix + ".functions.local.tsv");
         using var witnesses = new StreamWriter(prefix + ".candidates.local.tsv");
         using var violations = new StreamWriter(prefix + ".scan-violations.local.tsv");
+        using var features = new StreamWriter(prefix + ".features.local.tsv");
         using var switches = new StreamWriter(prefix + ".switches.local.tsv");
         using var rejected = new StreamWriter(prefix + ".rejected.local.tsv");
         using var unknown = new BinaryWriter(File.Create(prefix + ".unknown.local.bin"));
-        foreach (ulong entry in Target.Entries)
+        var entries = Target.Entries.Where(e => e >= from && e < until);
+        var lifted = entries.AsParallel().AsOrdered().WithDegreeOfParallelism(2)
+            .WithMergeOptions(ParallelMergeOptions.NotBuffered).Select(Measure);
+        foreach (var item in lifted)
         {
-            if (entry < from || entry >= until) continue;
+            ulong entry = item.Entry;
             var frame = Target.Unwind.Find(entry);
             if (frame == null) { listing.WriteLine($"{entry:x}\t-\t-\t缺少 FDE"); continue; }
             var seen = new HashSet<uint>();
@@ -67,19 +71,49 @@ internal sealed class Scan
             }
             unknown.Write(seen.Count);
             foreach (var word in seen) unknown.Write(word);
-            var locations = new LiftLocations(false);
-            var result = Lift(entry, locations, violations);
-            foreach (var (branch, table) in locations.Switches)
-                switches.WriteLine($"{entry:x}\t{branch:x}\t{table.Arms.Length}\t{result.Reason ?? "成功"}");
-            if (locations.UnresolvedBranch is { } jump)
-                rejected.WriteLine($"{entry:x}\t{jump:x}\t{locations.BranchReason}");
-            if (result.Snapshot != null && extensions != null)
+            if (item.Feature != null) features.WriteLine(item.Feature);
+            if (item.Violation.Length != 0) violations.Write(item.Violation);
+            foreach (var (branch, table) in item.Locations.Switches)
+                switches.WriteLine($"{entry:x}\t{branch:x}\t{table.Arms.Length}\t{item.Reason ?? "成功"}");
+            if (item.Locations.UnresolvedBranch is { } jump)
+                rejected.WriteLine($"{entry:x}\t{jump:x}\t{item.Locations.BranchReason}");
+            if (item.Reason == null && extensions != null)
                 witnesses.WriteLine($"{entry:x}\t{frame.Value.End - frame.Value.Start}\t{string.Join(',', extensions.Order())}");
-            listing.WriteLine($"{entry:x}\t{frame.Value.Start:x}\t{frame.Value.End:x}\t{result.Reason ?? "成功"}");
+            listing.WriteLine($"{entry:x}\t{frame.Value.Start:x}\t{frame.Value.End:x}\t{item.Reason ?? "成功"}");
         }
         using var words = new StreamWriter(prefix + ".words.local.tsv");
         foreach (var (word, count) in counts.OrderBy(kv => kv.Key))
             words.WriteLine($"{word:x8}\t{count.Count}\t{AssemblyText.Format(Decoder.Decode(word), 0x100000000)}");
+    }
+
+    (ulong Entry, string? Reason, string? Feature, string Violation, LiftLocations Locations) Measure(ulong entry)
+    {
+        var locations = new LiftLocations();
+        using var violations = new StringWriter();
+        var result = Lift(entry, locations, violations);
+        string? feature = null;
+        if (result.Snapshot is { } snapshot)
+        {
+            int indirect = 0, direct = 0, dynamicStack = 0;
+            bool ordinaryCalls = false;
+            var directTargets = new HashSet<ulong>();
+            foreach (var block in snapshot.Blocks)
+                foreach (var occurrence in block.Occurrences)
+                    switch (occurrence)
+                    {
+                        case CallOccurrence { ByJump: true } call:
+                            var op = Target.InstructionAt(call.Address);
+                            if (op.Form == Form.BranchRegister) indirect++;
+                            else { direct++; directTargets.Add(op.Destination(call.Address)); }
+                            break;
+                        case CallOccurrence: ordinaryCalls = true; break;
+                        case StackAllocateOccurrence: dynamicStack++; break;
+                    }
+            var (split, merged) = RowCounts.Count(snapshot, Target, locations, entry, ordinaryCalls, directTargets);
+            feature = $"{entry:x}\t{snapshot.Blocks.Length}\t{indirect}\t{direct}\t{dynamicStack}\t{split}\t{merged}";
+        }
+        locations.Blocks.Clear();
+        return (entry, result.Reason, feature, violations.ToString(), locations);
     }
 
     // 按扫描清单复核每个已确认的表，导出能直接回到 ELF 查证的地址与位宽。
