@@ -343,7 +343,11 @@ public sealed partial class CoExecution
         var conditions = state.Conditions;
         // 事件的后置条件：该类的初始化已触发（类初始化、新对象）；它由这个旁观效果确立，只在并入其他效果的条件的那一遍使用。
         if (e.Kind is EventKind.Initialize or EventKind.Allocate && !run!.OwnOnly && conditions.Evaluate(e.Class!) is { Kind: TermKind.Entity } named)
+        {
+            // 这个后置条件的确立者是这次事件：它所在的块记为依赖（9.4），占用它的声明不得落在本声明之后。
             conditions = conditions.WithInitialized(named.Entity);
+            state = state with { Trail = state.Trail! with { Outside = state.Trail.Outside.Add(e.Occurrence.Block) } };
+        }
         return state with
         {
             Native = e.After with { Env = env }, Conditions = conditions, Epoch = state.Epoch + 1, Serial = state.Serial + 1,

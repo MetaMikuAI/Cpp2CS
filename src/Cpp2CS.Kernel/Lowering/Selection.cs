@@ -153,10 +153,11 @@ public static class Selection
         foreach (var certificate in selection)
         {
             var landing = certificate.Claim.Landing;
-            // 依赖的效果：确立者若被别的声明占用，那条声明的落点不晚于本声明的落点。没被占用的留在原位，原位在本声明的落点之前。
+            // 依赖的效果：确立者（凭据记的是它所在的块：块末的检查，或块里的事件）若被别的声明占用，那条声明的落点不晚于本声明的落点。
+            // 按块核对比按效果核对保守。没被占用的留在原位，原位在本声明的落点之前。
             foreach (var block in certificate.Before)
                 foreach (var (effect, other) in owner)
-                    if (effect.IsEdge && effect.Block == block && other != certificate && !NotLater(other.Claim.Landing, landing)) return false;
+                    if (effect.Block == block && other != certificate && !NotLater(other.Claim.Landing, landing)) return false;
             // 推后的旁观效果：必须由落点不早于本声明的声明占用。留在原位的洞在本声明的落点之前，不满足。
             foreach (var effect in certificate.After)
                 if (!owner.TryGetValue(effect, out var other) || other == certificate || !NotLater(landing, other.Claim.Landing)) return false;
@@ -168,7 +169,7 @@ public static class Selection
 
     /// <summary>落点相同时 first 必须排在 second 之前：second 依赖 first 占用的确立者，或 first 把 second 占用的旁观效果推后。</summary>
     private static bool Precedes(Certificate first, Certificate second) =>
-        second.Before.Any(block => first.Claim.Occupied.Any(e => e.IsEdge && e.Block == block))
+        second.Before.Any(block => first.Claim.Occupied.Any(e => e.Block == block))
         || first.After.Any(second.Claim.Occupied.Contains);
 
     /// <summary>落点相同的声明的写出次序：先按落点约束，再按稳定键。约束成环时为空。</summary>
