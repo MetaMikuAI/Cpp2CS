@@ -130,17 +130,16 @@ public sealed class Certificate
 public sealed record ProofOutcome(Claim Claim, Certificate? Certificate, Refutation? Refutation, ImmutableArray<string> Rows, int Paths, int Steps);
 
 /// <summary>
-/// 内核按实体提问的元数据（设计第 8 节）。回答不了时为空。Accessible：成员在 from 这个类的方法里能否合法访问；
-/// Assignable：一个类型的值能否不经转换当作另一个类型使用；ElementOf：一维零基数组类型的元素类型。
+/// 内核按实体提问的元数据（设计第 8 节）：形状之外，解释层还要问的几件事。
+/// Accessible：成员在 from 这个类的方法里能否合法访问；Assignable：一个类型的值能否不经转换当作另一个类型使用；
+/// ElementOf：一维零基数组类型的元素类型；FieldAt：类型（含基类）里位于该字节偏移的实例字段。回答不了时为假或为空。
 /// </summary>
-public interface IEntityMetadata
+public interface IEntityMetadata : IMetadataView
 {
-    MethodShape? Method(EntityRef method);
-    FieldShape? Field(EntityRef field);
-    TypeShape? Type(EntityRef type);
     bool Accessible(EntityRef member, EntityRef from);
     bool Assignable(EntityRef from, EntityRef to);
     TypeShape? ElementOf(EntityRef array);
+    FieldShape? FieldAt(EntityRef type, int offset);
 }
 
 /// <summary>

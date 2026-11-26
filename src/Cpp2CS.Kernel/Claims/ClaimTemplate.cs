@@ -72,12 +72,13 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
 
     public static int StackBits(TypeShape type) => type.Kind == StackKind.Int32 ? 32 : type.StorageBits;
 
-    private sealed class View(Claim claim, IEntityMetadata metadata) : IMetadataView
+    /// <summary>模板方法体里唯一的记号指向声明给出的实体。</summary>
+    private sealed class Tokens(Claim claim) : ITokenResolver
     {
         private EntityRef Entity => claim.Entity ?? throw new ExpansionException("元数据解析不了", "声明没有给出实体");
-        public MethodShape Method(int token) => metadata.Method(Entity) ?? throw new ExpansionException("元数据解析不了", $"方法 {Entity}");
-        public FieldShape Field(int token) => metadata.Field(Entity) ?? throw new ExpansionException("元数据解析不了", $"字段 {Entity}");
-        public TypeShape Type(int token) => metadata.Type(Entity) ?? throw new ExpansionException("元数据解析不了", $"类型 {Entity}");
+        public EntityRef Method(int token) => Entity;
+        public EntityRef Field(int token) => Entity;
+        public EntityRef Type(int token) => Entity;
     }
 
     public static ClaimTemplate Build(Claim claim, IEntityMetadata metadata, TermPool terms, int pointerBits)
@@ -89,9 +90,9 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
                 or StepKind.ClassInitialize or StepKind.Require))
                 throw new ClaimFormatException($"{entry.Id} 是数据搬动或控制转移，不是声明的操作");
         var opcode = IlWriter.Find(entry.Il) ?? throw new ExpansionException("目录项的指令不在指令表里", entry.Il);
-        var view = new View(claim, metadata);
-        MethodShape? method = opcode.Operand == OperandKind.Method ? view.Method(0) : null;
-        FieldShape? field = opcode.Operand == OperandKind.Field ? view.Field(0) : null;
+        var tokens = new Tokens(claim);
+        MethodShape? method = opcode.Operand == OperandKind.Method ? metadata.Method(tokens.Method(0)) : null;
+        FieldShape? field = opcode.Operand == OperandKind.Field ? metadata.Field(tokens.Field(0)) : null;
         TypeShape? subject = field?.Type ?? method?.Return;
         if (entry.ImpliedBits > 0) subject = new TypeShape(StackKind.Int32, entry.ImpliedBits, true, default);
         if (opcode.Operand is not (OperandKind.None or OperandKind.Method or OperandKind.Field or OperandKind.Type))
@@ -163,7 +164,7 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
         il.Plain("ret");
         var shape = new MethodShape(default, false, operands.ToImmutable(), null, VariantCondition.StaticMethod);
         var body = new MethodBody(shape, [], il.Build(), 0, true);
-        var expansion = IlExpander.Expand(body, view, terms, 1, pointerBits);
+        var expansion = IlExpander.Expand(body, metadata, tokens, terms, 1, pointerBits);
         if (!expansion.Entries.Contains((at, entry.Id)))
             throw new ClaimFormatException($"这条指令按元数据展开成 {expansion.Entries.FirstOrDefault(e => e.Offset == at).Entry}，不是声明的 {entry.Id}");
         Term? value = null;
