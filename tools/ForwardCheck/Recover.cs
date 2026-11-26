@@ -18,7 +18,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// </summary>
 internal static partial class Recover
 {
-    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show)
+    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show, string? emit)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
         var input = Il2CppInput.Load(binary, metadataPath);
@@ -45,6 +45,7 @@ internal static partial class Recover
         IDiscoverer[] discoverers = [new GenericDiscoverer()];
         int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
         var adversary = new Adversary();
+        var output = emit == null ? null : new Emit(emit, assemblies, metadata, facts);
         // 交叉对照的素材：已证明等价的用例的恢复结果，与签名相同的另一个用例的真实 IL 对照，应当被反驳。
         var recoveredBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens)>();
         var realBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens, TermPool Terms, int PointerBits)>();
@@ -125,6 +126,7 @@ internal static partial class Recover
 
             if (!body.Complete)
             {
+                output?.CheckHoles(module, body);
                 holed++;
                 var kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
                 foreach (var hole in body.Holes)
@@ -159,6 +161,8 @@ internal static partial class Recover
             // 对抗声明：只在恢复结果已被真实 IL 证明等价的用例上做，参照是这份解释。
             if (verdict.Length == 0)
             {
+                output?.Cases.Add(new(module, Convert.ToInt32(method.GetProperty("token").GetString()!, 16), name,
+                    Signature(real.Method), body, real, snapshot.Terms, snapshot.PointerBits));
                 recoveredBodies.Add((name, Signature(real.Method), recovered, tokens));
                 realBodies.Add((name, Signature(real.Method), real, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, snapshot.PointerBits));
             }
@@ -196,7 +200,8 @@ internal static partial class Recover
         Console.WriteLine($"交叉对照：{pairs} 对（一个用例的真实 IL 配上签名相同的另一个用例的恢复结果），被反驳 {rejected} 对，被证明 {passed.Count} 对");
         foreach (string line in passed) Console.WriteLine($"  被证明：{line}");
         adversary.Report();
-        return different == 0 && adversary.Failures == 0 ? 0 : 1;
+        bool emitted = output?.Run(equivalent, pairs) ?? true;
+        return different == 0 && adversary.Failures == 0 && emitted ? 0 : 1;
     }
 
     private static void Tally(SortedDictionary<string, int> counts, string key) => counts[key] = counts.GetValueOrDefault(key) + 1;
