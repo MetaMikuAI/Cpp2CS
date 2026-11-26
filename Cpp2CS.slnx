@@ -1,10 +1,13 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
+    <Project Path="src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <Project Path="src/Cpp2CS.Snapshot/Cpp2CS.Snapshot.csproj" />
     <Project Path="src/Cpp2CS.Spec/Cpp2CS.Spec.csproj" />
     <Project Path="src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
   </Folder>
   <Folder Name="/tools/">
+    <Project Path="tools/CanonicalExport/CanonicalExport.csproj" />
     <Project Path="tools/ArchCheck/ArchCheck.csproj" />
     <Project Path="tools/ForwardCheck/ForwardCheck.csproj" />
   </Folder>
