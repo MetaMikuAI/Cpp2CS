@@ -10,8 +10,11 @@ public sealed class LiftLocations(bool collectBlocks = true)
 {
     internal bool CollectBlocks => collectBlocks;
     public ulong? UnresolvedBranch { get; internal set; }
-    internal Dictionary<ulong, ulong[]> Tables { get; } = [];
-    public IReadOnlyDictionary<ulong, ulong[]> SwitchTargets => Tables;
+    public string? BranchReason { get; internal set; }
+    internal Dictionary<ulong, JumpTableInfo> Tables { get; } = [];
+    public IReadOnlyDictionary<ulong, JumpTableInfo> Switches => Tables;
+    internal Dictionary<ulong, ulong[]> TracedTargets { get; } = [];
+    public IReadOnlyDictionary<ulong, ulong[]> SwitchTargets => TracedTargets;
     public Dictionary<BlockId, (ulong Start, int Instructions)> Blocks { get; } = [];
 }
 
@@ -80,52 +83,6 @@ public sealed class Arm64Target
         throw new InvalidDataException("指令地址没有文件内容")));
     bool Tail(ulong pc) => entries.Contains(pc) || Unwind.Find(pc)?.Start == pc || linkageEntries.Contains(pc);
 
-    sealed record Table(int Index, ulong[] Arms, ulong Guard, ulong First);
-    // CMP Wn,#last; B.HI default; ADRP+ADD; ADR; LDRB/H; ADD Xd,Xbase,Woff,SXTW #2; BR Xd。
-    // 表项无符号；guard 的落空边必须是分派序列唯一的外部入口。
-    Table? JumpTable(ulong pc, Frame frame)
-    {
-        if (pc < frame.Start + 28) return null;
-        Instruction I(int back) => Decoder.Decode(Word(pc - (uint)(back * 4)));
-        var guard = I(6); var cmp = I(7); var page = I(5); var add = I(4); var anchor = I(3);
-        var load = I(2); var sum = I(1); var br = I(0);
-        if (cmp.Form != Form.Immediate || cmp.Name != "subs" || cmp.D != 31 || cmp.Width != 32 || cmp.Shift != 0 ||
-            guard.Form != Form.Condition || guard.Mode != 8 || guard.Destination(pc - 24) is var dest && dest >= pc - 20 && dest <= pc ||
-            page.Form != Form.Address || page.Name != "adrp" || add.Form != Form.Immediate || add.Name != "add" ||
-            add.Width != 64 || page.D != add.N || anchor.Form != Form.Address || anchor.Name != "adr" ||
-            load.Form != Form.Memory || load.Name is not ("ldrb" or "ldrh") || load.Mode is not (6 or 7) || load.Shift != (load.Size == 8 ? 0 : 1) ||
-            load.N != add.D || load.M != cmp.N || sum.Form is not (Form.Extended or Form.Shifted) || sum.Name != "add" || sum.Width != 64 ||
-            sum.N != anchor.D || sum.M != load.D || sum.Mode != (sum.Form == Form.Extended ? 6 : 0) || sum.Shift != 2 || br.N != sum.D) return null;
-        if (new[] { cmp.N, page.D, add.D, anchor.D, load.D, sum.D }.Any(r => r == 31) ||
-            cmp.N == page.D || cmp.N == add.D || cmp.N == anchor.D || cmp.N == load.D || cmp.N == sum.D || anchor.D == add.D || anchor.D == load.D) return null;
-        ulong proofStart = pc - 28;
-        if (load.Mode == 7)
-        {
-            // 比较 Wn 只约束低半。使用 Xn 索引时，还要证明上一条指令整写了 Wn。
-            if (proofStart < frame.Start + 4) return null;
-            var producer = I(8);
-            if (producer.Form is not (Form.Immediate or Form.Shifted or Form.Logical or Form.Wide or Form.Bitfield)
-                || producer.Width != 32 || producer.D != cmp.N) return null;
-            proofStart -= 4;
-        }
-        ulong table = page.Destination((pc - 20) & ~4095ul) + (ulong)(add.Imm << add.Shift);
-        ulong basis = anchor.Destination(pc - 12);
-        int count = checked((int)cmp.Imm + 1), bytes = load.Size / 8;
-        ulong length = (uint)(count * bytes);
-        if (elf.FileOffset(table, length) is not int start || !elf.Segments.Any(s => s.Type == 1 && (s.Flags & 2) == 0 &&
-            table >= s.Address && table - s.Address < s.FileSize && length <= s.FileSize - (table - s.Address))) return null;
-        var arms = new ulong[count];
-        for (int j = 0; j < count; j++)
-        {
-            int index = start + j * bytes;
-            ulong target = basis + 4ul * (bytes == 1 ? file[index] : BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(index)));
-            if (target < frame.Start || target >= frame.End || (target & 3) != 0 || (target >= pc - 24 && target <= pc)) return null;
-            arms[j] = target;
-        }
-        for (ulong j = table > 7 ? table - 7 : 0; j < table + length; j++) if (relocated.Contains(j)) return null;
-        return new(cmp.N, arms, proofStart, pc - 20);
-    }
-
     static readonly ulong arguments = Abi.Arguments.Aggregate(0ul, (mask, r) => mask | (1ul << r));
     static readonly ulong results = Abi.Results.Append(31).Aggregate(0ul, (mask, r) => mask | (1ul << r));
     public LiftResult Lift(ulong entry, LiftLocations? locations = null)
@@ -137,7 +94,7 @@ public sealed class Arm64Target
         var targets = new HashSet<ulong>();
         var tails = new HashSet<ulong>();
         var instructions = new Dictionary<ulong, Instruction>();
-        var tables = new Dictionary<ulong, Table>();
+        var tables = new Dictionary<ulong, JumpTableInfo>();
         var pads = new Dictionary<ulong, ulong>();
         var pending = new Stack<ulong>();
         pending.Push(entry);
@@ -154,13 +111,24 @@ public sealed class Arm64Target
                 instructions.Add(pc, i);
                 if (i.Form == Form.BranchRegister)
                 {
-                    if (JumpTable(pc, f) is not { } table)
+                    // 相对表分派的目标最后由 64 位 ADD 生成。普通间接尾跳无需建前驱图。
+                    string reason = "目标无相对表项加法";
+                    JumpTableInfo? table = null;
+                    for (ulong back = pc; back >= f.Start + 4 && instructions.TryGetValue(back - 4, out var writer); back -= 4)
                     {
-                        if (locations != null) locations.UnresolvedBranch = pc;
+                        if (writer.IsCall || writer.Conditional || writer.Form is Form.Branch or Form.BranchRegister or Form.Return or Form.Trap) break;
+                        if ((writer.WrittenGeneralRegisters & (1u << i.N)) == 0) continue;
+                        if (writer is { Name: "add", Width: 64, Shift: 2 })
+                            table = new JumpTables(entry, instructions, pads, tables).Resolve(pc, f, elf, file, relocated, out reason);
+                        break;
+                    }
+                    if (table == null)
+                    {
+                        if (locations != null) { locations.UnresolvedBranch = pc; locations.BranchReason = reason; }
                         return new(null, "间接跳转目标未证实");
                     }
                     tables.Add(pc, table);
-                    if (locations != null && !locations.CollectBlocks) locations.Tables.Add(pc, table.Arms);
+                    locations?.TracedTargets.Add(pc, table.Arms);
                     foreach (var arm in table.Arms.Distinct()) Edge(arm);
                     break;
                 }
@@ -189,13 +157,31 @@ public sealed class Arm64Target
                 pc += 4;
             }
         }
-        foreach (var (jump, t) in tables)
-            if (targets.Append(entry).Any(p => p > t.Guard && p <= jump && p != t.First) ||
-                instructions.Any(pair => pair.Value.Form is Form.Branch || pair.Value.Conditional ?
-                    pair.Value.Destination(pair.Key) == t.First : false) || entry == t.First || pads.ContainsValue(t.First) ||
-                tables.Values.Any(other => other.Arms.Contains(t.First))) return new(null, "跳转表边界未证实");
+        // 所有表项和异常入边已闭合。在完整图上重做证明，避免后来发现的入边绕过检查或改写基址。
+        if (tables.Count != 0)
+        {
+            var complete = new JumpTables(entry, instructions, pads, tables);
+            foreach (var (pc, t) in tables)
+            {
+                var proof = complete.Resolve(pc, f, elf, file, relocated, out string reason);
+                if (proof == null || proof.Load != t.Load || proof.Address != t.Address || proof.Basis != t.Basis ||
+                    !proof.Arms.AsSpan().SequenceEqual(t.Arms))
+                {
+                    if (locations != null) { locations.UnresolvedBranch = pc; locations.BranchReason = proof == null ? reason : "补全入边后表定义不唯一"; }
+                    return new(null, "跳转表边界未证实");
+                }
+            }
+            if (locations != null)
+                foreach (var (pc, t) in tables) locations.Tables.Add(pc, t);
+        }
 
         var heads = targets.Append(entry).Concat(tails).ToHashSet();
+        // 选择子取自读表前的索引。之后即使机器指令复用了该寄存器，块内的项仍然有效。
+        var loads = tables.Values.ToDictionary(t => t.Load);
+        heads.UnionWith(loads.Keys);
+        var dispatch = new HashSet<ulong>();
+        foreach (var (jump, t) in tables)
+            for (ulong p = t.Load + 4; p <= jump; p += 4) dispatch.Add(p);
         // 用实参行分段传递长直线上的值，限制规范化一次切片所需展开的表达式深度。
         if (instructions.Count > 16)
         {
@@ -203,11 +189,11 @@ public sealed class Arm64Target
             foreach (var pc in instructions.Keys.Order())
             {
                 if (heads.Contains(pc)) count = 0;
-                if (count == 16) { heads.Add(pc); count = 0; }
+                if (count >= 16 && !dispatch.Contains(pc)) { heads.Add(pc); count = 0; }
                 count++;
             }
         }
-        var live = LiveRows.Compute(heads, instructions, pads, tables.ToDictionary(p => p.Key, p => (p.Value.Index, p.Value.Arms)), f.End);
+        var live = LiveRows.Compute(heads, instructions, pads, tables, f.End);
         var builder = new SnapshotBuilder(64);
         builder.SetReturnSlots(Abi.Slots(Abi.Return));
         int[] widths = Enumerable.Range(0, Abi.Count).Select(Abi.Width).ToArray();
@@ -245,6 +231,7 @@ public sealed class Arm64Target
             }
             var state = new Machine(builder, b, row);
             Exit To(ulong dest) => Exit.To(Block(dest, defined), Out(dest, state.Row));
+            Term? selector = null;
             int instructionCount = 0;
             for (ulong pc = start; ; pc += 4)
             {
@@ -256,14 +243,15 @@ public sealed class Arm64Target
                     builder.Return(b, state.ReturnValues(link)); break;
                 }
                 var i = instructions[pc];
+                if (loads.TryGetValue(pc, out var loaded)) selector = state.G(loaded.Index, 32);
                 if (i.Form == Form.Return) { builder.Return(b, state.ReturnValues(state.G(i.N))); break; }
                 if (i.Form == Form.Trap) { builder.Terminate(b, Terminator.Single(Exit.Trap, pc)); break; }
                 if (i.Form == Form.BranchRegister)
                 {
                     var t = tables[pc];
                     // 末项兼作默认出口；支配此处的有界比较排除了所有越界值。
-                    var arms = t.Arms.Select(To).Append(To(t.Arms[^1])).ToImmutableArray();
-                    builder.Terminate(b, Terminator.Switch(state.G(t.Index, 32), arms, pc)); break;
+                    var arms = t.Arms.Select(To).ToImmutableArray();
+                    builder.Terminate(b, Terminator.Switch(selector ?? throw new InvalidOperationException("读表与跳转不在同一块"), arms, pc)); break;
                 }
                 if (i.Conditional)
                 {
@@ -276,7 +264,7 @@ public sealed class Arm64Target
                     bool invoke = pads.TryGetValue(pc, out ulong pad);
                     var unwind = state.Call(target, pc, defined, invoke);
                     defined = results;
-                    if (invoke) { builder.Terminate(b, Terminator.Invoke(To(pc + 4), Exit.To(Block(pad, defined), Out(pad, unwind)), pc)); break; }
+                    if (invoke) { builder.Terminate(b, Terminator.Invoke(To(pc + 4), Exit.To(Block(pad, (1ul << 31) | 3), Out(pad, unwind)), pc)); break; }
                     if (pc + 4 == f.End) { builder.Terminate(b, Terminator.Single(Exit.NoReturn, pc)); break; }
                 }
                 else { state.Apply(i, pc); ulong bits = (ulong)LiveRows.Description(i).Write & arguments; defined |= bits; }

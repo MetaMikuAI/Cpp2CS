@@ -52,7 +52,9 @@ internal sealed unsafe class Disassembly : IDisposable
     {
         if (names.TryGetValue(reg, out int existing)) return existing;
         var id = Marshal.PtrToStringAnsi(NativeApi.cs_reg_name(handle, reg))!;
-        int r = id switch
+        return names[reg] = RegisterName(id);
+    }
+    static int RegisterName(string id) => id switch
         {
             "fp" => 29,
             "lr" => 30,
@@ -62,8 +64,6 @@ internal sealed unsafe class Disassembly : IDisposable
             _ when id.Length > 1 && int.TryParse(id.AsSpan(1), out int n) && "bhsdqv".Contains(id[0]) => n + 32,
             _ => -1
         };
-        return names[reg] = r;
-    }
     public NativeInstruction At(ulong pc, uint word)
     {
         if (cache.TryGetValue((pc, word), out var instruction)) return instruction;
@@ -88,6 +88,16 @@ internal sealed unsafe class Disassembly : IDisposable
             read = (read | written) & ~flags;
             if (name is "ccmp" or "ccmn" or "fccmp" or "fccmpe") read |= flags;
             written = flags;
+        }
+        // DDI 0487，ADDS/SUBS：Rd 接收加减结果，NZCV 接收标志。Capstone 5 的立即数形式可只列出 NZCV。
+        if (name is "adds" or "subs")
+        {
+            var fields = operands.Split(',', StringSplitOptions.TrimEntries);
+            written = UInt128.One << 65;
+            if (RegisterName(fields[0]) is int dest && dest >= 0) written |= UInt128.One << dest;
+            read = 0;
+            foreach (string source in fields.AsSpan(1))
+                if (RegisterName(source) is int reg && reg >= 0) read |= UInt128.One << reg;
         }
         NativeApi.cs_free(raw, 1);
         return cache[(pc, word)] = new(name, operands, read, written);

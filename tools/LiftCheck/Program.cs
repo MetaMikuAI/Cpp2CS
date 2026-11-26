@@ -18,6 +18,7 @@ switch (args[0])
 {
     case "scan" when args.Length == 4: scan.Inventory(); break;
     case "scan" when args.Length == 6: scan.Inventory(Convert.ToUInt64(args[4], 16), Convert.ToUInt64(args[5], 16)); break;
+    case "layouts" when args.Length == 4: scan.Layouts(); break;
     case "branches": BranchSurvey.Write(scan, args[3]); break;
     case "step": case "inspect": case "check":
         NativeApi.Load(args.ElementAtOrDefault(5) ?? Environment.GetEnvironmentVariable("UNICORN_LIBRARY") ?? "libunicorn.so.2",
@@ -34,6 +35,10 @@ switch (args[0])
             Execution.Inspect(scan, args[3], Convert.ToUInt64(args[4], 16), ulong.Parse(args[7]));
             break;
         }
-        Execution.Check(scan, args[3], int.Parse(args[4]), args.ElementAtOrDefault(7)); break;
+        var options = args.Skip(7).ToArray();
+        string? baseline = null;
+        if (options is [.., "--new-tables", var inventory]) { baseline = inventory; options = options[..^2]; }
+        if (options.Length > 1) throw new ArgumentException("check 的可选参数是历史执行清单和 --new-tables 历史提升清单");
+        Execution.Check(scan, args[3], int.Parse(args[4]), options.FirstOrDefault(), baseline); break;
     default: throw new ArgumentException("未知核对模式");
 }

@@ -227,7 +227,7 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
     public Term[] Call(Term target, ulong pc, ulong defined, bool unwind)
     {
         comparison = null;
-        var arguments = Abi.Arguments.Where(r => (defined & (1ul << r)) != 0).Select(r => (Abi.Entry(r)!.Value, registers[r])).ToArray();
+        var arguments = Abi.Arguments.Where(r => r == 31 || (defined & (1ul << r)) != 0).Select(r => (Abi.Entry(r)!.Value, registers[r])).ToArray();
         var resultSlots = Abi.Slots(Abi.Results);
         if (unwind) resultSlots = [.. resultSlots, (new(SlotKind.Unwind, 0), 64), (new(SlotKind.Unwind, 1), 64)];
         var results = builder.Call(block, target, arguments, resultSlots, pc);
@@ -237,10 +237,9 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
             if (r is >= 40 and < 48) registers[r] = T.Concat(T.Truncate(registers[r], 64), T.Undefined(64));
             else registers[r] = T.Undefined(Abi.Width(r));
         }
+        var row = unwind ? (Term[])registers.Clone() : [];
+        if (unwind) { row[0] = results[^2]; row[1] = results[^1]; }
         for (int j = 0; j < Abi.Results.Length; j++) registers[Abi.Results[j]] = results[j];
-        if (!unwind) return [];
-        var row = (Term[])registers.Clone();
-        row[0] = results[^2]; row[1] = results[^1];
         return row;
     }
 }

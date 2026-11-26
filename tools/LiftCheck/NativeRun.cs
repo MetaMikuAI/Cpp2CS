@@ -22,6 +22,9 @@ internal sealed unsafe class NativeRun : IDisposable
     readonly TextWriter? instructions;
     readonly UndefinedSource? undefined;
     ulong defined = 0xfful | 1ul << 8 | 1ul << 31 | 0xfful << 32;
+    readonly IReadOnlyDictionary<ulong, JumpTableInfo>? tables;
+    readonly HashSet<ulong>? tableLoads;
+    (ulong Pc, ulong Address, int Bytes)? lastTableRead;
     ulong? resume;
     bool finished;
     ulong pc;
@@ -31,8 +34,10 @@ internal sealed unsafe class NativeRun : IDisposable
     delegate void Data(nint uc, int type, ulong at, int size, long value, nint data);
     [return: MarshalAs(UnmanagedType.I1)]
     delegate bool Missing(nint uc, int type, ulong at, int size, long value, nint data);
-    public NativeRun(Image image, Disassembly disassembly, Frame frame, ulong seed, int budget, HashSet<uint> executed, TextWriter? instructions = null, UndefinedSource? undefined = null)
+    public NativeRun(Image image, Disassembly disassembly, Frame frame, ulong seed, int budget, HashSet<uint> executed, TextWriter? instructions = null, UndefinedSource? undefined = null, IReadOnlyDictionary<ulong, JumpTableInfo>? tables = null)
     {
+        this.tables = tables;
+        if (tables is { Count: > 0 }) tableLoads = tables.Values.Select(t => t.Load).ToHashSet();
         this.undefined = undefined; this.instructions = instructions; this.budget = budget; this.executed = executed;
         this.image = image; this.disassembly = disassembly; this.frame = frame; this.seed = seed;
         if (uc_open(2, 0, out engine) != 0) throw new InvalidOperationException("Unicorn 无法创建 ARM64 CPU");
@@ -73,6 +78,7 @@ internal sealed unsafe class NativeRun : IDisposable
     {
         // Unicorn 的 Q 寄存器访存通过两个 64 位回调报告。只在独立反汇编指定 Q 访问、
         // 同一指令、同一方向、两个地址严格相邻时组成一个架构访问；其余形态报错。
+        if (type == 16 && tableLoads?.Contains(pc) == true) lastTableRead = (pc, address, size);
         if (vectorTransfers > 0)
         {
             string kind = type == 16 ? "读" : "写";
@@ -161,6 +167,15 @@ internal sealed unsafe class NativeRun : IDisposable
                 EventCall(target);
                 if (pc + 4 == frame.End) End("NoReturn");
                 else { resume = pc + 4; uc_emu_stop(engine); }
+                break;
+            case "br" when tables != null && tables.TryGetValue(pc, out var table):
+                if (lastTableRead is not { } read || read.Pc != table.Load || read.Bytes != table.Bytes ||
+                    read.Address - table.Address >= (ulong)table.Arms.Length * (uint)table.Bytes ||
+                    (read.Address - table.Address) % (uint)table.Bytes != 0)
+                { trace.Error = "原生表项地址或位宽不符"; uc_emu_stop(engine); break; }
+                int index = (int)((read.Address - table.Address) / (uint)table.Bytes);
+                trace.Add("表项", pc, index, Get(BranchReg(i.Operands)));
+                lastTableRead = null;
                 break;
             case "ret":
                 Return(i.Operands.Length == 0 ? Get(30) : BranchReg(i.Operands) is int ret && ret >= 0 ? Get(ret) : 0); break;

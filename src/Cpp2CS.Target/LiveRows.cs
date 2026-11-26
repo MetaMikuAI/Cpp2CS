@@ -83,7 +83,7 @@ internal static class LiveRows
     }
 
     public static Dictionary<ulong, (int[] Registers, ulong CallMask)> Compute(HashSet<ulong> heads, Dictionary<ulong, Instruction> code,
-        Dictionary<ulong, ulong> pads, Dictionary<ulong, (int Index, ulong[] Arms)> tables, ulong end)
+        Dictionary<ulong, ulong> pads, Dictionary<ulong, JumpTableInfo> tables, ulong end)
     {
         var blocks = new Dictionary<ulong, (UInt128 Use, UInt128 Def, ulong Calls, List<ulong> Next)>();
         var live = new Dictionary<ulong, UInt128>();
@@ -100,7 +100,7 @@ internal static class LiveRows
                     use |= read & ~def; def |= write;
                     if (i.Form is Form.Trap or Form.Return) break;
                     if (i.Form == Form.BranchRegister)
-                    { var t = tables[pc]; use |= G(t.Index) & ~def; next.AddRange(t.Arms); break; }
+                    { var t = tables[pc]; next.AddRange(t.Arms); break; }
                     if (i.Form == Form.Branch || i.Conditional) next.Add(i.Destination(pc));
                     if (i.Form == Form.Branch || pc + 4 == end) break;
                     if (pads.TryGetValue(pc, out var pad)) next.Add(pad);

@@ -281,6 +281,8 @@ internal sealed class Interpreter(Image image, ulong seed, HashSet<EdgeId> cover
                 if (trace.Error != null) return trace;
             }
             var exit = end.Exits[edge]; covered.Add(new(id, edge));
+            if (end.Kind == TerminatorKind.Switch)
+                trace.Add("表项", end.Address, edge, locations.Blocks[exit.Target].Start);
             if (exit.Kind == ExitKind.Target)
             {
                 // 本块参数已存入求值表，同宽的下一行可以复用数组。

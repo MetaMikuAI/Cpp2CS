@@ -80,16 +80,24 @@ internal static class EnvironmentState
 {
     public const int StepLimit = 4096;
     public static readonly ulong[] Seeds = [11, 29, 47, 61, 83];
+    public static readonly ulong[] TableSeeds = [.. Seeds, 101, 103, 107];
+    static bool TableBias(ulong seed) => seed is 101 or 103 or 107;
     public static ulong Mix(ulong x)
     {
         x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9;
         x = (x ^ (x >> 27)) * 0x94d049bb133111eb;
         return x ^ (x >> 31);
     }
-    public static bool Biased(ulong seed) => seed is 61 or 83;
+    public static bool Biased(ulong seed) => seed is 61 or 83 || TableBias(seed);
     public static ulong MemoryWord(ulong seed, ulong address)
     {
         ulong sample = Mix(address + 0x9e3779b97f4a7c15ul * seed);
+        if (TableBias(seed) && (sample & 3) != 0)
+        {
+            // 两个相邻的 32 位槽均取小整数，窄字段保持同一内存的小端字节关系。
+            ulong low = (sample >> 8) & 15, high = (sample >> 16) & 15;
+            return low | high << 32;
+        }
         if (Biased(seed))
         {
             // 以八字节为单位生成环境；同一位置的不同宽度访问保持小端重叠关系。
@@ -122,6 +130,7 @@ internal static class EnvironmentState
             return ((UInt128)high << 64) | low;
         }
         if (call == 0 && r < 8 && seed == 11) return (uint)r;
+        if (TableBias(seed) && r < 8 && (Mix(key) & 3) != 0) return (Mix(key) >> 8) & 15;
         if (Biased(seed) && r < 8)
         {
             ulong sample = Mix(key);

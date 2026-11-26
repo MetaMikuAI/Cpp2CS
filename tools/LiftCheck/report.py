@@ -13,7 +13,41 @@ def rows(path):
         yield from csv.reader(source, delimiter="\t")
 
 
-def report(prefix, symbols, cases):
+def switch_results(prefix, functions, suspects):
+    confirmed = {(int(a, 16), int(pc, 16)): (int(n), result)
+                 for a, pc, n, result in rows(prefix + ".switches.local.tsv")}
+    items = list(rows(prefix + ".items.local.tsv"))
+    outcomes = {a: result for a, _, _, _, _, result in items}
+    summary = dict(confirmed_sites=len(confirmed), checked=len(outcomes),
+                   outcomes=Counter(outcomes.values()), checked_sites=len(items),
+                   ordinary_items=sum(int(row[2]) for row in items),
+                   covered_items=sum(int(row[3]) for row in items),
+                   total_items=sum(int(row[4]) for row in items))
+    if suspects:
+        reasons = {int(a, 16): (int(pc, 16), reason) for a, pc, reason in rows(prefix + ".rejected.local.tsv")}
+        groups = Counter()
+        with open(prefix + ".suspects.local.tsv", "w") as out:
+            for a, pc, _, _, _, kind in rows(suspects):
+                if kind != "疑表":
+                    continue
+                entry, branch = int(a, 16), int(pc, 16)
+                result = functions[entry][2]
+                detail = result
+                if (entry, branch) in confirmed:
+                    group = "已确认"
+                elif entry in reasons:
+                    rejected, detail = reasons[entry]
+                    group = detail if rejected == branch else "同函数另一间接跳转未证实"
+                    detail = f"{rejected:x} {detail}"
+                else:
+                    group = result
+                groups[group] += 1
+                print(a, pc, group, result, detail, sep="\t", file=out)
+        summary["suspects"] = groups
+    return summary
+
+
+def report(prefix, symbols, cases, suspects=None):
     functions = {int(a, 16): (s, e, result) for a, s, e, result in rows(prefix + ".functions.local.tsv")}
     checked = {int(a, 16): (r, int(covered), int(total)) for a, r, covered, total in rows(prefix + ".execution.local.tsv")}
     lift = Counter(row[2] for row in functions.values())
@@ -32,6 +66,8 @@ def report(prefix, symbols, cases):
                 destinations[old][outcome] += 1
             groups[group][outcome] += 1
         summary.update(destinations=destinations, groups=groups)
+    if Path(prefix + ".items.local.tsv").exists():
+        summary["switches"] = switch_results(prefix, functions, suspects)
     branch_file = Path(prefix + ".branches.local.tsv")
     if branch_file.exists():
         classes = defaultdict(Counter)
@@ -86,5 +122,6 @@ if __name__ == "__main__":
     parser.add_argument("prefix")
     parser.add_argument("--symbols")
     parser.add_argument("--cases")
+    parser.add_argument("--suspects", help="前次间接跳转分类清单，按入口和 BR 地址核实疑表去向")
     args = parser.parse_args()
-    report(args.prefix, args.symbols, args.cases)
+    report(args.prefix, args.symbols, args.cases, args.suspects)
