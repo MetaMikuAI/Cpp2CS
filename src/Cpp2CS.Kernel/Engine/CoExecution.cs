@@ -490,10 +490,13 @@ public sealed partial class CoExecution
                 case CallOccurrence call:
                 {
                     if (call.Target is null) throw new Refuted(Verdict.MissingFact, $"原语调用 {call.Primitive} 没有登记");
-                    if (call.ByJump) throw new Refuted(Verdict.Insufficient, "由跳转完成的调用：前提的核对尚未实现") { Unsupported = true };
-                    if (!operands[0].IsConstant) throw new Refuted(Verdict.MissingFact, $"间接调用的目标没有命名：{operands[0]}");
+                    if (!operands[0].IsConstant)
+                        throw new Refuted(Verdict.MissingFact, call.ByJump
+                            ? $"由跳转完成的调用：目标不是已知的函数入口（间接跳转的目标没有命名）：{operands[0]}"
+                            : $"间接调用的目标没有命名：{operands[0]}");
                     ulong address = (ulong)operands[0].Value;
                     var callee = facts.Callee(address);
+                    if (call.ByJump) JumpReturns(ref state, graph, snapshot, side, id, inner, callee);
                     var after = side with { Index = side.Index + 1 };
                     switch (callee.Kind)
                     {
@@ -554,6 +557,46 @@ public sealed partial class CoExecution
             }
             state = Place(state, role, side with { Index = side.Index + 1, Env = env });
         }
+    }
+
+    /// <summary>
+    /// 由跳转完成的调用读成“调用后返回”的两个前提（设计 7.1），不成立时这次调用是未命名的效果：
+    /// 目标是函数入口——代码地图里的入口，或有命名依据的运行时函数；
+    /// 返回行里的返回地址、栈指针与各保存寄存器等于入口处的值，与普通返回是同一个判断。
+    /// 栈指针是否归位、返回地址留在寄存器里还是从栈上取回，都只是后一个判断的不同证明途径。
+    /// </summary>
+    private void JumpReturns(ref State state, IFlowGraph graph, MethodSnapshot snapshot, Side side, OccurrenceId id, bool inner, Callee callee)
+    {
+        if (callee.Kind == CalleeKind.Unknown)
+            throw new Refuted(Verdict.MissingFact, $"由跳转完成的调用：目标 {callee.Name} 不是已知的函数入口");
+        var row = graph.Terminator(side.Block).Exits[0].Arguments;
+        for (int k = 0; k < snapshot.ReturnSlots.Length; k++)
+        {
+            var slot = snapshot.ReturnSlots[k];
+            if (slot.Kind is not (SlotKind.ReturnAddress or SlotKind.StackPointer or SlotKind.Preserved)) continue;
+            Term? expected = null;
+            foreach (var parameter in snapshot.EntryParameters)
+                if (parameter.Slot == slot) expected = inner ? side.Env.GetValueOrDefault(parameter) : parameter;
+            // 这一格取自这次调用的结果时，它不是跳转那一刻的值。
+            bool same = expected is not null && !MentionsResult(row[k], id)
+                && state.Conditions.Same(Value(row[k], side, ref state, lower: false, foreign: inner), expected);
+            if (!same)
+                throw new Refuted(Verdict.MissingFact, $"由跳转完成的调用：返回行的 {slot} 不是入口处的值，不能读成调用后返回");
+        }
+    }
+
+    private static bool MentionsResult(Term term, OccurrenceId occurrence)
+    {
+        var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
+        bool Go(Term t)
+        {
+            if (t.Kind == TermKind.Result) return t.Occurrence == occurrence;
+            if (t.Operands.Length == 0 || !seen.Add(t)) return false;
+            foreach (var operand in t.Operands)
+                if (Go(operand)) return true;
+            return false;
+        }
+        return Go(term);
     }
 
     private Term EventResult(int serial, int slot, int width) =>
