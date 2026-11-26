@@ -72,6 +72,55 @@ internal static class Counterexamples
                 return Rejected(() => Expand(direct, null, [outer, Int32], metadata: view), "目录里没有适用的变体");
             }),
 
+            // 设计 6.2“展开”：目标唯一的调用等于被调方法的效果图；9.1：展开只对目标唯一的调用成立。
+            // 语料 Construction.NodeSwapped 的真实 IL 在 newobj 之前有 call Support::Opaque(int32); pop，Opaque 的方法体是
+            // ldarg.0; ldc.i4.s 0x5a; xor; ret。原生代码把它内联后整个消去，恢复出的 IL 没有这次调用，二者等价。
+            // 被调方法写静态字段时（ECMA-335 III.4.30 stsfld），少了这次调用就少了一次类初始化与一次写入；另一侧自己触发了类初始化
+            // （III.4.14 ldsfld）时，仍少一次写入。调用的结果被用到时，少了它结果就不同。经虚表的调用（III.4.2 callvirt）目标不唯一，
+            // 方法操作数的方法体不是它的含义。这几种都必须判为不等价。
+            new("IL 对照里少一次调用", "设计 6.2、9.1；ECMA-335 III.3.19、III.4.2、III.4.14、III.4.30；语料 Construction.NodeSwapped 的真实 IL", () =>
+            {
+                const int Pure = 0x06000001, Writer = 0x06000002, First = 0x06000003, Second = 0x06000004;
+                byte[] pure = [0x02, 0x1f, 0x5a, 0x61, 0x2a];                        // ldarg.0; ldc.i4.s 0x5a; xor; ret
+                byte[] writes = [0x02, 0x80, 1, 0, 0, 4, 0x02, 0x2a];                // ldarg.0; stsfld F; ldarg.0; ret
+                byte[] dropped = [0x02, 0x2a];                                       // ldarg.0; ret
+                byte[] reads = [0x7e, 1, 0, 0, 4, 0x26, 0x02, 0x2a];                 // ldsfld F; pop; ldarg.0; ret
+                byte[] Discard(int method) => [0x02, 0x28, (byte)method, 0, 0, 6, 0x26, 0x02, 0x2a];   // ldarg.0; call M; pop; ldarg.0; ret
+                byte[] used = [0x02, 0x28, 1, 0, 0, 6, 0x2a];                        // ldarg.0; call Pure; ret
+                var bodies = new Dictionary<long, byte[]> { [Pure] = pure, [Writer] = writes, [First] = [0x2a], [Second] = [0x2a] };
+                bool Same(byte[] left, byte[] right, Dictionary<long, byte[]> known) =>
+                    Compare(left, right, Int32, [Int32], known).Verdict == Verdict.Proved;
+
+                if (!Same(Discard(Pure), dropped, bodies) || !Same(dropped, Discard(Pure), bodies)) return "被调方法没有可观察的效果、结果被丢弃：少了这次调用应当等价";
+                if (Same(Discard(Pure), dropped, [])) return "没有被调方法的方法体时不能展开，却判了等价";
+                if (!Same(Discard(Writer), writes, bodies)) return "被调方法的写入展开后应与直接写入等价";
+                if (Same(Discard(Writer), dropped, bodies)) return "被调方法写静态字段，少了这次调用却判了等价";
+                var unwritten = Compare(Discard(Writer), reads, Int32, [Int32], bodies);
+                if (unwritten.Verdict == Verdict.Proved) return "被调方法写静态字段，另一侧只触发类初始化、没有写入，却判了等价";
+                if (!unwritten.Detail.Contains("没有写")) return $"反驳的原因不是少了写入：{unwritten.Detail}";
+                if (!Same(used, pure, bodies)) return "调用的结果应等于被调方法的返回值";
+                if (Same(used, dropped, bodies)) return "调用的结果被用到，少了这次调用却判了等价";
+
+                // 两次经虚表的调用，方法操作数不同。即使两个方法操作数的方法体都是空的，也不能拿它们当调用的含义。
+                var asked = new List<long>();
+                byte[] Virtual(int method) => [0x02, 0x6f, (byte)method, 0, 0, 6, 0x2a];   // ldarg.0; callvirt M; ret
+                var result = Compare(Virtual(First), Virtual(Second), null, [Reference], bodies, asked);
+                if (result.Verdict == Verdict.Proved) return "两次目标不唯一的调用方法不同，却判了等价";
+                return asked.Count == 0 ? null : "目标不唯一的调用被展开了";
+            }),
+
+            // ECMA-335 III.4.31 throw：抛出的是栈顶的那个对象。设计 6.1：抛出是事件，同一个事件须同操作数。
+            // 两个引用形参都非空的路径上，一侧抛出第一个、另一侧抛出第二个，必须判为不等价。
+            new("抛出的须是同一个对象", "ECMA-335 III.4.31；设计 6.1", () =>
+            {
+                // ldarg.0; brfalse.s 末尾; ldarg.1; brfalse.s 末尾; ldarg.N; throw; ret
+                byte[] Throws(byte which) => [0x02, 0x2c, 5, 0x03, 0x2c, 2, which, 0x7a, 0x2a];
+                if (Compare(Throws(0x02), Throws(0x02), null, [Reference, Reference], []).Verdict != Verdict.Proved) return "两侧抛出同一个对象应当等价";
+                var result = Compare(Throws(0x02), Throws(0x03), null, [Reference, Reference], []);
+                if (result.Verdict == Verdict.Proved) return "两侧抛出不同的对象，却判了等价";
+                return result.Detail.Contains("异常对象不同") ? null : $"反驳的原因不是抛出的对象：{result.Detail}";
+            }),
+
             // 设计 14.6：接口查找的参数是接收者对象 (o, I, s)；运行时 vm/ClassInlines.h 的 GetInterfaceInvokeDataFromVTable(obj, itf, slot)
             // 在慢路径上把对象本身交给 GetInterfaceInvokeDataFromVTableSlowPath。
             new("接口查找保留接收者", "设计 14.6；libil2cpp vm/ClassInlines.h GetInterfaceInvokeDataFromVTable", () =>
@@ -393,6 +442,25 @@ internal static class Counterexamples
         return IlExpander.Expand(body, metadata ?? new StaticFieldView(), new FixtureTokens(), new TermPool(), 1, 64).Graph;
     }
 
+    /// <summary>
+    /// 两段签名相同的 IL 的对照（没有 this）。bodies 按方法记号给出被调方法的方法体，asked 记下被问到的方法。
+    /// </summary>
+    private static ProofResult Compare(byte[] left, byte[] right, TypeShape? returns, TypeShape[] parameters, Dictionary<long, byte[]> bodies,
+        List<long>? asked = null)
+    {
+        var pool = new TermPool();
+        var view = new CallView();
+        var tokens = new FixtureTokens();
+        MethodBody Body(byte[] code, MethodShape method) => new(method, [], [.. code], 0, InitLocals: true);
+        var root = new MethodShape(default, false, [.. parameters], returns, VariantCondition.StaticMethod);
+        return CoExecution.Equivalent(IlExpander.Expand(Body(left, root), view, tokens, pool, 1, 64).Graph,
+            IlExpander.Expand(Body(right, root), view, tokens, pool, 2, 64).Graph, Body(left, root), new LayoutFacts(), (method, graph) =>
+            {
+                asked?.Add(method.Key);
+                return bodies.TryGetValue(method.Key, out var code) ? IlExpander.Expand(Body(code, view.Method(method)), view, tokens, pool, graph, 64).Graph : null;
+            });
+    }
+
     private static ImmutableArray<WalkPath> Walk(IFlowGraph graph)
     {
         var result = new ValueSources(graph, graph.Terms).Walk(new([new(graph.Entry, 0)], []));
@@ -536,6 +604,32 @@ internal static class Counterexamples
         public TypeShape Type(EntityRef entity) => Int32;
         public FieldShape Field(EntityRef entity) => new(entity, default, Int32, IsStatic: true, HasInitializer: true, PreciseInitialization: true, -1);
         public MethodShape Method(EntityRef entity) => new(entity, false, [], null, VariantCondition.StaticMethod);
+    }
+
+    /// <summary>
+    /// 调用的夹具。字段是静态的 int32，所属的类有静态构造函数。方法 0x06000001、0x06000002 是 int32 → int32 的静态方法；
+    /// 其余是类上的虚方法，无参无返回值。
+    /// </summary>
+    private sealed class CallView : IMetadataView
+    {
+        public TypeShape Type(EntityRef entity) => Int32;
+        public FieldShape Field(EntityRef entity) => new(entity, default, Int32, IsStatic: true, HasInitializer: true, PreciseInitialization: true, -1);
+        public MethodShape Method(EntityRef entity) => entity.Key is 0x06000001 or 0x06000002
+            ? new(entity, false, [Int32], Int32, VariantCondition.StaticMethod)
+            : new(entity, true, [Reference], null, VariantCondition.ClassVirtual);
+    }
+
+    /// <summary>IL 对照用到的现场事实：运行时布局，以及静态字段在静态区里的偏移（按字段记号的序号排开）。没有原生代码。</summary>
+    private sealed class LayoutFacts : INativeFacts
+    {
+        public Cpp2CS.Spec.Runtime.RuntimeLayout Layout => Cpp2CS.Spec.Runtime.RuntimeLayout.Unity2022Lp64;
+        public Callee Callee(ulong address) => throw new InvalidOperationException("夹具里没有原生代码");
+        public ulong? Entry(EntityRef method) => null;
+        public int? InstanceFieldOffset(EntityRef field) => null;
+        public int? StaticFieldOffset(EntityRef field) => (int)(field.Key & 0xffff) * 8;
+        public bool InImageData(ulong address) => false;
+        public ulong? LinkConstant(ulong address) => null;
+        public EntityRef? TypeAtSlot(ulong address) => null;
     }
 
     /// <summary>

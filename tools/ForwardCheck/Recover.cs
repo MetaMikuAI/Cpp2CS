@@ -149,7 +149,7 @@ internal static partial class Recover
             {
                 var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
                 var actual = IlExpander.Expand(recovered, entities, tokens, snapshot.Terms, 2, snapshot.PointerBits);
-                var result = CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts);
+                var result = CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts, metadata.Callees(snapshot.Terms, snapshot.PointerBits));
                 verdict = result.Verdict == Verdict.Proved ? "" : $"{result.Verdict}：{result.Detail}";
             }
             catch (ExpansionException e)
@@ -172,7 +172,7 @@ internal static partial class Recover
                     var (body2, tokens2) = candidate.Encode()!.Value;
                     var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
                     var actual = IlExpander.Expand(body2, entities, tokens2, snapshot.Terms, 2, snapshot.PointerBits);
-                    return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts).Verdict == Verdict.Proved;
+                    return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts, metadata.Callees(snapshot.Terms, snapshot.PointerBits)).Verdict == Verdict.Proved;
                 });
             lines.Add($"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
                 + $"、指令 {body.Instructions.Count(i => i.Opcode[0] != '.')} 条{(verdict.Length == 0 ? "" : "；" + Short(verdict))}");
@@ -194,7 +194,7 @@ internal static partial class Recover
                 pairs++;
                 var left = IlExpander.Expand(expected.Body, metadata.Facts, expected.Tokens, expected.Terms, number++, expected.PointerBits);
                 var right = IlExpander.Expand(other.Body, entities, other.Tokens, expected.Terms, number++, expected.PointerBits);
-                if (CoExecution.Equivalent(left.Graph, right.Graph, expected.Body, facts).Verdict == Verdict.Proved) passed.Add($"{expected.Name} 的真实 IL ≡ {other.Name} 的恢复结果");
+                if (CoExecution.Equivalent(left.Graph, right.Graph, expected.Body, facts, metadata.Callees(expected.Terms, expected.PointerBits)).Verdict == Verdict.Proved) passed.Add($"{expected.Name} 的真实 IL ≡ {other.Name} 的恢复结果");
                 else rejected++;
             }
         Console.WriteLine($"交叉对照：{pairs} 对（一个用例的真实 IL 配上签名相同的另一个用例的恢复结果），被反驳 {rejected} 对，被证明 {passed.Count} 对");
