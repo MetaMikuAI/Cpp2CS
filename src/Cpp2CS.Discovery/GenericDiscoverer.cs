@@ -7,220 +7,196 @@ using Cpp2CS.Spec.Catalog;
 
 namespace Cpp2CS.Discovery;
 
-/// <summary>
-/// 通用发现器（设计 9.6）：由目录驱动，从每个效果出发，找主效果与它相符的目录项，由主效果的操作数定出模板的形参；
-/// 模板里的检查按操作数在效果图的条件抛出里取候选。它只提出声明，可以多提、错提：同一处效果会给出占用不同的几条，
-/// 由证明与选择取舍。这里的类型只是找候选的线索，不是结论。
-/// </summary>
+/// <summary>按模板的最后一个效果定位操作，再按已绑定的操作数查找其余步骤。采纳由内核证明。</summary>
 public sealed class GenericDiscoverer : IDiscoverer
 {
     public string Name => "generic";
 
-    public IEnumerable<Claim> Propose(FactView facts)
+    public IEnumerable<Claim> Propose(FactView facts) =>
+        facts.Effects.Failure is null ? new TemplateSearch(facts).Propose() : [];
+}
+
+internal sealed record Plan(CatalogEntry Entry, int Main)
+{
+    internal static IEnumerable<Plan> StraightLine()
     {
-        var graph = facts.Effects;
-        if (graph.Failure is not null) yield break;
-        var terms = graph.Snapshot.Terms;
-        var types = new Dictionary<Term, TypeShape>(ReferenceEqualityComparer.Instance);
-        foreach (var (value, type, _) in graph.Arguments) types[value] = type;
-        int pointerBits = facts.Layout.PointerBits;
-
-        Term OnStack(Term stored, TypeShape type) =>
-            type.Kind != StackKind.Int32 || stored.Width >= 32 ? stored
-            : type.Signed && !type.TwoValued ? terms.SignExtend(stored, 32) : terms.ZeroExtend(stored, 32);
-        // 存进较窄位置的值在栈上的写法：低位相同的 32 位值。
-        Term Widen(Term stored) =>
-            stored.Width >= 32 ? stored
-            : stored is { Kind: TermKind.Slice, Offset: 0 } slice && slice.Operands[0].Width >= 32 ? terms.Slice(slice.Operands[0], 0, 32)
-            : terms.ZeroExtend(stored, 32);
-
-        // 在此处已经成立、由某个条件抛出确立的条件：取支配这个块的检查。
-        IEnumerable<ConditionalThrow> ChecksBefore(BlockId block, ExceptionKind kind) =>
-            graph.Checks.Where(c => c.Exception == kind && c.Edge.Source != block && graph.Shape.Dominates(c.Edge.Source, block));
-        EffectRef? NullCheck(BlockId block, Term value)
+        foreach (var entry in OperationCatalog.Entries)
         {
-            var isNull = terms.Eq(value, terms.Zero(value.Width));
-            foreach (var check in ChecksBefore(block, ExceptionKind.NullReference))
-                if (ReferenceEquals(check.Condition, isNull) && check.Polarity) return EffectRef.Of(check.Edge);
-            return null;
-        }
-        // 占用的各种取法：必有的效果，加上可选效果的每个子集（同一个检查可能已被另一次访问占用）。
-        static IEnumerable<List<EffectRef>> Variants(EffectRef main, params EffectRef?[] optional)
-        {
-            var present = optional.Where(o => o is not null).Select(o => o!.Value).Distinct().ToList();
-            for (int mask = (1 << present.Count) - 1; mask >= 0; mask--)
+            int main = -1;
+            bool linear = true;
+            for (int i = 0; i < entry.Steps.Length; i++)
             {
-                var occupied = new List<EffectRef> { main };
-                for (int i = 0; i < present.Count; i++)
-                    if ((mask & (1 << i)) != 0) occupied.Add(present[i]);
-                yield return occupied;
-            }
-        }
-
-        foreach (var effect in graph.Effects)
-        {
-            var id = effect.Occurrence;
-            var after = new ProgramPoint(id.Block, id.Index + 1);
-            var main = EffectRef.Of(id);
-            switch (effect.Kind)
-            {
-                case NativeEffectKind.Read or NativeEffectKind.Write:
+                var step = entry.Steps[i];
+                if (step.Kind == StepKind.Require) continue;
+                if (step.Indirect || step.Kind is not (StepKind.ThrowIf or StepKind.Read or StepKind.Write
+                    or StepKind.Call or StepKind.ClassInitialize or StepKind.NewObject or StepKind.Throw))
                 {
-                    var address = effect.Address!;
-                    bool write = effect.Kind == NativeEffectKind.Write;
-                    // 实例字段：已知类型的对象加常量偏移。
-                    var (root, offset) = address is { Kind: TermKind.Operation, Op: Op.Add } sum && sum.Operands[1].IsConstant
-                        ? (sum.Operands[0], unchecked((long)(ulong)sum.Operands[1].Value)) : (address, 0L);
-                    if (types.TryGetValue(root, out var owner) && owner.Kind == StackKind.Object
-                        && facts.Metadata.FieldAt(owner.Entity, (int)offset) is { IsStatic: false } field && field.Type.StorageBits == effect.Width
-                        && field.Type.Kind != StackKind.Value)
-                    {
-                        var check = NullCheck(id.Block, root);
-                        if (write)
-                            foreach (var occupied in Variants(main, check))
-                                yield return new Claim("stfld.object", field.Entity, [root, Widen(effect.Value!)], after, occupied, null);
-                        else
-                        {
-                            var definition = OnStack(effect.Value!, field.Type);
-                            types[definition] = ClaimTemplate_OnStack(field.Type);
-                            foreach (var occupied in Variants(main, check))
-                                yield return new Claim("ldfld.object", field.Entity, [root], after, occupied, definition);
-                        }
-                    }
-                    // 数组元素：地址里出现的已知是数组的对象，配上地址里出现的 32 位下标。
-                    foreach (var array in Leaves(address).Where(t => types.TryGetValue(t, out var type) && type.Kind == StackKind.Object
-                        && facts.Metadata.ElementOf(type.Entity) is { Kind: StackKind.Int32, StorageBits: 32 }))
-                    {
-                        if (effect.Width != 32) continue;
-                        foreach (var index in Indices(address))
-                        {
-                            var isNull = NullCheck(id.Block, array);
-                            EffectRef? bounds = null, length = null;
-                            foreach (var check in ChecksBefore(id.Block, ExceptionKind.IndexOutOfRange))
-                            {
-                                var (condition, polarity) = (check.Condition, check.Polarity);
-                                while (condition is { Kind: TermKind.Operation, Op: Op.Not }) (condition, polarity) = (condition.Operands[0], !polarity);
-                                if (polarity || condition is not { Kind: TermKind.Operation, Op: Op.Ult } || !ReferenceEquals(condition.Operands[0], index)) continue;
-                                bounds = EffectRef.Of(check.Edge);
-                                // 检查用到的长度若是一次读取的结果，那次读取属于这个检查。
-                                foreach (var leaf in Leaves(condition.Operands[1]))
-                                    if (leaf.Kind == TermKind.Result && graph.Effect(leaf.Occurrence) is { Kind: NativeEffectKind.Read }) length = EffectRef.Of(leaf.Occurrence);
-                            }
-                            foreach (var occupied in Variants(main, isNull, bounds, length))
-                                yield return write
-                                    ? new Claim("stelem.i4", null, [array, index, effect.Value!], after, occupied, null)
-                                    : new Claim("ldelem.i4", null, [array, index], after, occupied, effect.Value!);
-                        }
-                    }
+                    linear = false;
                     break;
                 }
-                case NativeEffectKind.Call:
-                {
-                    var callee = effect.Callee!;
-                    string? operation = callee.Dispatch switch
-                    {
-                        VariantCondition.StaticMethod => callee.HasInitializer ? "call.static.init" : "call.static",
-                        VariantCondition.UniqueTarget => "callvirt.unique",
-                        _ => null,
-                    };
-                    if (operation is null) break;
-                    if (effect.Result is { } result && callee.Return is { } returned) types[result] = ClaimTemplate_OnStack(returned);
-                    var check = callee.HasThis ? NullCheck(id.Block, effect.Arguments[0]) : null;
-                    foreach (var occupied in Variants(main, check))
-                        yield return new Claim(operation, callee.Entity, effect.Arguments, after, occupied, effect.Result);
-                    break;
-                }
+                main = i;
             }
+            if (linear && (main >= 0 || entry.Result is not null)) yield return new(entry, main);
+        }
+    }
+}
+
+/// <summary>一次候选绑定。语义上的相等、位置与类型最终由证明核对。</summary>
+internal sealed record Binding
+{
+    public ImmutableDictionary<int, Term> Operands { get; init; } = ImmutableDictionary<int, Term>.Empty;
+    public ImmutableDictionary<int, Term> Results { get; init; } = ImmutableDictionary<int, Term>.Empty;
+    public EntityRef? Entity { get; init; }
+    public EntityRef? Owner { get; init; }
+    public TypeShape? Subject { get; init; }
+    public ImmutableHashSet<EffectRef> Required { get; init; } = [];
+    public ImmutableHashSet<EffectRef> Optional { get; init; } = [];
+    public Binding? Operand(int i, Term term) =>
+        Operands.TryGetValue(i, out var old) && old != term ? null : this with { Operands = Operands.SetItem(i, term) };
+    public Binding? Result(int i, Term term) =>
+        Results.TryGetValue(i, out var old) && old != term ? null : this with { Results = Results.SetItem(i, term) };
+    public Binding? WithEntity(EntityRef entity) => Entity is { } prior && prior != entity ? null : this with { Entity = entity };
+    public Binding WithRead(NativeEffect effect) => this with { Optional = Optional.Add(EffectRef.Of(effect.Occurrence)) };
+}
+
+internal sealed partial class TemplateSearch(FactView facts)
+{
+    private static readonly Plan[] plans = [.. Plan.StraightLine()];
+    private static readonly ILookup<StepKind, Plan> byMain = plans.Where(p => p.Main >= 0)
+        .ToLookup(p => p.Entry.Steps[p.Main].Kind);
+    private readonly EffectIndex index = new(facts.Effects);
+    private readonly Dictionary<Term, TypeShape> types = facts.Effects.Arguments.ToDictionary(a => a.Value, a => a.Type);
+    private TermPool Terms => facts.Effects.Snapshot.Terms;
+
+    public IEnumerable<Claim> Propose()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var effect in index.Effects)
+        {
+            if (effect.Result is { } result && effect.Callee?.Return is { } type) types[result] = type;
+            if (effect.Kind == NativeEffectKind.NewObject && effect.Class is { Kind: TermKind.Entity } owner)
+                types[effect.Value!] = new(StackKind.Object, facts.Layout.PointerBits, false, owner.Entity);
+            if (EffectIndex.Kind(effect) is not { } kind) continue;
+            var point = After(effect);
+            foreach (var plan in byMain[kind])
+                foreach (var bound in BindEffect(plan.Entry, plan.Main, effect, new()))
+                    foreach (var claim in Finish(plan, bound, point))
+                        if (seen.Add(claim.Key)) yield return claim;
         }
 
-        // 整数的除与余：主效果是除零的条件抛出；被除数取自效果图里以它的除数作除法的项。
-        foreach (var check in graph.Checks)
+        foreach (var check in facts.Effects.Checks)
         {
-            if (check.Exception != ExceptionKind.DivideByZero || !check.Polarity
-                || check.Condition is not { Kind: TermKind.Operation, Op: Op.Eq } test || !test.Operands[1].IsZero) continue;
-            var divisor = test.Operands[0];
-            var terminator = graph.Snapshot.Terminator(check.Edge.Source);
-            var passed = terminator.Exits[1 - check.Edge.Exit];
+            var passed = facts.Effects.Snapshot.Terminator(check.Edge.Source).Exits[1 - check.Edge.Exit];
             if (passed.Kind != ExitKind.Target) continue;
-            var landing = new ProgramPoint(passed.Target, 0);
-            var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
-            foreach (var root in Roots(graph))
-                foreach (var chain in Chains(root, [], seen))
+            foreach (var plan in byMain[StepKind.ThrowIf])
+                if (BindCheck(plan.Entry.Steps[plan.Main], check, new()) is { } bound)
+                    foreach (var claim in Finish(plan, bound with { Required = [EffectRef.Of(check.Edge)] }, new(passed.Target, 0)))
+                        if (seen.Add(claim.Key)) yield return claim;
+        }
+
+        // 纯结果以值的使用点为落点。具名属性也可能来自原生读取，检查可以已由路径条件免除。
+        foreach (var plan in plans.Where(p => p.Main < 0 || p.Entry.Steps[p.Main].Kind == StepKind.ThrowIf))
+        {
+            if (plan.Entry.Result is not { } pattern || pattern.Op == ValueOp.Operand) continue;
+            foreach (var (value, use) in index.Values)
+            {
+                if (Match(pattern, value, new()) is not { } bound) continue;
+                var point = value.Kind == TermKind.Result && facts.Effects.Effect(value.Occurrence) is { } producer
+                    ? After(producer) : use;
+                foreach (var claim in Complete(plan.Entry, plan.Entry.Steps.Length - 1, -1, bound, point, value))
+                    if (seen.Add(claim.Key)) yield return claim;
+            }
+        }
+    }
+
+    private static ProgramPoint After(NativeEffect effect) => new(effect.Occurrence.Block, effect.Occurrence.Index + 1);
+
+    private IEnumerable<Claim> Finish(Plan plan, Binding bound, ProgramPoint point) =>
+        Complete(plan.Entry, plan.Entry.Steps.Length - 1, plan.Main, bound, point, null);
+
+    private IEnumerable<Claim> Complete(CatalogEntry entry, int at, int skip, Binding bound, ProgramPoint point, Term? definition)
+    {
+        if (at < 0)
+        {
+            foreach (var claim in Claims(entry, bound, point, definition)) yield return claim;
+            yield break;
+        }
+        var step = entry.Steps[at];
+        foreach (var next in Candidates())
+            foreach (var claim in Complete(entry, at - 1, skip, next, point, definition))
+                yield return claim;
+
+        IEnumerable<Binding> Candidates()
+        {
+            if (at == skip || step.Kind == StepKind.Require) { yield return bound; yield break; }
+            if (step.Kind == StepKind.ThrowIf)
+            {
+                yield return bound;
+                foreach (var check in index.Checks(step, bound))
                 {
-                    var quotient = chain[^1];
-                    if (quotient is not { Kind: TermKind.Operation, Op: Op.SDiv } || !ReferenceEquals(quotient.Operands[1], divisor)) continue;
-                    // 定义的候选：商本身，以及包住它的同宽的项（除零时的取值、余数的写法都包在外面）。
-                    for (int up = 0; up < 5 && up < chain.Count; up++)
-                    {
-                        var definition = chain[chain.Count - 1 - up];
-                        if (definition.Width != quotient.Width) break;
-                        foreach (string operation in (string[])["div.int", "rem.int"])
-                            yield return new Claim(operation, null, [quotient.Operands[0], divisor], landing, [EffectRef.Of(check.Edge)], definition);
-                    }
+                    if (!index.Before(check.Edge.Source, point.Block) || BindCheck(step, check, bound) is not { } match) continue;
+                    yield return match with { Optional = match.Optional.Add(EffectRef.Of(check.Edge)) };
                 }
+                yield break;
+            }
+            if (step.Kind == StepKind.ClassInitialize) yield return bound; // 幂等的初始化可由路径条件免除。
+            var copies = bound.Required;
+            foreach (var effect in index.Candidates(step, at, bound))
+            {
+                if (!index.Before(effect, point) || bound.Required.Contains(EffectRef.Of(effect.Occurrence))) continue;
+                foreach (var match in BindEffect(entry, at, effect, bound))
+                {
+                    yield return match;
+                    if (step.Kind == StepKind.NewObject && bound.Results.ContainsKey(at)) copies = copies.Union(match.Required);
+                }
+            }
+            // 同一个接收者的不同叶子可以各自来自一次分配。
+            if (copies.Count > bound.Required.Count + 1) yield return bound with { Required = copies };
         }
     }
 
-    private static TypeShape ClaimTemplate_OnStack(TypeShape type) =>
-        type.Kind == StackKind.Int32 && (type.StorageBits != 32 || type.TwoValued) ? new TypeShape(StackKind.Int32, 32, true, type.Entity) : type;
-
-    /// <summary>项的叶子集合（设计 7.3：只用于找候选）。</summary>
-    private static IEnumerable<Term> Leaves(Term term)
+    private IEnumerable<Claim> Claims(CatalogEntry entry, Binding bound, ProgramPoint point, Term? known)
     {
-        var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
-        var pending = new Stack<Term>();
-        pending.Push(term);
-        while (pending.Count > 0)
+        foreach (var (definition, match) in Definitions())
         {
-            var current = pending.Pop();
-            if (!seen.Add(current)) continue;
-            if (current.Operands.Length == 0 || current.Kind == TermKind.Attribute) yield return current;
-            foreach (var operand in current.Operands) pending.Push(operand);
+            int count = entry.OperandsFromSignature ? match.Operands.Count : entry.Operands.Length;
+            if (match.Operands.Count != count || Enumerable.Range(0, count).Any(i => !match.Operands.ContainsKey(i))) continue;
+            var operands = Enumerable.Range(0, count).Select(i => match.Operands[i]).ToImmutableArray();
+            if (entry.SameKind && operands.Length > 1 && operands[0].Width != operands[1].Width) continue;
+            if (definition is not null && match.Subject is { } subject && entry.ResultKind is ResultKind.Subject or ResultKind.Object)
+                types.TryAdd(definition, subject);
+            foreach (var occupied in Subsets([.. match.Optional.Except(match.Required).Order()], 0, match.Required))
+                yield return new(entry.Id, match.Entity, operands, point, occupied, definition);
+        }
+
+        IEnumerable<(Term?, Binding)> Definitions()
+        {
+            if (known is not null || entry.Result is null) { yield return (known, bound); yield break; }
+            var pattern = entry.Result;
+            if (BoundValue(pattern, bound) is { } value) { yield return (value, bound); yield break; }
+            // 调用的返回槽按栈宽给出；void 调用没有结果。
+            if (entry.OperandsFromSignature && !entry.Constructs && bound.Subject is null) { yield return (null, bound); yield break; }
+            foreach (var candidate in index.Using(pattern, bound))
+                if (Match(pattern, candidate, bound) is { } match) yield return (candidate, match);
         }
     }
 
-    /// <summary>地址里可能是下标的 32 位项：被扩展到指针位宽的那些。</summary>
-    private static IEnumerable<Term> Indices(Term address)
+    private Term? BoundValue(TemplateValue pattern, Binding bound) => pattern.Op switch
     {
-        var seen = new HashSet<Term>(ReferenceEqualityComparer.Instance);
-        var found = new List<Term>();
-        void Go(Term t)
-        {
-            if (!seen.Add(t)) return;
-            if (t is { Kind: TermKind.Operation, Op: Op.SignExtend } && t.Operands[0].Width == 32) found.Add(t.Operands[0]);
-            else if (t.Kind == TermKind.Concat)
-                foreach (var part in t.Operands)
-                    if (part.Width == 32 && !part.IsConstant) found.Add(part);
-            foreach (var operand in t.Operands) Go(operand);
-        }
-        Go(address);
-        return found.Distinct(ReferenceEqualityComparer.Instance).Cast<Term>();
-    }
+        ValueOp.Step => bound.Results.GetValueOrDefault(pattern.A),
+        ValueOp.Operand => bound.Operands.GetValueOrDefault(pattern.A),
+        ValueOp.FromStorage when BoundValue(pattern.Arguments[0], bound) is { } stored && bound.Subject is { } type => OnStack(stored, type),
+        _ => null,
+    };
 
-    private static IEnumerable<Term> Roots(EffectGraph graph)
-    {
-        foreach (int b in graph.Order)
-        {
-            var block = new BlockId(b);
-            if (graph.Condition(block) is { } condition) yield return condition;
-            if (graph.ReturnSlot(block) is { } returned) yield return returned;
-        }
-        foreach (var effect in graph.Effects)
-        {
-            if (effect.Address is { } address) yield return address;
-            if (effect.Kind == NativeEffectKind.Write) yield return effect.Value!;
-            foreach (var argument in effect.Arguments) yield return argument;
-        }
-    }
+    private Term OnStack(Term value, TypeShape type) =>
+        type.Kind != StackKind.Int32 || value.Width >= 32 ? value :
+        type.Signed ? Terms.SignExtend(value, 32) : Terms.ZeroExtend(value, 32);
 
-    /// <summary>从根到每个子项的链。</summary>
-    private static IEnumerable<List<Term>> Chains(Term term, List<Term> above, HashSet<Term> seen)
+    private static IEnumerable<ImmutableHashSet<EffectRef>> Subsets(EffectRef[] optional, int at, ImmutableHashSet<EffectRef> occupied)
     {
-        if (!seen.Add(term)) yield break;
-        var chain = new List<Term>(above) { term };
-        yield return chain;
-        foreach (var operand in term.Operands)
-            foreach (var deeper in Chains(operand, chain, seen))
-                yield return deeper;
+        if (at == optional.Length) { yield return occupied; yield break; }
+        foreach (var full in Subsets(optional, at + 1, occupied.Add(optional[at]))) yield return full;
+        foreach (var rest in Subsets(optional, at + 1, occupied)) yield return rest;
     }
 }
