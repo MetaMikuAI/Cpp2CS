@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Snapshot/Cpp2CS.Snapshot.csproj" />
+    <ProjectReference Include="../Cpp2CS.Spec/Cpp2CS.Spec.csproj" />
+  </ItemGroup>
+</Project>
