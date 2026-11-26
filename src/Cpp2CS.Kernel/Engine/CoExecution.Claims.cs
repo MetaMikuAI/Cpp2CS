@@ -41,6 +41,9 @@ public sealed partial class CoExecution
         public readonly HashSet<EffectRef> Touched = [], After = [];
         public readonly HashSet<BlockId> Before = [];
         public readonly SortedSet<string> Rows = new(StringComparer.Ordinal);
+        /// <summary>能到达落点所在块的块；在环上的块。</summary>
+        public required bool[] Reaching;
+        public required bool[] Cyclic;
         public int Landings;
         public bool Peeking;
     }
@@ -76,7 +79,35 @@ public sealed partial class CoExecution
     internal static ProofOutcome ProveClaim(RecoveryContext context, Claim claim, ClaimTemplate template, bool ownOnly, int budget)
     {
         var engine = new CoExecution(context.Snapshot, template.Graph, template.Body, context.Facts, context.Snapshots, budget);
-        var run = new ClaimRun { Claim = claim, Template = template, OwnOnly = ownOnly };
+        var snapshot = context.Snapshot;
+        var reaching = new bool[snapshot.BlockCount];
+        reaching[claim.Landing.Block.Index] = true;
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (int b = 0; b < reaching.Length; b++)
+            {
+                if (reaching[b]) continue;
+                foreach (var exit in snapshot.Terminator(new BlockId(b)).Exits)
+                    if (exit.Kind == ExitKind.Target && reaching[exit.Target.Index]) { reaching[b] = changed = true; break; }
+            }
+        }
+        // 在环上的块：沿至少一条边能回到自己。
+        var cyclic = new bool[reaching.Length];
+        for (int b = 0; b < cyclic.Length; b++)
+        {
+            var seen = new bool[cyclic.Length];
+            var pending = new Stack<int>();
+            pending.Push(b);
+            while (pending.Count > 0 && !cyclic[b])
+                foreach (var exit in snapshot.Terminator(new BlockId(pending.Pop())).Exits)
+                {
+                    if (exit.Kind != ExitKind.Target) continue;
+                    if (exit.Target.Index == b) cyclic[b] = true;
+                    else if (!seen[exit.Target.Index]) { seen[exit.Target.Index] = true; pending.Push(exit.Target.Index); }
+                }
+        }
+        var run = new ClaimRun { Claim = claim, Template = template, OwnOnly = ownOnly, Reaching = reaching, Cyclic = cyclic };
         foreach (var effect in claim.Occupied)
         {
             if (effect.IsEdge) { run.Edges.Add(effect.Edge); run.Terminators.Add(effect.Block); }
@@ -165,7 +196,7 @@ public sealed partial class CoExecution
             case EventKind.Throw when trail.Tail:
                 Synchronize(state, onNative);
                 return;
-            case EventKind.Throw or EventKind.Return or EventKind.Trap:
+            case EventKind.Throw or EventKind.Return or EventKind.Trap or EventKind.Departed:
                 LeaveWindow(state, Name(onNative));
                 return;
             default:
@@ -301,8 +332,11 @@ public sealed partial class CoExecution
     {
         var passed = new Passed(EffectRef.Of(e.Occurrence), ClassOf(e.Kind), null, 0, ExceptionKind.None);
         state = Bystander(state, passed);
-        foreach (var value in e.Values)
-            if (MentionsStack(value, stackPointer)) throw new Refuted(Verdict.MissingFact, "帧地址作为实参：帧对象逃逸");
+        // 实参槽里的帧地址：帧对象逃逸给了被调方法。整数槽之外的槽位不携带地址实参。
+        var call = (CallOccurrence)native[e.Occurrence];
+        for (int i = 0; e.Kind == EventKind.Call && i < call.ArgumentSlots.Length; i++)
+            if (call.ArgumentSlots[i].Kind == SlotKind.Integer && MentionsStack(e.Values[i + 1], stackPointer))
+                throw new Refuted(Verdict.MissingFact, $"旁观的调用以帧地址作实参（{call.ArgumentSlots[i]}）：帧对象逃逸");
         var results = nativeGraph.Results(e.Occurrence);
         var env = e.After!.Env;
         for (int k = 0; k < results.Length; k++) env = env.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));

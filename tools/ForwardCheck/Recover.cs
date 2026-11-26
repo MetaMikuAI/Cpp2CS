@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Cpp2CS.Discovery;
 using Cpp2CS.Facts;
 using Cpp2CS.Input;
 using Cpp2CS.Kernel;
@@ -41,33 +42,148 @@ internal static partial class Recover
             }
         }
 
+        IDiscoverer[] discoverers = [new GenericDiscoverer()];
+        int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
+        var byReason = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        var refuted = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        var rows = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var lines = new List<string>();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         foreach (var item in document.RootElement.EnumerateArray())
         {
             var description = item.GetProperty("case");
             var method = item.GetProperty("method");
-            string category = description.GetProperty("category").GetString()!;
             string name = $"{description.GetProperty("type").GetString()}::{description.GetProperty("method").GetString()}";
             bool shown = show.Length > 0 && (show == "all" || name.EndsWith("::" + show, StringComparison.Ordinal));
             var targets = item.GetProperty("mapping").GetProperty("targets");
             if (!targets.TryGetProperty(target, out var places) || places.GetArrayLength() == 0) continue;
             ulong address = Convert.ToUInt64(places[0].GetProperty("address").GetString()!, 16);
-            if (Snapshot(address) is not { } snapshot) continue;
             var module = metadata.Load(Path.GetFileNameWithoutExtension(method.GetProperty("assembly").GetString()!));
             if (module is null) continue;
+            cases++;
             MethodBody real;
             try
             {
                 real = metadata.Body(module, Convert.ToInt32(method.GetProperty("token").GetString()!, 16));
             }
-            catch (ExpansionException)
+            catch (ExpansionException e)
             {
+                unreadable++;
+                lines.Add($"  不能对照 {name}：真实 IL 读不出来：{e.Message}");
                 continue;
             }
+            if (Snapshot(address) is not { } snapshot)
+            {
+                unreadable++;
+                lines.Add($"  不能对照 {name}：没有快照");
+                continue;
+            }
+
+            // 恢复：只读快照、签名与全局事实。
             var graph = new EffectGraph(snapshot, real.Method, facts);
-            if (shown) Dump(name, graph);
+            var view = new FactView(graph, entities, facts.Layout);
+            var context = new RecoveryContext(snapshot, real.Method, real.InitializerOf, facts, entities, Snapshot);
+            var claims = discoverers.SelectMany(d => d.Propose(view)).DistinctBy(c => c.Key).ToList();
+            var outcomes = claims.Select(c => Proof.Prove(context, c)).ToList();
+            var explanation = Selection.Select(view, outcomes);
+            var body = Lowering.Lower(explanation);
+            submitted += claims.Count;
+            certified += outcomes.Count(o => o.Certificate is not null);
+            chosen += explanation.Selected.Length;
+            if (explanation.Inexact) inexact++;
+            foreach (var outcome in outcomes)
+            {
+                foreach (string row in outcome.Certificate?.Rows ?? [])
+                {
+                    if (!rows.TryGetValue(row, out var users)) rows[row] = users = [];
+                    users.Add(name);
+                }
+                if (outcome.Refutation is { } refutation) Tally(refuted, Reason(refutation.Layer.ToString(), refutation.Obligation));
+            }
+            if (shown)
+            {
+                Dump(name, graph);
+                foreach (var outcome in outcomes)
+                    Console.WriteLine($"  声明 {Text(outcome.Claim)}\n      {(outcome.Certificate is { } c
+                        ? $"凭据：依赖 [{string.Join(", ", c.Before.Select(b => "B" + b.Index))}]，推后 [{string.Join(", ", c.After)}]，行 [{string.Join(", ", c.Rows)}]{(explanation.Selected.Contains(c) ? "  ← 选中" : "")}"
+                        : $"反驳（{Reason(outcome.Refutation!.Layer.ToString(), outcome.Refutation.Obligation)}）：{outcome.Refutation.Detail}")}");
+                Console.WriteLine($"  方法体（局部变量 {string.Join(", ", body.Locals.Select((l, i) => $"V_{i}: {l.Kind}"))}）");
+                foreach (var instruction in body.Instructions)
+                    Console.WriteLine(instruction.Opcode switch
+                    {
+                        ".label" => $"   L{instruction.Operand}:",
+                        ".unrecovered" => $"      Unrecovered  // {body.Holes[(int)instruction.Operand].What}：{body.Holes[(int)instruction.Operand].Reason}",
+                        _ => $"      {instruction.Opcode}{(instruction.Target >= 0 ? $" L{instruction.Target}" : instruction.Entity is { } entity ? $" {entity}" : instruction.Opcode is "ldarg" or "ldloc" or "stloc" or "ldc.i4" ? $" {instruction.Operand}" : "")}",
+                    });
+            }
+
+            if (!body.Complete)
+            {
+                holed++;
+                var kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
+                foreach (var hole in body.Holes)
+                {
+                    if (hole.Derived) continue;
+                    string reason = Reason(hole.Layer.ToString(), hole.Obligation);
+                    Tally(byReason, reason);
+                    Tally(kinds, reason);
+                }
+                var first = body.Holes.FirstOrDefault(h => !h.Derived) ?? body.Holes[0];
+                lines.Add($"  有洞     {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}；"
+                    + $"独立洞 {explanation.IndependentHoles}（{string.Join("，", kinds.Select(k => $"{k.Key} {k.Value}"))}）；首个：{first.What}：{Short(first.Reason)}");
+                continue;
+            }
+
+            // IL 对照：恢复出的 IL 与真实 IL 都按目录展开，同一个引擎证明等价。
+            var (recovered, tokens) = body.Encode()!.Value;
+            string verdict;
+            try
+            {
+                var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
+                var actual = IlExpander.Expand(recovered, entities, tokens, snapshot.Terms, 2, snapshot.PointerBits);
+                var result = CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts);
+                verdict = result.Verdict == Verdict.Proved ? "" : $"{result.Verdict}：{result.Detail}";
+            }
+            catch (ExpansionException e)
+            {
+                verdict = $"不能展开：{e.Message}";
+            }
+            if (verdict.Length == 0) equivalent++;
+            else different++;
+            lines.Add($"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
+                + $"、指令 {body.Instructions.Count(i => i.Opcode[0] != '.')} 条{(verdict.Length == 0 ? "" : "；" + Short(verdict))}");
         }
-        return 0;
+
+        Console.WriteLine($"恢复与 IL 对照（{target}）：用例 {cases} 个，等价 {equivalent} 个，不等价 {different} 个，有洞 {holed} 个，不能对照 {unreadable} 个；用时 {clock.Elapsed.TotalSeconds:F1} 秒");
+        Console.WriteLine($"  声明 {submitted} 条，凭据 {certified} 条，选中 {chosen} 条；选择不精确 {inexact} 个方法");
+        Console.WriteLine($"  独立洞按层与义务：{string.Join("，", byReason.Select(k => $"{k.Key} {k.Value}"))}");
+        Console.WriteLine($"  被反驳的声明按层与义务：{string.Join("，", refuted.Select(k => $"{k.Key} {k.Value}"))}");
+        Console.WriteLine($"  用到的独立关系的行：{string.Join("，", rows.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
+        foreach (string line in lines.Order(StringComparer.Ordinal)) Console.WriteLine(line);
+        return different == 0 ? 0 : 1;
     }
+
+    private static void Tally(SortedDictionary<string, int> counts, string key) => counts[key] = counts.GetValueOrDefault(key) + 1;
+
+    private static string Reason(string layer, Obligation? obligation) => (layer switch
+    {
+        "Fact" => "事实层",
+        "Catalog" => "目录层",
+        "Discovery" => "发现层",
+        "Explanation" => "解释层",
+        "Engine" => "引擎",
+        "Budget" => "预算",
+        "Selection" => "选择",
+        "Value" => "值不可得",
+        "Skeleton" => "骨架",
+        _ => layer,
+    }) + (obligation is { } o ? "/" + Refutation.Name(o) : "");
+
+    private static string Short(string text) => text.Length <= 150 ? text : text[..150] + "…";
+
+    private static string Text(Claim claim) =>
+        $"{claim.Operation}{(claim.Entity is { } entity ? $" {entity}" : "")}（{string.Join("，", claim.Operands)}）占用 [{string.Join(", ", claim.Occupied)}] 落点 B{claim.Landing.Block.Index}.{claim.Landing.Index}"
+        + (claim.Definition is { } definition ? $" 定义 {definition}" : "");
 
     private static void Dump(string name, EffectGraph graph)
     {

@@ -70,7 +70,7 @@ public sealed partial class CoExecution
 
     private enum Role : byte { Native, Template, Inner }
 
-    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Allocate, Landing }
+    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Allocate, Landing, Departed }
 
     private sealed record Event(EventKind Kind)
     {
@@ -509,6 +509,12 @@ public sealed partial class CoExecution
             var side = inner ? state.Inner!.Side : state.Native;
             if (run is not null && !inner && side.Block == run.Claim.Landing.Block && side.Index == run.Claim.Landing.Index)
                 return new Event(EventKind.Landing);
+            // 证明一条声明时，走进到不了落点的块就离开了它的窗口（被占用的边之后的只抛出尾除外）。
+            if (run is not null && !inner && !run.Peeking && side.Index == 0 && !run.Reaching[side.Block.Index] && !state.Trail!.Tail)
+                return new Event(EventKind.Departed);
+            // 落点之前的路径经过环上的块：一次走查只代表第一次经过，后几次经过时的事实要靠切点处的归纳，尚未建立。
+            if (run is not null && !inner && side.Index == 0 && run.Cyclic[side.Block.Index])
+                throw new Refuted(Verdict.Insufficient, $"通往落点的路径经过环上的块 B{side.Block.Index}：环的处理（切点配对）尚未建立") { Unsupported = true };
             if (side.Index >= graph.OccurrenceCount(side.Block))
             {
                 if (Leave(graph, ref state, role) is { } departed) return departed;
@@ -963,6 +969,7 @@ public sealed partial class CoExecution
         EventKind.Return => "返回",
         EventKind.Initialize => "类初始化",
         EventKind.Allocate => "新对象",
+        EventKind.Departed => "走进到不了落点的块",
         _ => e.Kind.ToString(),
     };
 
