@@ -106,15 +106,20 @@ internal sealed class SampleInput
 
     public void Recover(Sample.Item item, Sample.Result result, Action<string> progress)
     {
+        void Failure(string layer, string reason)
+        {
+            result.Hole(layer, reason);
+            result.Causes?.Add(SampleCauseCounts.Pattern(layer, "", reason), reason, item.Address);
+        }
         var lift = target.Lift(item.Address);
-        if (lift.Snapshot is not { } snapshot) { result.Hole("前端", lift.Reason ?? "未产出快照"); return; }
+        if (lift.Snapshot is not { } snapshot) { Failure("前端", lift.Reason ?? "未产出快照"); return; }
         progress("提升");
         var entity = new EntityRef(EntityKind.Method, item.Key);
         MethodShape host;
         try { host = metadata.Method(entity); }
-        catch (ExpansionException e) { result.Hole("事实层", e.Message); return; }
+        catch (ExpansionException e) { Failure("事实层", e.Message); return; }
         var graph = new EffectGraph(snapshot, host, facts);
-        if (graph.Failure is { } missing) { result.Hole("事实层", missing); return; }
+        if (graph.Failure is { } missing) { Failure("事实层", missing); return; }
 
         // 占用的计量单位是效果图中的出现和条件抛出边。不可观察的 None 不进入分母。
         var effects = graph.Effects.Where(e => e.Kind != NativeEffectKind.None).Select(e => EffectRef.Of(e.Occurrence))
@@ -137,6 +142,11 @@ internal sealed class SampleInput
             foreach (var h in body.Holes.Where(h => !h.Derived))
                 result.Hole(ForwardCheck.Recover.Reason(h.Layer.ToString(), h.Obligation), $"{h.What}：{h.Reason}");
             result.First ??= body.Holes[0].What + "：" + body.Holes[0].Reason;
+            if (result.Causes is { } counts)
+            {
+                var diagnosis = new SampleCauses(view);
+                foreach (var hole in body.Holes) diagnosis.Record(hole, counts);
+            }
             return;
         }
 

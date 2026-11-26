@@ -16,6 +16,8 @@ internal static class Sample
 
     internal sealed class Result
     {
+        [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        public SampleCauseCounts? Causes { get; set; }
         public Dictionary<string, Group> Holes { get; set; } = [];
         public string? First { get; set; }
         public string? Error { get; set; }
@@ -56,9 +58,14 @@ internal static class Sample
     public static int Run(string[] args)
     {
         var options = new Dictionary<string, string>();
-        for (int i = 1; i < args.Length; i += 2)
-            if (i + 1 == args.Length || args[i] is not ("--binary" or "--metadata" or "--symbols" or "--count" or "--seed" or "--show" or "--batch-size")
-                || !options.TryAdd(args[i], args[i + 1])) return Usage();
+        bool causes = false;
+        for (int i = 1; i < args.Length; i++)
+        {
+            string option = args[i];
+            if (option == "--causes" && !causes) { causes = true; continue; }
+            if (i + 1 == args.Length || option is not ("--binary" or "--metadata" or "--symbols" or "--count" or "--seed" or "--show" or "--batch-size")
+                || !options.TryAdd(option, args[++i])) return Usage();
+        }
         if (!options.TryGetValue("--binary", out var binary) || !options.TryGetValue("--metadata", out var metadata)
             || !int.TryParse(options.GetValueOrDefault("--count", "2000"), out int count) || count < 1
             || !int.TryParse(options.GetValueOrDefault("--seed", "202211"), out int seed)) return Usage();
@@ -75,7 +82,7 @@ internal static class Sample
                     continue;
                 }
                 var item = JsonSerializer.Deserialize<Item>(line)!;
-                var result = new Result();
+                var result = new Result { Causes = causes ? new() : null };
                 // 在方法边界保留第一条异常，余下方法继续独立核对。
                 try { input.Recover(item, result, Console.WriteLine); }
                 catch (Exception e) { result.Error = $"{e.GetType().Name}：{e.Message}"; }
@@ -83,12 +90,12 @@ internal static class Sample
             }
             return 0;
         }
-        return Measure(args, seed, options.ContainsKey("--show"), batchSize).GetAwaiter().GetResult();
+        return Measure(args, seed, options.ContainsKey("--show"), batchSize, causes).GetAwaiter().GetResult();
     }
 
     private static int Usage()
     {
-        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量]");
+        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量] [--causes]");
         Console.Error.WriteLine("分批时，每批结束输出“批次暂停”，从标准输入收到“继续”后处理下一批。");
         return 2;
     }
@@ -128,7 +135,7 @@ internal static class Sample
         }
     }
 
-    private static async Task<int> Measure(string[] args, int seed, bool show, int batchSize)
+    private static async Task<int> Measure(string[] args, int seed, bool show, int batchSize, bool causes)
     {
         var clock = Stopwatch.StartNew();
         var records = new List<Measurement>();
@@ -187,6 +194,9 @@ internal static class Sample
             }
             Stop();
             Report(plan, records, seed, clock.Elapsed, peak);
+            if (causes)
+                SampleCauseCounts.Report(records.Take(plan.Count).Where(r => !r.Timeout && r.Result.Error == null && !r.Complete)
+                    .Select(r => (r.Item, r.Result.Causes!)));
             if (show && plan.Shown.Length == 0) Console.Error.WriteLine("总体中没有匹配的方法");
             return records.Any(r => r.Complete && r.Result.Endpoint != "通过") ? 1 : show && plan.Shown.Length == 0 ? 2 : 0;
         }
