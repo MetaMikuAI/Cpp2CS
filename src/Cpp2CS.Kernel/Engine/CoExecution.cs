@@ -33,11 +33,13 @@ public sealed record ProofResult(Verdict Verdict, string Detail, int Paths, int 
 /// 内存按设计 7.4 分类：相对入口栈指针常量偏移的是帧对象，地址没有逃逸时不可观察；映像数据区里的是运行时私有状态与元数据槽；
 /// 其余是托管堆与运行时结构，读取的身份是（地址，沿本侧的写入往回最近的可能改写它的定义）。
 /// </summary>
-public sealed class CoExecution
+public sealed partial class CoExecution
 {
     private sealed class Refuted(Verdict verdict, string detail) : Exception(detail)
     {
         public Verdict Verdict => verdict;
+        /// <summary>原因是引擎还没有实现设计里的某一部分（环上的切点配对、展开出口、由跳转完成的调用）。</summary>
+        public bool Unsupported { get; init; }
     }
 
     /// <summary>一侧的位置与环境。Visits 是这条路径上各块已进入的次数。</summary>
@@ -62,11 +64,13 @@ public sealed class CoExecution
         /// <summary>这条路径上已经展开的调用数，以及已经引入的任意值的个数。</summary>
         public int Inlines { get; init; }
         public int Fresh { get; init; }
+        /// <summary>证明一条声明时，这条路径上与声明有关的记录（见 CoExecution.Claims.cs）。</summary>
+        public Trail? Trail { get; init; }
     }
 
     private enum Role : byte { Native, Template, Inner }
 
-    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous }
+    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Landing }
 
     private sealed record Event(EventKind Kind)
     {
@@ -83,8 +87,9 @@ public sealed class CoExecution
     private const int MemoryVersion = 1005;
 
     private readonly MethodSnapshot native;
-    private readonly FlowGraph<TemplateEffect> template;
-    private readonly PlacedGraph nativeGraph, templateGraph;
+    private FlowGraph<TemplateEffect> template;
+    private readonly PlacedGraph nativeGraph;
+    private PlacedGraph templateGraph;
     private readonly MethodBody body;
     private readonly INativeFacts facts;
     private readonly Func<ulong, MethodSnapshot?>? snapshots;
@@ -93,6 +98,8 @@ public sealed class CoExecution
     private readonly SortedSet<string> assumptions = new(StringComparer.Ordinal);
     private readonly Term stackPointer;
     private int steps, paths;
+    /// <summary>最近一次原生读写落在托管堆上（不是帧对象，也不是映像数据区）。</summary>
+    private bool heapAccess;
 
     private CoExecution(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
         Func<ulong, MethodSnapshot?>? snapshots, int budget)
@@ -198,6 +205,8 @@ public sealed class CoExecution
 
     private void Explore(State state)
     {
+        if (run is not null) { ExploreClaim(state); return; }
+        if (leftTemplate is not null) { ExploreTemplates(state); return; }
         var onNative = Machine(ref state, inner: false);
         if (onNative.Kind == EventKind.Fork) { Fork(state, onNative, native: true); return; }
         var onTemplate = Template(ref state);
@@ -213,7 +222,7 @@ public sealed class CoExecution
             PathConditions? conditions = state.Conditions;
             foreach (var (condition, value) in literals)
             {
-                if (!native && Unnamed(condition) is { } attribute)
+                if (!native && leftTemplate is null && Unnamed(condition) is { } attribute)
                     throw new Refuted(Verdict.MissingFact, $"模板的条件含现场尚未命名的运行时属性 {(RuntimeFunction)attribute.Attribute.Value}：{condition}");
                 conditions = conditions?.With(condition, value);
                 if (conditions is not null) conditions = Learn(conditions, condition, value);
@@ -284,10 +293,13 @@ public sealed class CoExecution
     {
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         var substituted = new Term[row.Length];
+        Dictionary<Term, Term>? native2 = null;
         int fresh = state.Fresh;
         for (int i = 0; i < row.Length; i++)
         {
             substituted[i] = foreign ? Import(row[i], side.Env, memo, ref fresh) : Substitute(row[i], side.Env, memo);
+            // 声明的操作数是原生一侧的项：模板的形参换成它们之后，再按现场的环境取值。
+            if (lower && run is not null) substituted[i] = Substitute(substituted[i], state.Native.Env, native2 ??= new(ReferenceEqualityComparer.Instance));
             if (lower) substituted[i] = Lower(substituted[i], ref state);
         }
         if (fresh != state.Fresh) state = state with { Fresh = fresh };
@@ -368,7 +380,7 @@ public sealed class CoExecution
         for (int i = 0; i < parameters.Length; i++) env = env.SetItem(parameters[i], values[i]);
         // 环上的切点配对与模拟不变式（设计 9.3）尚未实现：一条路径第二次进入同一个块时停下。
         int visits = side.Visits.GetValueOrDefault(exit.Target.Index) + 1;
-        if (visits > 1) throw new Refuted(Verdict.Insufficient, "方法里有环：切点配对尚未实现");
+        if (visits > 1) throw new Refuted(Verdict.Insufficient, "方法里有环：切点配对尚未实现") { Unsupported = true };
         return new Side(exit.Target, 0, env, side.Visits.SetItem(exit.Target.Index, visits));
     }
 
@@ -387,7 +399,7 @@ public sealed class CoExecution
         switch (terminator.Kind)
         {
             case TerminatorKind.Invoke:
-                throw new Refuted(Verdict.Insufficient, "带展开出口的调用：展开路径的对照尚未实现");
+                throw new Refuted(Verdict.Insufficient, "带展开出口的调用：展开路径的对照尚未实现") { Unsupported = true };
             case TerminatorKind.Single:
             {
                 var exit = terminator.Exits[0];
@@ -404,6 +416,7 @@ public sealed class CoExecution
                 var condition = Value(terminator.Condition!, side, ref state, lower, foreign);
                 if (state.Conditions.Decide(condition) is bool taken)
                 {
+                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, taken ? 0 : 1));
                     Advance(Go(terminator.Exits[taken ? 0 : 1], ref state), ref state);
                     return null;
                 }
@@ -420,6 +433,7 @@ public sealed class CoExecution
                 if (selector.IsConstant)
                 {
                     int chosen = selector.Value < (UInt128)last ? (int)selector.Value : last;
+                    if (run is not null && role == Role.Native) state = Decided(state, new EdgeId(side.Block, chosen));
                     Advance(Go(terminator.Exits[chosen], ref state), ref state);
                     return null;
                 }
@@ -449,9 +463,11 @@ public sealed class CoExecution
             var snapshot = inner ? state.Inner!.Snapshot : native;
             IFlowGraph graph = inner ? snapshot : nativeGraph;
             var side = inner ? state.Inner!.Side : state.Native;
+            if (run is not null && !inner && side.Block == run.Claim.Landing.Block && side.Index == run.Claim.Landing.Index)
+                return new Event(EventKind.Landing);
             if (side.Index >= graph.OccurrenceCount(side.Block))
             {
-                if (Leave(graph, ref state, role) is { } left) return left;
+                if (Leave(graph, ref state, role) is { } departed) return departed;
                 continue;
             }
             var id = new OccurrenceId(side.Block, side.Index);
@@ -461,15 +477,20 @@ public sealed class CoExecution
             switch (snapshot[id])
             {
                 case ReadOccurrence read:
-                    env = env.SetItem(results[0], MachineRead(ref state, inner, operands[0], read.Width));
+                {
+                    var value = MachineRead(ref state, inner, operands[0], read.Width);
+                    env = env.SetItem(results[0], value);
+                    if (run is not null && heapAccess) state = inner ? TemplateRead(state, value) : NativeRead(state, id, operands[0], read.Width, value);
                     break;
+                }
                 case WriteOccurrence:
                     MachineWrite(ref state, inner, operands[0], operands[1]);
+                    if (run is not null && heapAccess && !inner) state = NativeWrite(state, id, operands[0], operands[1]);
                     break;
                 case CallOccurrence call:
                 {
                     if (call.Target is null) throw new Refuted(Verdict.MissingFact, $"原语调用 {call.Primitive} 没有登记");
-                    if (call.ByJump) throw new Refuted(Verdict.Insufficient, "由跳转完成的调用：前提的核对尚未实现");
+                    if (call.ByJump) throw new Refuted(Verdict.Insufficient, "由跳转完成的调用：前提的核对尚未实现") { Unsupported = true };
                     if (!operands[0].IsConstant) throw new Refuted(Verdict.MissingFact, $"间接调用的目标没有命名：{operands[0]}");
                     ulong address = (ulong)operands[0].Value;
                     var callee = facts.Callee(address);
@@ -569,6 +590,7 @@ public sealed class CoExecution
 
     private Term MachineRead(ref State state, bool inner, Term address, int width)
     {
+        heapAccess = false;
         var pointer = inner ? state.Inner!.StackPointer : stackPointer;
         if (FrameOffset(address, pointer) is long offset)
         {
@@ -590,11 +612,13 @@ public sealed class CoExecution
             return terms.Attribute(new AttributeId(KernelAttributes.ImageWord), width, address, terms.Constant(state.Epoch, 32), terms.Constant(state.Serial, 32));
         }
         if (MentionsStack(address, pointer)) throw new Refuted(Verdict.MissingFact, $"地址由栈指针算出，但不是常量偏移：{address}");
+        heapAccess = true;
         return HeapRead(inner ? state.TemplateWrites : state.NativeWrites, address, width, state.Epoch);
     }
 
     private void MachineWrite(ref State state, bool inner, Term address, Term value)
     {
+        heapAccess = false;
         var pointer = inner ? state.Inner!.StackPointer : stackPointer;
         if (FrameOffset(address, pointer) is long offset)
         {
@@ -616,6 +640,7 @@ public sealed class CoExecution
         }
         if (MentionsStack(address, pointer)) throw new Refuted(Verdict.MissingFact, $"地址由栈指针算出，但不是常量偏移：{address}");
         if (MentionsStack(value, pointer)) throw new Refuted(Verdict.MissingFact, "帧地址被写入堆：帧对象逃逸");
+        heapAccess = true;
         state = inner ? state with { TemplateWrites = Append(state.TemplateWrites, address, value, state.Epoch) }
             : state with { NativeWrites = Append(state.NativeWrites, address, value, state.Epoch) };
     }
@@ -663,6 +688,7 @@ public sealed class CoExecution
     /// <summary>事件与结局处，双方写过的位置内容相同（写入归并，设计 6.2）。</summary>
     private void CompareWrites(State state)
     {
+        if (run is not null) Synchronized(state);
         // 双方做了同一串写入（次序、位置、值都相同）：内存相同，不需要别名判定。
         if (state.NativeWrites.Count == state.TemplateWrites.Count)
         {
@@ -794,7 +820,9 @@ public sealed class CoExecution
                 {
                     int width = effect.ResultWidths[0];
                     var address = Locate(effect, operands.AsSpan(), width, state);
-                    next = next with { Env = next.Env.SetItem(templateGraph.Results(id)[0], HeapRead(state.TemplateWrites, address, width, state.Epoch)) };
+                    var loaded = HeapRead(state.TemplateWrites, address, width, state.Epoch);
+                    next = next with { Env = next.Env.SetItem(templateGraph.Results(id)[0], loaded) };
+                    if (run is not null) state = TemplateRead(state, loaded);
                     break;
                 }
                 case EffectKind.Write:
@@ -836,6 +864,9 @@ public sealed class CoExecution
             case (EventKind.Throw, EventKind.Throw) when onNative.Exception == onTemplate.Exception:
                 CompareWrites(state);
                 paths++;
+                return;
+            case (EventKind.Landing, EventKind.Return):
+                Landed(state);
                 return;
             case (EventKind.Return, EventKind.Return):
             {
