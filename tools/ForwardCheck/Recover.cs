@@ -126,7 +126,7 @@ internal static partial class Recover
             }
 
             // 恢复：只读快照、签名与全局事实。
-            var graph = new EffectGraph(snapshot, real.Method, facts);
+            var graph = new EffectGraph(snapshot, real.Method, facts, Snapshot);
             var view = new FactView(graph, entities, facts.Layout);
             var context = new RecoveryContext(snapshot, real.Method, real.InitializerOf, facts, entities, Snapshot);
             var claims = Propose(view).ToList();

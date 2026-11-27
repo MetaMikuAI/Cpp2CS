@@ -213,7 +213,12 @@ public sealed partial class CoExecution
             case EventKind.Throw when trail.Tail && onNative.Values.Length == 0:
                 Synchronize(state, onNative);
                 return;
-            case EventKind.Throw or EventKind.Return or EventKind.Trap or EventKind.Departed:
+            case EventKind.Ended when state.Inner is { Side.Ended: true }:
+                // 模板一侧正在展开的方法里是同一次不返回的调用：这个操作在这条路径上不返回，双方的词在那次调用处一同结束。
+                Synchronized(state);
+                paths++;
+                return;
+            case EventKind.Throw or EventKind.Return or EventKind.Trap or EventKind.Departed or EventKind.Ended:
                 LeaveWindow(state, Name(onNative));
                 return;
             default:
@@ -232,7 +237,11 @@ public sealed partial class CoExecution
     private void Synchronize(State state, Event onNative)
     {
         var onTemplate = Template(ref state);
-        if (onTemplate.Kind == EventKind.Vacuous) { paths++; return; }
+        // 登记不可变位置后路径条件自相矛盾，这条路径没有执行（设计 7.7）。
+        if (state.Infeasible) { paths++; return; }
+        // 声明是待证的一方：它的操作在现场走得到的路径上没有定义（有定义条件与路径条件矛盾），这条路径上的事件就没有对应（设计 9.1）。
+        if (onTemplate.Kind == EventKind.Vacuous)
+            throw new ClaimRefuted(Obligation.Correspondence, $"声明的操作在这条路径上没有定义：有定义条件与路径条件矛盾，现场的 {Name(onNative)} 没有对应");
         if (onTemplate.Kind == EventKind.Fork) { Fork(state, onTemplate, native: false); return; }
         Match(state, onNative, onTemplate);
     }

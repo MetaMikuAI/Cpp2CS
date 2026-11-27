@@ -118,19 +118,19 @@ internal sealed class SampleInput
         MethodShape host;
         try { host = metadata.Method(entity); }
         catch (ExpansionException e) { Failure("事实层", e.Message); return; }
-        var graph = new EffectGraph(snapshot, host, facts);
-        if (graph.Failure is { } missing) { Failure("事实层", missing); return; }
-
-        // 占用的计量单位是效果图中的出现和条件抛出边。不可观察的 None 不进入分母。
-        var effects = graph.Effects.Where(e => e.Kind != NativeEffectKind.None).Select(e => EffectRef.Of(e.Occurrence))
-            .Concat(graph.Checks.Select(c => EffectRef.Of(c.Edge))).ToHashSet();
-        progress($"效果 {effects.Count}");
         var lifts = new Dictionary<ulong, MethodSnapshot?> { [item.Address] = snapshot };
         MethodSnapshot? Snapshot(ulong entry)
         {
             if (!lifts.TryGetValue(entry, out var s)) lifts[entry] = s = target.Lift(entry).Snapshot;
             return s;
         }
+        var graph = new EffectGraph(snapshot, host, facts, Snapshot);
+        if (graph.Failure is { } missing) { Failure("事实层", missing); return; }
+
+        // 占用的计量单位是效果图中的出现和条件抛出边。不可观察的 None 不进入分母。
+        var effects = graph.Effects.Where(e => e.Kind != NativeEffectKind.None).Select(e => EffectRef.Of(e.Occurrence))
+            .Concat(graph.Checks.Select(c => EffectRef.Of(c.Edge))).ToHashSet();
+        progress($"效果 {effects.Count}");
         var view = new FactView(graph, entities, facts.Layout);
         var context = new RecoveryContext(snapshot, host, host.IsTypeInitializer ? host.DeclaringType : null, facts, entities, Snapshot);
         var (_, explanation) = ForwardCheck.Recover.ProveAndSelect(view, context, ForwardCheck.Recover.Propose(view));
@@ -173,7 +173,7 @@ internal sealed class SampleInput
                 var snapshot = target.Lift(item.Address).Snapshot ?? throw new InvalidDataException("终点缺少快照");
                 var expanded = IlExpander.Expand(decoded, metadata, scope, snapshot.Terms, 1, snapshot.PointerBits);
                 facts.BeginCheck();
-                var verdict = CoExecution.Check(snapshot, expanded.Graph, decoded, facts, address => target.Lift(address).Snapshot);
+                var verdict = CoExecution.Check(snapshot, expanded.Graph, decoded, facts, address => target.Lift(address).Snapshot, output: true);
                 endpoints.Add(item.Key, verdict.Verdict == Verdict.Proved ? "通过" : $"{verdict.Verdict}：{facts.Detail(verdict)}");
             }
             catch (ExpansionException e) { endpoints.Add(item.Key, e.Message); }

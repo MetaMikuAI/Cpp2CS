@@ -16,6 +16,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 ///   counterexamples --assemblies 程序集目录              逐项核对有出处的反例（核心库取自程序集目录）
 ///   native --cases … --assemblies … --binary … --metadata … --symbols …   原生一侧的正向核对：真实 IL 的展开与原生快照共同执行
 ///   recover … [--isolated]                              恢复与 IL 对照；--isolated 另把每个用例放进新的上下文单独恢复，与整批逐例比较
+///   returns --binary … --metadata … [--symbols …]         全映像核对“排在函数范围末尾的调用不返回”
 /// </summary>
 internal static class Program
 {
@@ -31,6 +32,8 @@ internal static class Program
         {
             case "sample" or "assemblies":
                 return Sample.Run(arguments);
+            case "returns" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
+                return ReturnAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"));
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
                 using (var metadata = ModelInput.Load(assemblies, options))
                     return arguments[0] == "keys" ? MetadataAudit.Keys(metadata, options.GetValueOrDefault("--order") == "reverse", options.GetValueOrDefault("--keys-file"))
@@ -69,6 +72,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck sample|assemblies --binary 原生库 --metadata 元数据文件 [--count 个数] [--seed 种子] [--out 生成目录]");
         Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 副本目录] [--isolated] [--emit-generated 生成目录]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck returns --binary 原生库 --metadata 元数据文件 [--symbols 带符号的原生库]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
     }

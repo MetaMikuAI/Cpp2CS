@@ -293,7 +293,7 @@ public static class Lowering
     {
         var writer = new Writer(explanation.Graph, explanation.Metadata, explanation.Selected, explanation.Outcomes);
         writer.Run();
-        if (writer.Unwritable.Count > 0) throw new InvalidOperationException("解释里有写不出的声明：选择没有核对值可得");
+        // 写不出的声明在原位留下了“值不可得”的洞（Writer.Landing）：方法体因此不完整，它占用的效果没有被解释。
         return new ManagedBody(writer.Host, [.. writer.Code], writer.Locals, [.. writer.Holes]);
     }
 

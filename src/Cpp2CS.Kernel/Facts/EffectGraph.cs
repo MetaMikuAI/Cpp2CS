@@ -27,7 +27,7 @@ public sealed record NativeEffect(OccurrenceId Occurrence, NativeEffectKind Kind
     public Term? Result { get; init; }
     public Term? Class { get; init; }
     public ExceptionKind Exception { get; init; }
-    /// <summary>路径在这个效果处结束（登记为不返回的调用）。</summary>
+    /// <summary>路径在这个效果处结束：这次调用不返回（设计 7.5）。依据是规格的登记、被调方法的效果摘要，或这次调用是函数范围里的最后一条指令。</summary>
     public bool Ends { get; init; }
     public string Detail { get; init; } = "";
 }
@@ -93,7 +93,7 @@ public sealed class EffectGraph
     public Term? Returned(BlockId block) => returns[block.Index];
     /// <summary>块以返回结束时，返回值所在槽位的整个值。</summary>
     public Term? ReturnSlot(BlockId block) => returnSlots[block.Index];
-    /// <summary>块在一次抛出处结束：其后的出现与出口不属于任何执行（设计 7.5）。</summary>
+    /// <summary>块在一次不返回的调用处结束：其后的出现与出口不属于任何执行（设计 7.5）。</summary>
     public bool EndsInThrow(BlockId block) => ends[block.Index];
 
     /// <summary>
@@ -147,7 +147,8 @@ public sealed class EffectGraph
         return result;
     }
 
-    public EffectGraph(MethodSnapshot snapshot, MethodShape host, INativeFacts facts)
+    /// <summary>snapshots 按入口给出别的方法的快照，用来取调用的效果摘要（设计 5.4）；没有时为空，摘要一律未知。</summary>
+    public EffectGraph(MethodSnapshot snapshot, MethodShape host, INativeFacts facts, Func<ulong, MethodSnapshot?>? snapshots = null)
     {
         Snapshot = snapshot;
         Host = host;
@@ -231,6 +232,7 @@ public sealed class EffectGraph
                         frame[offset] = value;
             }
 
+            int ended = -1;
             for (int i = 0; i < snapshot.OccurrenceCount(block) && !ends[index]; i++)
             {
                 var id = new OccurrenceId(block, i);
@@ -277,6 +279,16 @@ public sealed class EffectGraph
                     }
                     case CallOccurrence call:
                         effect = Call(id, call, operands, results, facts, pointer, Unnamed);
+                        // 不返回的另外两种依据（设计 7.5）：这次调用是函数范围里的最后一条指令；被调托管方法的效果摘要。
+                        if (ReturnSummary.LastInFunction(snapshot, id))
+                        {
+                            // 托管调用与未命名的调用在此结束路径。登记为会返回的运行时操作排在函数范围的末尾，是登记与代码不符：当作未命名的效果。
+                            if (effect is { Kind: NativeEffectKind.Call or NativeEffectKind.Unnamed, Ends: false }) effect = effect with { Ends = true };
+                            else if (effect is not { Ends: true }) effect = Unnamed("登记为会返回的运行时操作排在函数范围的末尾") with { Ends = true };
+                        }
+                        else if (effect is { Kind: NativeEffectKind.Call, Ends: false } && snapshots is not null
+                            && ReturnSummary.EndsBlock(snapshot, id) && ReturnSummary.NeverReturns(snapshots(effect.Target)))
+                            effect = effect with { Ends = true };
                         break;
                     default:
                         effect = Unnamed("动态栈分配的定位尚未实现");
@@ -286,16 +298,19 @@ public sealed class EffectGraph
                 effects[id] = effect;
                 if (effect.Ends)
                 {
+                    ended = i;
                     ends[index] = true;
                     thrown[index] = effect.Kind == NativeEffectKind.Throw ? effect.Exception : ExceptionKind.None;
                 }
             }
             frameOut[index] = frame;
-            if (ends[index]) continue;
-
             var terminator = placed.Terminator(block);
+            // 块在不返回的调用处结束：其后的出口不属于任何执行。这次调用自己带展开出口时，它抛出的异常仍沿展开出口离开。
+            bool unwinds = ends[index] && terminator.Kind == TerminatorKind.Invoke && ended == snapshot.OccurrenceCount(block) - 1;
+            if (ends[index] && !unwinds) continue;
+
             if (terminator.Condition is { } condition) conditions[index] = Resolve(condition);
-            for (int e = 0; e < terminator.Exits.Length; e++)
+            for (int e = unwinds ? 1 : 0; e < terminator.Exits.Length; e++)
             {
                 var exit = terminator.Exits[e];
                 if (exit.Kind == ExitKind.Return && returned is { } pieces)

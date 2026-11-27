@@ -27,7 +27,8 @@ internal sealed class Writer
     private readonly int pointerBits;
     private readonly PathConditions empty;
     private readonly Dictionary<Term, int> argumentOf = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<Term, Certificate> definitions = new(ReferenceEqualityComparer.Instance);
+    /// <summary>每个被定义的项由哪些声明定义。同一个值可以有几条声明定义（两处取同一个数组的长度）：用到它的地方取在那里有值的一条。</summary>
+    private readonly Dictionary<Term, List<Certificate>> definitions = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Certificate, int> definitionLocal = [];
     /// <summary>成为局部变量的块参数：每个块参数按用到的低位宽度各有一个局部变量（整个参数，或它的低位切片）。</summary>
     private readonly Dictionary<Term, SortedDictionary<int, int>> parameterLocals = new(ReferenceEqualityComparer.Instance);
@@ -56,7 +57,8 @@ internal sealed class Writer
     {
         this.graph = graph;
         this.metadata = metadata;
-        this.selected = selected;
+        // 写出的结果只取决于这组声明本身：按稳定键排列，与调用方给出的次序无关（选择试写与下降写出的是同一个结果）。
+        this.selected = selected = [.. selected.OrderBy(c => c.Claim.Key, StringComparer.Ordinal)];
         this.outcomes = outcomes;
         host = graph.Host;
         terms = graph.Snapshot.Terms;
@@ -67,7 +69,8 @@ internal sealed class Writer
         {
             foreach (var effect in certificate.Claim.Occupied) occupiedBy[effect] = certificate;
             if (certificate.Claim.Definition is not { } definition) continue;
-            definitions.TryAdd(definition, certificate);
+            if (!definitions.TryGetValue(definition, out var definers)) definitions[definition] = definers = [];
+            definers.Add(certificate);
             definitionLocal[certificate] = localTypes.Count;
             localTypes.Add(certificate.ResultType);
             localTerms.Add(definition);
@@ -155,7 +158,7 @@ internal sealed class Writer
             var block = new BlockId(index);
             Emit(".label", index);
             int count = snapshot.OccurrenceCount(block);
-            bool ended = false;
+            bool ended = false, thrown = false;
             for (int p = 0; p <= count && !ended; p++)
             {
                 Landing(new ProgramPoint(block, p));
@@ -166,11 +169,23 @@ internal sealed class Writer
                 else if (effect.Kind != NativeEffectKind.None && !occupiedBy.ContainsKey(reference))
                     EffectHole(reference, effect.Kind == NativeEffectKind.Throw ? "抛出异常对象" : effect.Kind.ToString());
                 ended = effect.Ends;
+                thrown = ended && effect.Kind == NativeEffectKind.Throw;
                 // 路径在这个效果处结束时，落在它之后的声明（占用它的那个操作）仍在这里写出。
                 if (ended) Landing(new ProgramPoint(block, p + 1));
             }
             if (!ended) Terminate(block, count);
+            else if (!thrown) Unreachable();
         }
+    }
+
+    /// <summary>
+    /// 不可达的续点（设计第 10 节）：块在一次不返回的调用处结束，原生代码在它之后没有后续，IL 的调用指令之后却必须有合法的后续。
+    /// 写成 ldnull、throw：它在任何区域、任何栈深、任何返回类型下都合法。它不属于任何执行，写什么都不改变行为。
+    /// </summary>
+    private void Unreachable()
+    {
+        Emit("ldnull");
+        Emit("throw");
     }
 
     private bool IsCheck(EdgeId edge) =>
@@ -238,9 +253,17 @@ internal sealed class Writer
                 return;
             }
             default:
-                Hole(null, $"B{block.Index} 的块末", HoleLayer.Skeleton, null, $"{terminator.Kind} 的下降尚未实现");
+                Hole(null, $"B{block.Index} 的块末", HoleLayer.Skeleton, null, $"{terminator.Kind} 的下降尚未实现：{Describe(block, count, terminator)}");
                 return;
         }
+    }
+
+    private string Describe(BlockId block, int count, Terminator terminator)
+    {
+        string exit = terminator.Kind == TerminatorKind.Single ? terminator.Exits[0].Kind.ToString() : terminator.Kind.ToString();
+        var last = count > 0 ? graph.Effect(new OccurrenceId(block, count - 1)) : null;
+        string tail = last is null ? "无效果" : last.Kind == NativeEffectKind.Call ? $"调用 {last.Callee!.Entity}" : $"{last.Kind} {last.Detail}";
+        return $"{exit}；块内最后一个出现：{tail}";
     }
 
     /// <summary>沿一条边离开：给目标块里需要的参数并行赋值，再转移。</summary>
@@ -482,8 +505,10 @@ internal sealed class Writer
     private Expr? Build(Term term, bool reference, int depth)
     {
         if (depth > 24) return null;
-        if (definitions.TryGetValue(term, out var defined) && definitionLocal.TryGetValue(defined, out int local) && Available(local) && localTypes[local] is { } type)
-            return new([new("ldloc", local)], type);
+        if (definitions.TryGetValue(term, out var definers))
+            foreach (var defined in definers)
+                if (definitionLocal.TryGetValue(defined, out int local) && Available(local) && localTypes[local] is { } type)
+                    return new([new("ldloc", local)], type);
         if (argumentOf.TryGetValue(term, out int argument)) return new([new("ldarg", argument)], ClaimTemplate.OnStack(host.Parameters[argument]));
         if (term.Kind == TermKind.BlockParameter || term is { Kind: TermKind.Slice, Offset: 0 } && term.Operands[0].Kind == TermKind.BlockParameter)
         {
