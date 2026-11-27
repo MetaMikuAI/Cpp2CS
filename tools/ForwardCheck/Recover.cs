@@ -18,7 +18,8 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// </summary>
 internal static partial class Recover
 {
-    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show, string? emit)
+    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show,
+        string? emit, string? generated)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
         var input = Il2CppInput.Load(binary, metadataPath);
@@ -44,7 +45,7 @@ internal static partial class Recover
 
         int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
         var adversary = new Adversary();
-        var output = emit == null ? null : new Emit(emit, assemblies, metadata, facts);
+        var output = emit == null && generated == null ? null : new Emit(emit ?? generated!, assemblies, metadata, facts);
         // 交叉对照的素材：已证明等价的用例的恢复结果，与签名相同的另一个用例的真实 IL 对照，应当被反驳。
         var recoveredBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens)>();
         var realBodies = new List<(string Name, string Signature, MethodBody Body, ITokenResolver Tokens, TermPool Terms, int PointerBits)>();
@@ -198,7 +199,8 @@ internal static partial class Recover
         Console.WriteLine($"交叉对照：{pairs} 对（一个用例的真实 IL 配上签名相同的另一个用例的恢复结果），被反驳 {rejected} 对，被证明 {passed.Count} 对");
         foreach (string line in passed) Console.WriteLine($"  被证明：{line}");
         adversary.Report();
-        bool emitted = output?.Run(equivalent, pairs) ?? true;
+        bool emitted = emit == null || output!.Run(equivalent, pairs);
+        if (generated != null) emitted &= output!.RunGenerated(generated, input, equivalent, pairs);
         return different == 0 && adversary.Failures == 0 && emitted ? 0 : 1;
     }
 

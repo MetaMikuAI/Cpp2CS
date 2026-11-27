@@ -16,18 +16,18 @@ internal sealed class SampleInput
     private readonly ModelMetadata metadata;
     private readonly EntityFacts entities;
     private readonly BridgeFacts facts;
-    private readonly DefinitionTokens tokens;
+    private readonly Il2CppInput input;
+    private readonly Dictionary<long, ManagedBody> complete = [];
     private readonly Arm64Target target;
     private readonly (long Key, ulong Address)[] population;
 
     public SampleInput(string binary, string path, string? symbols)
     {
-        var input = Il2CppInput.Load(binary, path);
+        input = Il2CppInput.Load(binary, path);
         var file = File.ReadAllBytes(binary);
         metadata = ModelInput.Facts(input, file);
         entities = new(metadata);
         facts = new(input, metadata, symbols, file);
-        tokens = new(metadata);
         var rows = new List<(long, ulong)>();
         for (int i = 0; i < input.Code.Methods.Count; i++)
             if (input.Code.Methods[i].Entry is ulong rva) rows.Add((i, rva));
@@ -151,17 +151,38 @@ internal sealed class SampleInput
         }
 
         progress("完整");
-        var scope = tokens.For(entity);
-        try
+        complete[item.Key] = body;
+    }
+
+    public Sample.Generation Generate(Sample.Item[] items, long[] main, string? directory)
+    {
+        // 工作进程超时后只重建已经完成恢复的方法。写出仍须经过原来的下降入口。
+        foreach (var item in items)
+            if (!complete.ContainsKey(item.Key)) Recover(item, new(), _ => { });
+        var selected = items.Select(i => complete[i.Key]).ToArray();
+        using var set = new AssemblySet();
+        set.Generate(input, metadata, selected);
+        var endpoints = new Dictionary<long, string>();
+        foreach (var item in items)
         {
-            var decoded = SrmMetadata.SampleBody(body, metadata, scope, () => progress("写出"));
-            var expanded = IlExpander.Expand(decoded, metadata, scope, snapshot.Terms, 1, snapshot.PointerBits);
-            facts.BeginCheck();
-            var verdict = CoExecution.Check(snapshot, expanded.Graph, decoded, facts, Snapshot);
-            result.Endpoint = verdict.Verdict == Verdict.Proved ? "通过" : $"{verdict.Verdict}：{facts.Detail(verdict)}";
+            var body = complete[item.Key];
+            var (module, token) = set.Host(body.Host.Entity);
+            try
+            {
+                var (decoded, scope, _) = set.Reader.GeneratedBody(module, token, body);
+                var snapshot = target.Lift(item.Address).Snapshot ?? throw new InvalidDataException("终点缺少快照");
+                var expanded = IlExpander.Expand(decoded, metadata, scope, snapshot.Terms, 1, snapshot.PointerBits);
+                facts.BeginCheck();
+                var verdict = CoExecution.Check(snapshot, expanded.Graph, decoded, facts, address => target.Lift(address).Snapshot);
+                endpoints.Add(item.Key, verdict.Verdict == Verdict.Proved ? "通过" : $"{verdict.Verdict}：{facts.Detail(verdict)}");
+            }
+            catch (ExpansionException e) { endpoints.Add(item.Key, e.Message); }
+            catch (InvalidDataException e) { endpoints.Add(item.Key, e.Message); }
+            catch (BadImageFormatException e) { endpoints.Add(item.Key, e.Message); }
         }
-        catch (ExpansionException e) { result.Endpoint = e.Message; }
-        catch (InvalidDataException e) { result.Endpoint = e.Message; }
-        catch (BadImageFormatException e) { result.Endpoint = e.Message; }
+        var problems = set.Verify(main.Select(key => complete[key].Host.Entity), out int passed);
+        if (directory != null && endpoints.Values.All(r => r == "通过")) set.Publish(directory);
+        return new(endpoints, set.Count, set.Reader.DecodedMethods, set.Seconds, set.Peak, passed, problems,
+            input.AssemblyMetadata.Value.UnknownParameterDefaults.Select(p => $"方法 {p.Key.Method} 参数 {p.Key.Sequence}：{p.Value}").ToArray());
     }
 }

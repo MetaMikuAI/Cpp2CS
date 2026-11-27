@@ -9,7 +9,7 @@ using Cpp2CS.Snapshot;
 namespace Cpp2CS.Tools.ForwardCheck;
 
 /// <summary>只收恢复主线已判等价的用例。写入副本后，从该副本的 MethodDef、签名和指令重新建立对照。</summary>
-internal sealed class Emit(string directory, string assemblies, SrmMetadata metadata, BridgeFacts facts)
+internal sealed partial class Emit(string directory, string assemblies, SrmMetadata metadata, BridgeFacts facts)
 {
     internal sealed record Case(Module Module, int Token, string Name, string Signature, ManagedBody Input,
         MethodBody Real, TermPool Terms, int PointerBits);
@@ -115,6 +115,11 @@ internal sealed class Emit(string directory, string assemblies, SrmMetadata meta
         int peak = EmitChecks.Stack(decoded, tokens, metadata.Facts, body.Method, copy.Pe.GetMethodBody(rva).MaxStack);
         peaks[peak] = peaks.GetValueOrDefault(peak) + 1;
         instructions += decoded.Length;
+        CompareCase(item, body, tokens);
+    }
+
+    private void CompareCase(Case item, MethodBody body, ITokenResolver tokens)
+    {
         foreach (var expected in Cases)
         {
             if (expected.Signature != item.Signature || (expected != item && expected.Name == item.Name)) continue;

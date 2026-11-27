@@ -27,7 +27,7 @@ internal static class Program
         new("Cpp2CS.Kernel", ["Cpp2CS.Snapshot", "Cpp2CS.Spec"], Trusted: true, ForbidReflection: false),
         new("Cpp2CS.Facts", ["Cpp2CS.Kernel", "Cpp2CS.Model"], Trusted: true, ForbidReflection: false),
         new("Cpp2CS.Discovery", ["Cpp2CS.Kernel"], Trusted: false, ForbidReflection: true),
-        new("Cpp2CS.Output", ["Cpp2CS.Kernel"], Trusted: true, ForbidReflection: false),
+        new("Cpp2CS.Output", ["Cpp2CS.Kernel", "Cpp2CS.Facts"], Trusted: true, ForbidReflection: false),
     ];
 
     // 只能由本程序集内部构造的类型：项只出自项池，图与快照只出自校验过的构造器，凭据、解释、方法体只出自引擎、选择、下降。
