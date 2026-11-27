@@ -307,7 +307,7 @@ internal sealed class Writer
     private void Return(BlockId block)
     {
         if (host.Return is not { } type) { Emit("ret"); return; }
-        if (graph.Returned(block) is not { } stored) { Hole(null, "返回值", HoleLayer.Value, null, "返回值的槽位不在返回行里"); return; }
+        if (graph.Returned(block) is not { } stored) { Hole(null, "返回值", HoleLayer.Value, null, graph.ReturnFailure(block) ?? "返回值的槽位不在返回行里"); return; }
         // 返回值按返回类型存储：栈上的值只要低位（存储位宽）相同。候选：槽位里更宽的值，或按类型扩展的值。
         var candidates = new List<Term>();
         int stack = ClaimTemplate.StackBits(ClaimTemplate.OnStack(type));

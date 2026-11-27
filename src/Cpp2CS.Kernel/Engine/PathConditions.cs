@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Cpp2CS.Snapshot;
+using Cpp2CS.Spec.Runtime;
 
 namespace Cpp2CS.Kernel.Engine;
 
@@ -12,7 +13,7 @@ public static class KernelAttributes
     public const int LoadAfter = 1001;
     /// <summary>一次事件的结果：操作数是事件的序号与结果槽的序号。</summary>
     public const int EventResult = 1002;
-    /// <summary>帧里没有写过的位置上的读取：操作数是相对入口栈指针的偏移、帧的代次、哪一个帧（0 是现场，其余是第几次展开）。</summary>
+    /// <summary>私有区域中未初始化的字，按字节偏移、区域序号和本次执行的帧区分。</summary>
     public const int FrameWord = 1003;
     /// <summary>映像数据区里的一个字：操作数是地址、历元与序号。</summary>
     public const int ImageWord = 1004;
@@ -26,6 +27,10 @@ public static class KernelAttributes
     public const int FrameAddress = 1009;
     /// <summary>事件之后已暴露对象的内容，由事件与模板对象的身份区分。</summary>
     public const int ExposedContent = 1010;
+    /// <summary>经内存传递的形参副本的初始内容，按托管形参序号区分。</summary>
+    public const int ArgumentCopy = 1011;
+    /// <summary>效果图里的间接结果，按调用出现的块和序号命名；走到该出现时绑定到独立的事件结果。</summary>
+    public const int IndirectCallResult = 1012;
 }
 
 /// <summary>
@@ -242,6 +247,18 @@ public sealed class PathConditions
             if (!Settle(settled, now, expected)) return null;
         }
         return new PathConditions(terms, settled.ToImmutable(), nextConstants, initialized, immutable, nextUpper);
+    }
+
+    /// <summary>设计 7.10。值类型的每个基本成员都须同值，填充不参与比较，重叠的成员各自核对。</summary>
+    public bool SameMembers(Term a, Term b, ImmutableArray<AggregateMember> members)
+    {
+        if (members.IsDefaultOrEmpty || a.Width != b.Width) return false;
+        foreach (var member in members)
+        {
+            if (member.OffsetBits < 0 || member.Bits <= 0 || member.OffsetBits > a.Width - member.Bits) return false;
+            if (!Same(terms.Slice(a, member.OffsetBits, member.Bits), terms.Slice(b, member.OffsetBits, member.Bits))) return false;
+        }
+        return true;
     }
 
     /// <summary>值判定（设计 7.8）在路径条件下的部分：两个项在此处是否同值。只回答“已证明相同”或“不能证明”。</summary>

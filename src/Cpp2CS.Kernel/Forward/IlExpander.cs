@@ -336,7 +336,7 @@ public sealed class IlExpander
                 }
                 case StepKind.Write:
                     Emit(block, new(EffectKind.Write, [.. values], [], chosen.Id, instruction.Offset)
-                        { Location = step.Location, Entity = context.Field?.Entity, Owner = context.Field?.DeclaringType });
+                        { StorageType = context.Subject, Location = step.Location, Entity = context.Field?.Entity, Owner = context.Field?.DeclaringType });
                     break;
                 case StepKind.Call:
                 {
@@ -442,7 +442,7 @@ public sealed class IlExpander
     private Term FrameObject(Term initial, TypeShape type, int slot)
     {
         if (type.Kind == StackKind.ByRef) throw new ExpansionException("指向托管指针的类型尚不能表示", $"帧内变量 {slot}");
-        return Emit(flow.Entry, new(EffectKind.FrameObject, [initial], [pointerBits], "帧对象", -1) { FrameSlot = slot, Entity = type.Entity })[0];
+        return Emit(flow.Entry, new(EffectKind.FrameObject, [initial], [pointerBits], "帧对象", -1) { FrameSlot = slot, Entity = type.Entity, StorageType = type })[0];
     }
 
     private int Fallthrough(Instruction instruction) =>

@@ -26,6 +26,7 @@ internal static class Sample
         public string? First { get; set; }
         public string? Error { get; set; }
         public string? Endpoint { get; set; }
+        public string? FirstNativeOperation { get; set; }
         public void Hole(string layer, string reason)
         {
             First ??= reason;
@@ -67,7 +68,7 @@ internal static class Sample
         {
             string option = args[i];
             if (option == "--causes" && !causes) { causes = true; continue; }
-            if (i + 1 == args.Length || option is not ("--binary" or "--metadata" or "--symbols" or "--fingerprint" or "--count" or "--seed" or "--show" or "--batch-size" or "--out")
+            if (i + 1 == args.Length || option is not ("--binary" or "--metadata" or "--symbols" or "--fingerprint" or "--count" or "--seed" or "--show" or "--batch-size" or "--out" or "--rows")
                 || !options.TryAdd(option, args[++i])) return Usage();
         }
         if (!options.TryGetValue("--binary", out var binary) || !options.TryGetValue("--metadata", out var metadata)
@@ -101,12 +102,12 @@ internal static class Sample
             }
             return 0;
         }
-        return Measure(args, seed, options.ContainsKey("--show"), batchSize, causes).GetAwaiter().GetResult();
+        return Measure(args, seed, options.ContainsKey("--show"), batchSize, causes, options.GetValueOrDefault("--rows")).GetAwaiter().GetResult();
     }
 
     private static int Usage()
     {
-        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--fingerprint 参照表] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量] [--causes]");
+        Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--fingerprint 参照表] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量] [--causes] [--rows 逐方法明细]");
         Console.Error.WriteLine("分批时，每批结束输出“批次暂停”，从标准输入收到“继续”后处理下一批。");
         Console.Error.WriteLine("ForwardCheck assemblies --binary 原生库 --metadata 元数据 --out 目录，抽样选项同 sample。");
         return 2;
@@ -147,7 +148,7 @@ internal static class Sample
         }
     }
 
-    private static async Task<int> Measure(string[] args, int seed, bool show, int batchSize, bool causes)
+    private static async Task<int> Measure(string[] args, int seed, bool show, int batchSize, bool causes, string? rowsPath)
     {
         var clock = Stopwatch.StartNew();
         var records = new List<Measurement>();
@@ -218,6 +219,11 @@ internal static class Sample
             foreach (var hole in generated.MetadataHoles) Console.WriteLine($"  元数据洞 {hole}");
             Stop();
             Report(plan, records, seed, clock.Elapsed, peak);
+            if (rowsPath != null)
+                File.WriteAllLines(rowsPath, records.Take(plan.Count).Select(r => JsonSerializer.Serialize(new
+                {
+                    r.Item.Key, r.Item.Address, r.Complete, r.Status, r.Result.First, r.Result.FirstNativeOperation, r.Result.Error, r.Effects, r.Result.Causes
+                })));
             if (causes)
                 SampleCauseCounts.Report(records.Take(plan.Count).Where(r => !r.Timeout && r.Result.Error == null && !r.Complete)
                     .Select(r => (r.Item, r.Result.Causes!)));

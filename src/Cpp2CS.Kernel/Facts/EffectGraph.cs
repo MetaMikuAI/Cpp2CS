@@ -63,6 +63,7 @@ public sealed class EffectGraph
     private readonly ExceptionKind[] thrown;      // 块结束处抛出的异常
     private readonly Term?[] conditions;
     private readonly Term?[] returns, returnSlots;
+    private readonly string?[] returnFailures;
     private readonly List<ConditionalThrow> checks = [];
     private readonly List<(Term Value, TypeShape Type, int Index)> arguments = [];
     private readonly List<Term> stored = [];
@@ -91,6 +92,8 @@ public sealed class EffectGraph
     public Term? Condition(BlockId block) => conditions[block.Index];
     /// <summary>块以返回结束时，返回值按返回类型的存储位宽取出的项；没有返回值或不是返回时为空。</summary>
     public Term? Returned(BlockId block) => returns[block.Index];
+    /// <summary>返回时未能取得整个值的原因。</summary>
+    public string? ReturnFailure(BlockId block) => returnFailures[block.Index];
     /// <summary>块以返回结束时，返回值所在槽位的整个值。</summary>
     public Term? ReturnSlot(BlockId block) => returnSlots[block.Index];
     /// <summary>块在一次不返回的调用处结束：其后的出现与出口不属于任何执行（设计 7.5）。</summary>
@@ -162,10 +165,11 @@ public sealed class EffectGraph
         conditions = new Term?[count];
         returns = new Term?[count];
         returnSlots = new Term?[count];
+        returnFailures = new string?[count];
 
-        var convention = EngineFacts.Convention(host, out var returned, out string reason);
+        var convention = EngineFacts.Convention(host, out var returned, out string conventionReason);
         Term? pointer = snapshot.EntryParameters.FirstOrDefault(p => p.Slot == new Slot(SlotKind.StackPointer, 0));
-        if (convention is null || pointer is null) { Failure = convention is null ? reason : "快照的入口没有声明栈指针"; return; }
+        if (convention is null || pointer is null) { Failure = convention is null ? conventionReason : "快照的入口没有声明栈指针"; return; }
         Term? Entry(Slot slot) => snapshot.EntryParameters.FirstOrDefault(p => p.Slot == slot);
         if (facts.GenericEntry(host.Entity) is { } generic &&
             Entry(NativeEntryQueries.MethodArgumentSlot(convention.Value)) is { } hidden && hidden.Width == snapshot.PointerBits &&
@@ -173,7 +177,10 @@ public sealed class EffectGraph
             resolved[hidden] = terms.Entity(generic.ExpectedMethod, snapshot.PointerBits);
         for (int i = 0; i < convention.Value.Length; i++)
         {
-            if (EngineFacts.Gather(terms, convention.Value[i], Entry) is not { } entry) { Failure = $"快照的入口没有声明第 {i} 个形参的槽位"; return; }
+            var passing = convention.Value[i];
+            if (passing.Pieces.Any(piece => Entry(piece.Slot) is null)) { Failure = $"快照的入口没有声明第 {i} 个形参的槽位"; return; }
+            var entry = passing.Indirect > 0 ? PrivateMemory.ArgumentValue(terms, i, passing.Indirect) : EngineFacts.Gather(terms, passing, Entry);
+            if (entry is null) { Failure = $"第 {i} 个形参的槽位没有覆盖值的全部位"; return; }
             arguments.Add((OnStack(entry, host.Parameters[i]), ClaimTemplate.OnStack(host.Parameters[i]), i));
             stored.Add(host.Parameters[i].TwoValued ? terms.ZeroExtend(terms.Slice(entry, 0, 1), entry.Width) : entry);
         }
@@ -204,7 +211,9 @@ public sealed class EffectGraph
         for (int i = 0; i < postorder.Count; i++) position[postorder[i]] = i;
 
         var incoming = new List<(EdgeId Edge, ImmutableArray<Term> Row)>[count];
-        var frameOut = new Dictionary<long, Term>?[count];
+        if (returned is { Indirect: > 0 } result && Entry(result.Pieces[0].Slot) is null) { Failure = "入口没有间接结果槽"; return; }
+        var initial = PrivateMemory.Create(terms, pointer, convention.Value, returned, Entry, i => stored[i]);
+        var frameOut = new PrivateMemory?[count];
         reachable[snapshot.Entry.Index] = true;
         foreach (int index in postorder)
         {
@@ -226,15 +235,7 @@ public sealed class EffectGraph
                         && edges.TrueForAll(e => e.Row[k] is { Kind: TermKind.Concat } other && ReferenceEquals(other.Operands[0], low)))
                         resolved[parameters[k]] = terms.Concat(low, terms.Slice(parameters[k], low.Width, first.Width - low.Width));
                 }
-            // 帧：各条入边上内容相同的偏移保留。
-            Dictionary<long, Term> frame = [];
-            if (!head && edges.Count > 0)
-            {
-                var first = frameOut[edges[0].Edge.Source.Index]!;
-                foreach (var (offset, value) in first)
-                    if (edges.TrueForAll(e => frameOut[e.Edge.Source.Index]!.TryGetValue(offset, out var other) && ReferenceEquals(other, value)))
-                        frame[offset] = value;
-            }
+            var memory = initial.Merge(edges.Select(e => frameOut[e.Edge.Source.Index]!).ToArray(), head);
 
             int ended = -1;
             for (int i = 0; i < snapshot.OccurrenceCount(block) && !ends[index]; i++)
@@ -251,10 +252,12 @@ public sealed class EffectGraph
                         var address = operands[0];
                         if (StructureReads.Name(address, read.Width, facts, terms) is { } named)
                             resolved[results[0]] = named;
-                        else if (EngineFacts.FrameOffset(address, pointer) is long offset)
+                        else if (memory.Locate(address, read.Width, out string reason) is { } part)
                         {
-                            if (frame.TryGetValue(offset, out var stored) && stored.Width >= read.Width) resolved[results[0]] = terms.Slice(stored, 0, read.Width);
+                            if (memory.Read(part, false, out reason) is { } value) resolved[results[0]] = value;
+                            else if (reason.Length > 0) effect = Unnamed(reason);
                         }
+                        else if (reason.Length > 0) effect = Unnamed(reason);
                         else if (address.IsConstant && facts.InImageData((ulong)address.Value))
                         {
                             if (read.Width == facts.Layout.PointerBits && facts.EntityAtSlot((ulong)address.Value) is { } type)
@@ -264,27 +267,23 @@ public sealed class EffectGraph
                             else runtimeReads[results[0]] = address;
                         }
                         else if (OnClassStructure(address)) runtimeReads[results[0]] = address;
-                        else if (EngineFacts.MentionsStack(address, pointer)) effect = Unnamed($"地址由栈指针算出，但不是常量偏移：{address}");
                         else effect = new(id, NativeEffectKind.Read) { Address = address, Width = read.Width, Value = results[0] };
                         break;
                     }
                     case WriteOccurrence:
                     {
                         var (address, value) = (operands[0], operands[1]);
-                        if (EngineFacts.FrameOffset(address, pointer) is long offset)
-                        {
-                            foreach (long at in frame.Keys.ToArray())
-                                if (at != offset && at < offset + value.Width / 8 && offset < at + frame[at].Width / 8) frame.Remove(at);
-                            frame[offset] = value;
-                        }
+                        var source = memory.Mentions(value);
+                        if (source is PrivateMemory.Kind.Copy or PrivateMemory.Kind.Result) effect = Unnamed(PrivateMemory.Escape(source.Value, store: true));
+                        else if (memory.Locate(address, value.Width, out string reason) is { } part) memory = memory.Write(part, value);
+                        else if (reason.Length > 0) effect = Unnamed(reason);
                         else if (address.IsConstant && facts.InImageData((ulong)address.Value)) { }
-                        else if (EngineFacts.MentionsStack(address, pointer)) effect = Unnamed($"地址由栈指针算出，但不是常量偏移：{address}");
-                        else if (EngineFacts.MentionsStack(value, pointer)) effect = Unnamed("帧地址被写入堆：帧对象逃逸");
+                        else if (source == PrivateMemory.Kind.Frame) effect = Unnamed(PrivateMemory.Escape(source.Value, store: true));
                         else effect = new(id, NativeEffectKind.Write) { Address = address, Width = value.Width, Value = value };
                         break;
                     }
                     case CallOccurrence call:
-                        effect = Call(id, call, operands, results, facts, pointer, snapshots, Unnamed);
+                        effect = Call(id, call, operands, results, facts, ref memory, snapshots, Unnamed);
                         // 不返回的另外两种依据（设计 7.5）：这次调用是函数范围里的最后一条指令；被调托管方法的效果摘要。
                         if (ReturnSummary.LastInFunction(snapshot, id))
                         {
@@ -309,7 +308,7 @@ public sealed class EffectGraph
                     thrown[index] = effect.Kind == NativeEffectKind.Throw ? effect.Exception : ExceptionKind.None;
                 }
             }
-            frameOut[index] = frame;
+            frameOut[index] = memory;
             var terminator = placed.Terminator(block);
             // 块在不返回的调用处结束：其后的出口不属于任何执行。这次调用自己带展开出口时，它抛出的异常仍沿展开出口离开。
             bool unwinds = ends[index] && terminator.Kind == TerminatorKind.Invoke && ended == snapshot.OccurrenceCount(block) - 1;
@@ -322,8 +321,13 @@ public sealed class EffectGraph
                 if (exit.Kind == ExitKind.Return && returned is { } passing)
                 {
                     Term? Slot(Slot slot) => snapshot.ReturnSlots.IndexOf(slot) is var at && at >= 0 ? Resolve(exit.Arguments[at]) : null;
-                    returns[index] = EngineFacts.Gather(terms, passing, Slot);
-                    if (passing.Pieces.Length == 1) returnSlots[index] = Slot(passing.Pieces[0].Slot);
+                    if (passing.Indirect > 0)
+                    {
+                        returns[index] = memory.Result(host.Return!, out string missing);
+                        if (returns[index] is null) returnFailures[index] = missing;
+                    }
+                    else returns[index] = EngineFacts.Gather(terms, passing, Slot);
+                    if (passing.Indirect == 0 && passing.Pieces.Length == 1) returnSlots[index] = Slot(passing.Pieces[0].Slot);
                 }
                 if (exit.Kind != ExitKind.Target) continue;
                 live.Add(new(block, e));
@@ -354,7 +358,7 @@ public sealed class EffectGraph
     }
 
     private NativeEffect? Call(OccurrenceId id, CallOccurrence call, ImmutableArray<Term> operands, ImmutableArray<Term> results, INativeFacts facts,
-        Term pointer, Func<ulong, MethodSnapshot?>? snapshots, Func<string, NativeEffect> unnamed)
+        ref PrivateMemory memory, Func<ulong, MethodSnapshot?>? snapshots, Func<string, NativeEffect> unnamed)
     {
         if (call.Target is null) return unnamed($"原语调用 {call.Primitive} 没有登记");
         if (!operands[0].IsConstant) return unnamed($"调用的目标没有命名：{operands[0]}");
@@ -388,27 +392,32 @@ public sealed class EffectGraph
         {
             if (callee.MethodAtCall(address, snapshots, Argument, out string reason) is not { } shape) return unnamed(reason);
             if (EngineFacts.Convention(shape, out var returned, out reason) is not { } slots) return unnamed(reason);
+            var transfer = memory.Prepare(shape, slots, returned, Argument, out reason);
+            if (transfer is null) return unnamed(reason);
             var arguments = ImmutableArray.CreateBuilder<Term>(slots.Length);
             for (int i = 0; i < slots.Length; i++)
             {
                 // 实参按栈上的位宽取：不超过 32 位的整数取所在槽位的低 32 位（被调方法只用其中的低位）。
                 var type = ClaimTemplate.OnStack(shape.Parameters[i]);
                 var passing = slots[i];
-                if (passing.Pieces is [var piece] && piece.Bits != ClaimTemplate.StackBits(type))
+                if (passing.Indirect == 0 && passing.Pieces is [var piece] && piece.Bits != ClaimTemplate.StackBits(type))
                     passing = passing with { Pieces = [(piece.Slot, ClaimTemplate.StackBits(type))] };
-                if (EngineFacts.Gather(terms, passing, Argument) is not { } given) return unnamed($"调用没有给出第 {i} 个实参的槽位");
-                if (EngineFacts.MentionsStack(given, pointer)) return unnamed("帧地址作为实参：帧对象逃逸");
+                if ((transfer.Arguments.GetValueOrDefault(i) ?? EngineFacts.Gather(terms, passing, Argument)) is not { } given) return unnamed($"调用没有给出第 {i} 个实参的槽位");
+                if (memory.Mentions(given) is { } escaped) return unnamed(PrivateMemory.Escape(escaped, store: false));
                 arguments.Add(given);
             }
             Term? result = null;
             if (returned is { } slot)
             {
-                if (EngineFacts.Gather(terms, slot, Returned) is not { } produced) return unnamed("调用的结果里没有返回值的槽位");
+                var value = slot.Indirect > 0 ? PrivateMemory.CallValue(terms, slot.Indirect * 8, id) : EngineFacts.Gather(terms, slot, Returned);
+                if (value is not { } produced) return unnamed("调用的结果里没有返回值的槽位");
                 result = OnStack(produced, shape.Return!);
             }
+            memory = transfer.Apply(memory, result);
             return new(id, NativeEffectKind.Call) { Target = address, Callee = shape, Arguments = arguments.MoveToImmutable(), Result = result };
         }
         var operation = callee.Operation!;
+        if (memory.RuntimeEscape(operation.Arguments, call, operands) is { } escape) return unnamed(escape);
         switch (operation.Effect)
         {
             case RuntimeEffect.Throw:

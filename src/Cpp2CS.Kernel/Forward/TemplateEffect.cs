@@ -31,6 +31,8 @@ public sealed class TemplateEffect : IFlowOccurrence
     public LocationKind Location { get; init; }
     /// <summary>帧内变量序号，形参在前，局部在后。</summary>
     public int FrameSlot { get; init; }
+    /// <summary>帧对象或写入的存储类型，观察值类型时按它的基本成员比较。</summary>
+    public TypeShape? StorageType { get; init; }
     /// <summary>字段、被调方法或被初始化的类。</summary>
     public EntityRef? Entity { get; init; }
     public ExceptionKind Exception { get; init; }
@@ -64,6 +66,12 @@ public sealed class TemplateEffect : IFlowOccurrence
     {
         writer.Write((int)Kind);
         if (Kind == EffectKind.FrameObject) writer.Write(FrameSlot);
+        if (StorageType is { Kind: StackKind.Value } type)
+        {
+            writer.Write(type.StorageBits);
+            writer.Write(type.Members.Length);
+            foreach (var m in type.Members) { writer.Write(m.OffsetBits); writer.Write(m.Bits); }
+        }
         writer.Write((int)Location);
         writer.Write((int)Exception);
         writer.Write((int)Function);

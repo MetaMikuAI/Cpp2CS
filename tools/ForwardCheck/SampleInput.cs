@@ -148,6 +148,16 @@ internal sealed class SampleInput
             result.First ??= body.Holes[0].What + "：" + body.Holes[0].Reason;
             if (result.Causes is { } counts)
             {
+                var first = body.Holes.FirstOrDefault(h => !h.Derived) ?? body.Holes[0];
+                if (first.Effect is { IsEdge: false } site)
+                    result.FirstNativeOperation = snapshot[site.Occurrence] switch
+                    {
+                        ReadOccurrence read => $"读 {read.Width} 位",
+                        WriteOccurrence write => $"写 {write.Value.Width} 位",
+                        CallOccurrence call when call.Target != null && graph.Resolve(call.Target) is { IsConstant: true } address =>
+                            "调用 " + facts.Symbol((ulong)address.Value),
+                        _ => snapshot[site.Occurrence].Kind.ToString(),
+                    };
                 var diagnosis = new SampleCauses(view);
                 foreach (var hole in body.Holes) diagnosis.Record(hole, counts);
             }
