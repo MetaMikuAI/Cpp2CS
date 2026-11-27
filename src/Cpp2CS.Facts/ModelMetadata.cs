@@ -38,7 +38,7 @@ public sealed class ModelMetadata : IMetadataView
 
     private static bool IsInitializer(MethodDefinition m) => m.Name == ".cctor" &&
         (m.Flags & (MethodAttributes.Static | MethodAttributes.RTSpecialName)) == (MethodAttributes.Static | MethodAttributes.RTSpecialName);
-    private bool IsCore(int index, string name) => core.TryGetValue(name, out int i) && i == index;
+    internal bool IsCore(int index, string name) => core.TryGetValue(name, out int i) && i == index;
     public NamedType CoreType(string name) => core.TryGetValue(name, out int i) ? new(i, []) : throw Missing($"核心库类型 {name}");
     internal static ExpansionException Missing(string what) => new("元数据事实不足", what);
     public EntityRef TypeEntity(TypeReference t) => new(EntityKind.Type, Keys.TypeKey(t) ?? throw Missing($"模型缺少类型结构 {EntityKeys.Structure(t)}"));

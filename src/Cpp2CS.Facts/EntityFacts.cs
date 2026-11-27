@@ -14,6 +14,9 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 {
     private MetadataModel Model => metadata.Model;
     public EntityRef SystemObject => metadata.TypeEntity(metadata.CoreType("Object"));
+    private long variantInterfaceRejections, arrayInterfaceRejections;
+    public long VariantInterfaceRejections => Interlocked.Read(ref variantInterfaceRejections);
+    public long ArrayInterfaceRejections => Interlocked.Read(ref arrayInterfaceRejections);
 
     public MethodShape Method(EntityRef entity) => metadata.Method(entity);
     public FieldShape Field(EntityRef entity) => metadata.Field(entity);
@@ -150,23 +153,67 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
         return new EntityRef(EntityKind.Type, key);
     }
 
-    public bool Assignable(EntityRef from, EntityRef to)
+    public bool Assignable(EntityRef from, EntityRef to) =>
+        metadata.Keys.DescribeType(from) is { } source && metadata.Keys.DescribeType(to) is { } destination
+        && Assignable(source, destination);
+
+    /// <summary>按本模型的签名判定；基类与接口代入后可以没有单独的运行时类型键。</summary>
+    public bool Assignable(TypeReference source, TypeReference destination)
     {
-        if (from == to) return true;
-        if (metadata.Keys.DescribeType(from) is not { } source || metadata.Keys.DescribeType(to) is not NamedType target) return false;
+        if (!KnownSignature(source) || !KnownSignature(destination)) return false;
+        if (destination is not NamedType target) return EntityKeys.Structure(source) == EntityKeys.Structure(destination);
         var targetType = Model.Types[target.Definition];
-        bool isObject = targetType.Parent is null && !targetType.Flags.HasFlag(TypeAttributes.Interface);
-        if (source is ArrayType) return isObject;
-        if (source is not NamedType named || Model.Types[named.Definition].ValueType) return false;
-        if (isObject) return true;
-        if (target.Arguments.Count > 0) return false;
-        for (int? at = named.Definition; at is int current; at = Model.Types[current].Parent is NamedType parent ? parent.Definition : null)
+        bool isInterface = targetType.Flags.HasFlag(TypeAttributes.Interface);
+        bool genericInterface = isInterface && target.Arguments.Count > 0;
+        bool isObject = metadata.IsCore(target.Definition, "Object");
+        // ECMA-335 I.8.9.1、I.8.7.1：数组以 System.Array 为基类。向量的泛型接口另有相容规则。
+        if (source is ArrayType)
         {
-            if (current == target.Definition) return true;
-            foreach (var implemented in Model.Types[current].Interfaces)
-                if (implemented is NamedType { Arguments.Count: 0 } iface && iface.Definition == target.Definition) return true;
+            if (genericInterface) Interlocked.Increment(ref arrayInterfaceRejections);
+            return isObject || metadata.IsCore(target.Definition, "Array");
         }
-        return false;
+        if (source is not NamedType named) return false;
+        // I.8.7.1 第 1 条：相同签名直接相容，不涉及泛型实参的协变或逆变。
+        if (named.Definition == target.Definition && EntityKeys.Structure(named) == EntityKeys.Structure(target)) return true;
+        // ECMA-335 II.9.5：带变体形参的接口由独立的规则判定。
+        if (genericInterface && targetType.GenericParameters.Any(p => (p.Flags & GenericParameterAttributes.VarianceMask) != 0))
+        {
+            Interlocked.Increment(ref variantInterfaceRejections);
+            return false;
+        }
+        if (Model.Types[named.Definition].ValueType) return false;
+        return isObject || HasSupertype(named, target, isInterface, []);
+    }
+
+    // II.9.4：具名类型的实参数须与定义一致。按引用类型不是合法的泛型实参，不能用去掉按引用标记的实体键作证。
+    private bool KnownSignature(TypeReference type) => type switch
+    {
+        NamedType n => (uint)n.Definition < Model.Types.Count && n.Arguments.Count == Model.Types[n.Definition].GenericParameters.Count
+            && n.Arguments.All(a => a is not PointerType && KnownSignature(a)),
+        ArrayType a => a.Rank > 0 && (!a.Vector || a.Rank == 1) && KnownSignature(a.Element),
+        PointerType p => KnownSignature(p.Element),
+        VariableType v when v.Method => (uint)v.Owner < Model.Methods.Count && (uint)v.Position < Model.Methods[v.Owner].GenericParameters.Count,
+        VariableType v => (uint)v.Owner < Model.Types.Count && (uint)v.Position < Model.Types[v.Owner].GenericParameters.Count,
+        _ => false,
+    };
+
+    // ECMA-335 I.8.7.1、II.9.4：各层基类和接口用当前实例的实参代入，不变类型要求定义和每个实参都相同。
+    private bool HasSupertype(NamedType current, NamedType target, bool interfaces, HashSet<int> path)
+    {
+        if (!KnownSignature(current) || !path.Add(current.Definition)) return false;
+        var definition = Model.Types[current.Definition];
+        bool matches = current.Definition == target.Definition
+            && (target.Arguments.Count == 0 || EntityKeys.Structure(current) == EntityKeys.Structure(target))
+            || Matches(definition.Parent) || interfaces && definition.Interfaces.Any(Implemented);
+        path.Remove(current.Definition);
+        return matches;
+
+        bool Matches(TypeReference? declared) => declared is NamedType named && EntityKeys.Inflate(named, current) is NamedType next
+            && HasSupertype(next, target, interfaces, path);
+
+        bool Implemented(TypeReference declared) => target.Arguments.Count == 0
+            ? declared is NamedType { Arguments.Count: 0 } direct && direct.Definition == target.Definition
+            : Matches(declared);
     }
 
     public TypeShape? ElementOf(EntityRef array)

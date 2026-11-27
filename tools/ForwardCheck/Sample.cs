@@ -225,8 +225,11 @@ internal static class Sample
                     r.Item.Key, r.Item.Address, r.Complete, r.Status, r.Result.First, r.Result.FirstNativeOperation, r.Result.Error, r.Effects, r.Result.Causes
                 })));
             if (causes)
-                SampleCauseCounts.Report(records.Take(plan.Count).Where(r => !r.Timeout && r.Result.Error == null && !r.Complete)
-                    .Select(r => (r.Item, r.Result.Causes!)));
+            {
+                var measured = records.Take(plan.Count).Where(r => !r.Timeout && r.Result.Error == null).ToArray();
+                Console.WriteLine($"赋值相容拒绝次数：变体接口 {measured.Sum(r => r.Result.Causes!.VariantInterfaceRejections)}，数组到泛型接口 {measured.Sum(r => r.Result.Causes!.ArrayInterfaceRejections)}");
+                SampleCauseCounts.Report(measured.Where(r => !r.Complete).Select(r => (r.Item, r.Result.Causes!)));
+            }
             if (show && plan.Shown.Length == 0) Console.Error.WriteLine("总体中没有匹配的方法");
             return records.Any(r => r.Complete && r.Result.Endpoint != "通过") ? 1 : show && plan.Shown.Length == 0 ? 2 : 0;
         }

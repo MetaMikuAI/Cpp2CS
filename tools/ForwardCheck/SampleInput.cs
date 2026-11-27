@@ -14,7 +14,6 @@ namespace Cpp2CS.Tools.ForwardCheck;
 internal sealed class SampleInput
 {
     private readonly ModelMetadata metadata;
-    private readonly EntityFacts entities;
     private readonly BridgeFacts facts;
     private readonly Il2CppInput input;
     private readonly Dictionary<long, ManagedBody> complete = [];
@@ -28,7 +27,6 @@ internal sealed class SampleInput
         input = Il2CppInput.Load(binary, path);
         var file = File.ReadAllBytes(binary);
         metadata = ModelInput.Facts(input, file);
-        entities = new(metadata);
         reportNaming = fingerprint != null;
         var rows = new List<(long, ulong)>();
         for (int i = 0; i < input.Code.Methods.Count; i++)
@@ -135,12 +133,18 @@ internal sealed class SampleInput
         var effects = graph.Effects.Where(e => e.Kind != NativeEffectKind.None).Select(e => EffectRef.Of(e.Occurrence))
             .Concat(graph.Checks.Select(c => EffectRef.Of(c.Edge))).ToHashSet();
         progress($"效果 {effects.Count}");
+        var entities = new EntityFacts(metadata);
         var view = new FactView(graph, entities, facts.Layout);
         var context = new RecoveryContext(snapshot, host, host.IsTypeInitializer ? host.DeclaringType : null, facts, entities, Snapshot);
         var (_, explanation) = ForwardCheck.Recover.ProveAndSelect(view, context, ForwardCheck.Recover.Propose(view, entities));
         var covered = explanation.Selected.SelectMany(c => c.Claim.Occupied).Distinct().Count(effects.Contains);
         progress($"选中 {covered}");
         var body = Lowering.Lower(explanation);
+        if (result.Causes is { } causes)
+        {
+            causes.VariantInterfaceRejections = entities.VariantInterfaceRejections;
+            causes.ArrayInterfaceRejections = entities.ArrayInterfaceRejections;
+        }
         if (!body.Complete)
         {
             foreach (var h in body.Holes.Where(h => !h.Derived))

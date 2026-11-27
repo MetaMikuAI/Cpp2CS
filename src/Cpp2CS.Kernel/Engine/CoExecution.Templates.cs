@@ -164,6 +164,7 @@ public sealed partial class CoExecution
                     var result = EventResult(state.Serial, k, leftResults[k].Width);
                     leftEnv = leftEnv.SetItem(leftResults[k], result);
                     rightEnv = rightEnv.SetItem(rightResults[k], result);
+                    state = ReturnedFacts(state, onRight.Effect!.Signature!.Return, result);
                 }
                 Explore(state with
                 {

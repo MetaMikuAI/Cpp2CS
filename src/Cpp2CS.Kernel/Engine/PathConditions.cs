@@ -130,7 +130,7 @@ public sealed class PathConditions
     /// <summary>在成立的文字之下求值：已定的条件换成常量，已知等于常量的项换成常量，不可变位置上的读取去掉历元。</summary>
     public Term Evaluate(Term term) => Evaluate(term, literals);
 
-    private Term Evaluate(Term term, ImmutableDictionary<Term, bool> known)
+    private Term Evaluate(Term term, ImmutableDictionary<Term, bool> known, bool narrowToBounds = false)
     {
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         Term Known(Term t)
@@ -192,6 +192,13 @@ public sealed class PathConditions
                 if (changed) result = Known(terms.Rebuild(t, parts));
             }
             else if (!ReferenceEquals(result, t) && result.Operands.Length > 0) result = Go(result);
+            // 同值核对：无符号上界能表示在 n 位内时，其余高位恒为零。登记文字时保留项的身份。
+            if (narrowToBounds && upper.TryGetValue(t, out var bound))
+            {
+                int bits = 128 - (int)UInt128.LeadingZeroCount(bound);
+                if (bits < result.Width)
+                    result = terms.ZeroExtend(bits == 0 ? terms.False : terms.Slice(result, 0, bits), result.Width);
+            }
             memo[t] = result;
             return result;
         }
@@ -267,7 +274,8 @@ public sealed class PathConditions
         if (a.Width != b.Width) return false;
         Term x = Evaluate(a), y = Evaluate(b);
         if (ReferenceEquals(x, y)) return true;
-        return x.Width <= 128 && (SameLinear(x, y) || Decide(terms.Eq(x, y)) == true);
+        if (x.Width <= 128 && (SameLinear(x, y) || Decide(terms.Eq(x, y)) == true)) return true;
+        return !upper.IsEmpty && ReferenceEquals(Evaluate(a, literals, narrowToBounds: true), Evaluate(b, literals, narrowToBounds: true));
     }
 
     /// <summary>

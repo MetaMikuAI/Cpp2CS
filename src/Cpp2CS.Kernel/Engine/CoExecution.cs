@@ -1258,13 +1258,36 @@ public sealed partial class CoExecution
         memory.Prepare(shape, slots, returned, slot => Argument(call, reached.Values, slot), out string reason)
             ?? throw new Refuted(Verdict.MissingFact, reason);
 
-    // 间接结果有独立的事件结果槽。整数、向量寄存器的位值与它没有函数关系。
-    private Term? BindIndirect(PrivateMemory.Transfer transfer, OccurrenceId id, int serial, ref ImmutableDictionary<Term, Term> env)
+    // 托管调用正常返回时的后置条件：C++ bool 的存储字节只取 0 和 1（设计 16.2）。
+    private static State ReturnedFacts(State state, TypeShape? type, Term? stored) =>
+        type is { TwoValued: true } && stored is not null
+            ? state with { Conditions = state.Conditions.WithUpperBound(stored, 1) } : state;
+
+    private Term? BindManagedReturn(Event reached, MethodShape shape, Passing? returned, PrivateMemory.Transfer transfer,
+        ref State state, ref ImmutableDictionary<Term, Term> env, bool bystander = false)
     {
-        if (transfer.Result is not { } part) return null;
-        var result = EventResult(serial, -1, part.Bits);
-        env = env.SetItem(PrivateMemory.CallValue(terms, part.Bits, id), result);
-        return result;
+        var id = reached.Occurrence;
+        int serial = state.Serial;
+        if (transfer.Result is { } part)
+        {
+            // 间接结果有独立的事件结果槽。整数、向量寄存器的位值与它没有函数关系。
+            var indirect = EventResult(serial, -1, part.Bits);
+            env = env.SetItem(PrivateMemory.CallValue(terms, part.Bits, id), indirect);
+            return indirect;
+        }
+        if (returned is not { } passing) return null;
+        var call = (CallOccurrence)native[id];
+        var results = nativeGraph.Results(id);
+        var stored = EngineFacts.Gather(terms, passing, slot => call.ResultSlots.IndexOf(slot) is var at && at >= 0
+            ? EventResult(serial, at, results[at].Width) : null);
+        if (!bystander || !run!.OwnOnly)
+        {
+            var next = ReturnedFacts(state, shape.Return, stored);
+            if (bystander && !ReferenceEquals(next, state))
+                next = next with { Trail = next.Trail! with { Outside = next.Trail.Outside.Add(id.Block) } };
+            state = next;
+        }
+        return stored;
     }
 
     private static void RejectEscape(PrivateMemory memory, Term argument)
@@ -1355,15 +1378,15 @@ public sealed partial class CoExecution
                     RejectEscape(inner.Memory, expected);
                 }
                 var nativeEnv = Bind(onNative.After!.Env, nativeGraph.Results(onNative.Occurrence), call, null, state.Serial);
-                var indirect = BindIndirect(left, onNative.Occurrence, state.Serial, ref nativeEnv);
                 CompareWrites(ref state);
+                var value = BindManagedReturn(onNative, shape, returned, left, ref state, ref nativeEnv);
                 Explore(state with
                 {
-                    Memory = left.Apply(state.Memory!, indirect),
+                    Memory = left.Apply(state.Memory!, value),
                     Native = onNative.After with { Env = nativeEnv },
                     Inner = inner with
                     {
-                        Memory = right.Apply(inner.Memory, indirect),
+                        Memory = right.Apply(inner.Memory, value),
                         Side = onTemplate.After! with { Env = Bind(onTemplate.After.Env, inner.Snapshot.Results(onTemplate.Occurrence), other, call, state.Serial) },
                     },
                     Epoch = state.Epoch + 1, Serial = state.Serial + 1, NativeWrites = [], TemplateWrites = [],
@@ -1404,22 +1427,15 @@ public sealed partial class CoExecution
                 CompareWrites(ref state);
                 // 同一个事件：双方的结果相互绑定。此后是新的历元。
                 var results = nativeGraph.Results(onNative.Occurrence);
-                var nativeEnv = onNative.After!.Env;
-                for (int k = 0; k < results.Length; k++) nativeEnv = nativeEnv.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
-                var indirect = BindIndirect(transfer, onNative.Occurrence, state.Serial, ref nativeEnv);
+                var nativeEnv = Bind(onNative.After!.Env, results, call, null, state.Serial);
+                var value = BindManagedReturn(onNative, effect.Signature!, result, transfer, ref state, ref nativeEnv);
                 var templateEnv = onTemplate.After!.Env;
-                if (result is { } returned)
-                {
-                    int serial = state.Serial;
-                    templateEnv = templateEnv.SetItem(templateGraph.Results(onTemplate.Occurrence)[0], indirect ?? Gather(returned, slot =>
-                    {
-                        int at = call.ResultSlots.IndexOf(slot);
-                        return at >= 0 ? EventResult(serial, at, results[at].Width) : throw new Refuted(Verdict.MissingFact, $"调用的结果里没有槽位 {slot}");
-                    }));
-                }
+                if (result is not null)
+                    templateEnv = templateEnv.SetItem(templateGraph.Results(onTemplate.Occurrence)[0],
+                        value ?? throw new Refuted(Verdict.MissingFact, "调用的结果里没有返回值的槽位"));
                 Explore(state with
                 {
-                    Memory = transfer.Apply(state.Memory!, indirect),
+                    Memory = transfer.Apply(state.Memory!, value),
                     Native = onNative.After with { Env = nativeEnv }, Template = onTemplate.After with { Env = templateEnv },
                     Epoch = state.Epoch + 1, Serial = state.Serial + 1, NativeWrites = [], TemplateWrites = [],
                 });

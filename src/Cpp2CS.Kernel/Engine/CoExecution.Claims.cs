@@ -372,7 +372,8 @@ public sealed partial class CoExecution
                 for (int i = 0; i < call.ArgumentSlots.Length; i++)
                     if (call.ArgumentSlots[i].Kind == SlotKind.Integer && !exempt.Contains(call.ArgumentSlots[i]))
                         RejectEscape(state.Memory!, e.Values[i + 1]);
-                state = state with { Memory = transfer.Apply(state.Memory!, BindIndirect(transfer, e.Occurrence, state.Serial, ref env)) };
+                var value = BindManagedReturn(e, shape, returned, transfer, ref state, ref env, bystander: true);
+                state = state with { Memory = transfer.Apply(state.Memory!, value) };
             }
             else
             {

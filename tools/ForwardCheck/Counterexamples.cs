@@ -11,6 +11,7 @@ using Cpp2CS.Kernel.Sources;
 using Cpp2CS.Snapshot;
 using Cpp2CS.Spec.Catalog;
 using MethodBody = Cpp2CS.Kernel.Forward.MethodBody;
+using M = Cpp2CS.Model;
 
 namespace Cpp2CS.Tools.ForwardCheck;
 
@@ -172,6 +173,53 @@ internal static class Counterexamples
 
             // docs/前端.md 第 7 节：同一个类型只有一个编号。签名里的 int32、string 与核心库里的 System.Int32、System.String 是同一个类型。
             new("基本类型的身份", "docs/前端.md 第 7 节", () => CoreTypes(metadata)),
+
+            new("List<string> 不能赋给 List<object>", "ECMA-335 I.8.7.1、II.9.5；核心库 List<T>", () =>
+            {
+                var facts = metadata.Facts;
+                var strings = facts.TypeEntity(CoreCollection(metadata, "List`1", "String"));
+                var objects = facts.TypeEntity(CoreCollection(metadata, "List`1", "Object"));
+                return new EntityFacts(facts).Assignable(strings, objects) ? "接受了实参不同的列表" : null;
+            }),
+
+            new("派生类只能赋给实参相符的泛型基类", "ECMA-335 I.8.7.1、II.9.1；核心库 GenericEqualityComparer<T> 继承 EqualityComparer<T>", () =>
+            {
+                var facts = metadata.Facts;
+                var relations = new EntityFacts(facts);
+                var derived = CoreCollection(metadata, "GenericEqualityComparer`1", "Int32");
+                var ints = CoreCollection(metadata, "EqualityComparer`1", "Int32");
+                var longs = CoreCollection(metadata, "EqualityComparer`1", "Int64");
+                if (!relations.Assignable(facts.TypeEntity(derived), facts.TypeEntity(ints))) return "没有识别 EqualityComparer<int> 基类";
+                return relations.Assignable(derived, longs) ? "接受了 EqualityComparer<long> 基类" : null;
+            }),
+
+            new("数组的基类与泛型接口", "ECMA-335 I.8.7.1、I.8.9.1；语料 Fields.ReadArray 的 int[] 形参", () =>
+            {
+                var facts = metadata.Facts;
+                var relations = new EntityFacts(facts);
+                var array = new M.ArrayType(facts.CoreType("Int32"), 1, true);
+                var ints = facts.TypeEntity(array);
+                if (!relations.Assignable(ints, facts.TypeEntity(facts.CoreType("Array")))) return "没有识别 System.Array 基类";
+                if (!relations.Assignable(ints, relations.SystemObject)) return "没有识别 System.Object 基类";
+                if (relations.Assignable(ints, facts.TypeEntity(facts.CoreType("String")))) return "数组可赋给 System.String";
+                if (relations.Assignable(array, CoreCollection(metadata, "IList`1", "Int32"))) return "接受了尚未支持的数组泛型接口";
+                return relations.ArrayInterfaceRejections == 1 ? null : "未计入数组泛型接口的拒绝";
+            }),
+
+            new("泛型接口按定义的实参比较", "ECMA-335 I.8.7.1、II.9.5；核心库 List<T> 的接口声明", () =>
+            {
+                var facts = metadata.Facts;
+                var relations = new EntityFacts(facts);
+                var objects = CoreCollection(metadata, "List`1", "Object");
+                var listInterface = CoreCollection(metadata, "IList`1", "Object");
+                if (!relations.Assignable(facts.TypeEntity(objects), facts.TypeEntity(listInterface))) return "没有识别 IList<object> 接口";
+                if (relations.Assignable(objects, CoreCollection(metadata, "IList`1", "String"))) return "接受了实参不同的不变接口";
+                var strings = CoreCollection(metadata, "List`1", "String");
+                var enumerable = CoreCollection(metadata, "IEnumerable`1", "Object");
+                if (!relations.Assignable(enumerable, enumerable)) return "相同接口被当作变体转换拒绝";
+                if (relations.Assignable(strings, enumerable)) return "接受了尚未支持的协变接口";
+                return relations.VariantInterfaceRejections == 1 ? null : "未计入变体接口的拒绝";
+            }),
 
             // ---- 快照的构造 ----
 
@@ -759,6 +807,15 @@ internal static class Counterexamples
             return conditions.SameMembers(zero, changed, shape.Members) == padding ? null : $"第 {bit} 位的比较与成员布局不符";
         }
         return "布局里没有待核对的位";
+    }
+
+    private static M.NamedType CoreCollection(SrmMetadata metadata, string name, string argument)
+    {
+        var core = metadata.Load("mscorlib") ?? throw new InvalidOperationException("程序集目录里没有核心库");
+        var handle = core.FindTopLevel("System.Collections.Generic", name) ?? throw new InvalidOperationException($"核心库里没有 {name}");
+        var entity = metadata.Tokens(core).Type(MetadataTokens.GetToken(handle));
+        if (metadata.Facts.Keys.DescribeType(entity) is not M.NamedType definition) throw new InvalidOperationException($"缺少 {name} 的类型定义");
+        return definition with { Arguments = [metadata.Facts.CoreType(argument)] };
     }
 
     private static string? CoreTypes(SrmMetadata metadata)

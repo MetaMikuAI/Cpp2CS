@@ -15,6 +15,8 @@ internal sealed class SampleCauseCounts
 
     public Dictionary<string, Bucket> Independent { get; set; } = [];
     public HashSet<string> All { get; set; } = [];
+    public long VariantInterfaceRejections { get; set; }
+    public long ArrayInterfaceRejections { get; set; }
 
     public void Add(string key, string text, ulong address, bool derived = false, IEnumerable<string>? uses = null)
     {
