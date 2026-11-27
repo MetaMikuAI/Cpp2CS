@@ -39,7 +39,7 @@ internal static class Program
             case "returns" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
                 return ReturnAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"));
             case "passing" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
-                return PassingAudit.Run(options["--binary"], options["--metadata"]);
+                return PassingAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"), options.GetValueOrDefault("--fingerprint"));
             case "rgctx" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
                 return RgctxAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"),
                     options.GetValueOrDefault("--details"));
@@ -85,7 +85,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck fingerprint --binary 原生库 --metadata 元数据 --symbols 符号库 [--debug 调试库] --runtime-version 版本 --toolchain 工具链 --fingerprint 输出表");
         Console.Error.WriteLine("      ForwardCheck naming-check --binary 原生库 --metadata 元数据 --fingerprint 参照表 [--truth-symbols 对照符号库] [--truth-debug 对照调试库]");
         Console.Error.WriteLine("      ForwardCheck returns --binary 原生库 --metadata 元数据文件 [--symbols 带符号的原生库]");
-        Console.Error.WriteLine("      ForwardCheck passing --binary 原生库 --metadata 元数据文件");
+        Console.Error.WriteLine("      ForwardCheck passing --binary 原生库 --metadata 元数据文件 [--symbols 符号库] [--fingerprint 参照表]");
         Console.Error.WriteLine("      ForwardCheck rgctx --binary 原生库 --metadata 元数据文件 [--symbols 符号库] [--details 核对明细]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;

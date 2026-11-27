@@ -100,7 +100,7 @@ public sealed partial class CoExecution
         if (body.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
         var none = ImmutableDictionary<int, int>.Empty;
         Explore(new State(new Side(leftTemplate!.Entry, 0, leftEnv, none), new Side(template.Entry, 0, rightEnv, none),
-            conditions, Epoch: 1, Serial: 0, FrameGeneration: 0, [], [], ImmutableDictionary<long, Term>.Empty));
+            conditions, Epoch: 1, Serial: 0, [], [], null));
     }
 
     /// <summary>左侧的模板走到它的下一个事件：与右侧是同一段推进逻辑，两侧的位置与写入对调后执行。</summary>
@@ -138,7 +138,7 @@ public sealed partial class CoExecution
                 return;
             case (EventKind.Return, EventKind.Return) when onLeft.Values.Length == onRight.Values.Length:
                 for (int i = 0; i < onLeft.Values.Length; i++)
-                    if (!conditions.Same(onLeft.Values[i], onRight.Values[i]))
+                    if (!SameValue(conditions, onLeft.Values[i], onRight.Values[i], body.Method.Return))
                         throw new Refuted(Verdict.Insufficient,
                             $"返回值不同：左 {conditions.Evaluate(onLeft.Values[i])}，右 {conditions.Evaluate(onRight.Values[i])}");
                 CompareWrites(ref state);
@@ -151,7 +151,7 @@ public sealed partial class CoExecution
                 {
                     int arg = i - (onRight.Effect!.Indirect ? 1 : 0);
                     if (arg >= 0 && BindObject(ref state, onLeft.Values[i], onRight.Values[i], onRight.Effect.Signature!.Parameters[arg])) continue;
-                    if (!conditions.Same(onLeft.Values[i], onRight.Values[i]))
+                    if (!SameValue(conditions, onLeft.Values[i], onRight.Values[i], arg < 0 ? null : onRight.Effect.Signature!.Parameters[arg]))
                         throw new Refuted(Verdict.Insufficient,
                             $"调用 {onLeft.Effect!.Entity} 的第 {i} 个操作数不同：左 {conditions.Evaluate(onLeft.Values[i])}，右 {conditions.Evaluate(onRight.Values[i])}");
                 }

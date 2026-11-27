@@ -47,6 +47,11 @@ internal static class Counterexamples
                 return new RuntimeName([nullReference, divideByZero], "参照类").Operation == null ? null : "冲突的参照类取得了运行时操作";
             }),
 
+            new("值类型只有填充位不同", "设计 7.10；核心库 DateTimeOffset 的实际成员布局；ValueType::InternalEquals 逐字段比较",
+                () => PaddingComparison(metadata, padding: true)),
+            new("值类型一个成员的一位不同", "设计 7.10；核心库 DateTimeOffset 的实际成员布局；ValueType::InternalEquals 逐字段比较",
+                () => PaddingComparison(metadata, padding: false)),
+
             // ---- IL 一侧的展开 ----
 
             // ECMA-335 III.3.63 stloc：浮点值从内部表示舍入到局部变量的大小；I.12.1.3：存入存储位置时转换到该位置的类型。
@@ -735,6 +740,25 @@ internal static class Counterexamples
                     ? Legal("对着地址调用值类型的构造函数", CallLegality.Check(call, constructor, false, caller, facts)) : null);
         }
         return "核心库里没有带实例方法的值类型";
+    }
+
+    private static string? PaddingComparison(SrmMetadata metadata, bool padding)
+    {
+        var module = metadata.Load("mscorlib")!;
+        var handle = module.FindTopLevel("System", "DateTimeOffset")!.Value;
+        var shape = metadata.Facts.Type(metadata.Tokens(module).Type(MetadataTokens.GetToken(handle)));
+        if (shape.Members.IsDefaultOrEmpty) return "没有成员布局";
+        var pool = new TermPool();
+        var conditions = PathConditions.Empty(pool);
+        var zero = pool.Zero(shape.StorageBits);
+        for (int bit = 0; bit < shape.StorageBits; bit++)
+        {
+            bool member = shape.Members.Any(m => bit >= m.OffsetBits && bit - m.OffsetBits < m.Bits);
+            if (member == padding) continue;
+            var changed = pool.Bits(UInt128.One << bit, shape.StorageBits);
+            return conditions.SameMembers(zero, changed, shape.Members) == padding ? null : $"第 {bit} 位的比较与成员布局不符";
+        }
+        return "布局里没有待核对的位";
     }
 
     private static string? CoreTypes(SrmMetadata metadata)

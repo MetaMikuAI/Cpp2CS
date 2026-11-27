@@ -160,7 +160,7 @@ public sealed partial class CoExecution
     private void RunClaim(RecoveryContext context)
     {
         var host = context.Host;
-        var convention = Convention(host, out _);
+        var convention = Convention(host, out var returned);
         var env = ImmutableDictionary<Term, Term>.Empty;
         foreach (var parameter in template.EntryParameters) env = env.SetItem(parameter, run!.Claim.Operands[parameter.Slot.Index]);
         var conditions = PathConditions.Empty(terms);
@@ -173,7 +173,7 @@ public sealed partial class CoExecution
         if (context.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
         var none = ImmutableDictionary<int, int>.Empty;
         Explore(new State(new Side(native.Entry, 0, NativeEntryEnvironment(host, convention), none), new Side(template.Entry, 0, env, none),
-            conditions, Epoch: 1, Serial: 0, FrameGeneration: 0, [], [], ImmutableDictionary<long, Term>.Empty)
+            conditions, Epoch: 1, Serial: 0, [], [], EntryMemory(convention, returned))
         {
             Trail = new Trail(false, [], [], [], [], 1, false, false, []),
         });
@@ -270,7 +270,7 @@ public sealed partial class CoExecution
         {
             var produced = state.Template.Env[run.Template.Result!];
             var claimed = Value(definition, state.Native, ref state, lower: false);
-            if (!state.Conditions.Same(claimed, produced))
+            if (!SameValue(state.Conditions, claimed, produced, run.Template.ResultType))
                 throw new ClaimRefuted(Obligation.Correspondence, $"操作的结果不是声明的定义：模板 {state.Conditions.Evaluate(produced)}，定义 {claimed}");
         }
         foreach (var deferred in state.Trail!.Deferred) run.After.Add(deferred.Effect);
@@ -358,13 +358,30 @@ public sealed partial class CoExecution
     {
         var passed = new Passed(EffectRef.Of(e.Occurrence), ClassOf(e.Kind), null, 0, ExceptionKind.None);
         state = Bystander(state, passed);
-        // 实参槽里的帧地址：帧对象逃逸给了被调方法。整数槽之外的槽位不携带地址实参。
         var call = (CallOccurrence)native[e.Occurrence];
-        for (int i = 0; e.Kind == EventKind.Call && i < call.ArgumentSlots.Length; i++)
-            if (call.ArgumentSlots[i].Kind == SlotKind.Integer && MentionsStack(e.Values[i + 1], stackPointer))
-                throw new Refuted(Verdict.MissingFact, $"旁观的调用以帧地址作实参（{call.ArgumentSlots[i]}）：帧对象逃逸");
         var results = nativeGraph.Results(e.Occurrence);
         var env = e.After!.Env;
+        if (e.Kind == EventKind.Call)
+        {
+            var callee = facts.Callee(e.Address);
+            var shape = callee.MethodAtCall(e.Address, snapshots, slot => HiddenArgument(call, e, slot, state.Conditions), out _);
+            if (shape != null && EngineFacts.Convention(shape, out var returned, out _) is { } slots)
+            {
+                var transfer = Transfer(state.Memory!, shape, slots, returned, call, e);
+                var exempt = slots.Where(p => p.Indirect > 0).Select(p => p.Pieces[0].Slot).ToHashSet();
+                for (int i = 0; i < call.ArgumentSlots.Length; i++)
+                    if (call.ArgumentSlots[i].Kind == SlotKind.Integer && !exempt.Contains(call.ArgumentSlots[i]))
+                        RejectEscape(state.Memory!, e.Values[i + 1]);
+                state = state with { Memory = transfer.Apply(state.Memory!, BindIndirect(transfer, e.Occurrence, state.Serial, ref env)) };
+            }
+            else
+            {
+                for (int i = 0; i < call.ArgumentSlots.Length; i++)
+                    if (call.ArgumentSlots[i].Kind == SlotKind.Integer || call.ArgumentSlots[i].Kind == SlotKind.IndirectResult
+                        && state.Memory!.Mentions(e.Values[i + 1]) is PrivateMemory.Kind.Copy or PrivateMemory.Kind.Result)
+                        RejectEscape(state.Memory!, e.Values[i + 1]);
+            }
+        }
         for (int k = 0; k < results.Length; k++) env = env.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
         var conditions = state.Conditions;
         // 事件的后置条件：该类的初始化已触发（类初始化、新对象）；它由这个旁观效果确立，只在并入其他效果的条件的那一遍使用。

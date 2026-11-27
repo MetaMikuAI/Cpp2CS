@@ -78,41 +78,6 @@ public sealed partial class CoExecution
         return true;
     }
 
-    private Term ReadInterval(ImmutableDictionary<long, Term> frame, long start, int bits)
-    {
-        var parts = new List<Term>();
-        Int128 cursor = start, end = cursor + bits / 8;
-        foreach (var (at, value) in frame.OrderBy(p => p.Key))
-        {
-            Int128 limit = Int128.Min((Int128)at + value.Width / 8, end);
-            if (limit <= cursor) continue;
-            if (at > cursor) break;
-            parts.Add(terms.Slice(value, (int)((cursor - at) * 8), (int)((limit - cursor) * 8)));
-            cursor = limit;
-            if (cursor == end) return terms.Concat(parts);
-        }
-        throw new Refuted(Verdict.MissingFact, $"帧上偏移 {start} 处的 {bits} 位内容没有完整的写入依据");
-    }
-
-    private ImmutableDictionary<long, Term> WriteInterval(ImmutableDictionary<long, Term> frame, long start, Term value)
-    {
-        Int128 end = (Int128)start + value.Width / 8;
-        var updated = frame;
-        foreach (var (at, old) in frame)
-        {
-            Int128 limit = (Int128)at + old.Width / 8;
-            if (limit <= start || end <= at) continue;
-            updated = updated.Remove(at);
-            if (at < start) updated = updated.SetItem(at, terms.Slice(old, 0, (int)((start - (Int128)at) * 8)));
-            if (end < limit)
-            {
-                if (end > long.MaxValue) throw new Refuted(Verdict.MissingFact, "帧区间的末端超出偏移范围");
-                updated = updated.SetItem((long)end, terms.Slice(old, (int)((end - at) * 8), (int)((limit - end) * 8)));
-            }
-        }
-        return updated.SetItem(start, value);
-    }
-
     /// <summary>在观察点比较全部已暴露对象。每个对象在事件之后有一个双方共用的新内容。</summary>
     private void ObserveObjects(ref State state)
     {
@@ -122,13 +87,18 @@ public sealed partial class CoExecution
         {
             var expected = state.Objects[atom];
             long offset = leftTemplate is null ? FrameOffset(given, stackPointer)!.Value : 0;
-            var actual = leftTemplate is null ? ReadInterval(state.Frame, offset, expected.Width) : state.Objects[given];
-            if (!state.Conditions.Same(actual, expected))
+            var part = new PrivateMemory.Part(0, offset, expected.Width);
+            var type = state.ObjectTypes.GetValueOrDefault(atom);
+            string reason;
+            var actual = leftTemplate != null ? state.Objects[given] : (type is { Kind: StackKind.Value }
+                ? state.Memory!.Aggregate(part, type, "帧对象的成员没有写全", out reason) : state.Memory!.Read(part, true, out reason))
+                ?? throw new Refuted(Verdict.MissingFact, reason.Length > 0 ? reason : "帧对象的内容没有完整的写入依据");
+            if (!SameValue(state.Conditions, actual, expected, type))
                 throw new Refuted(Verdict.Insufficient, $"已暴露帧对象的内容不同：现场 {actual}，模板 {expected}");
             var fresh = terms.Attribute(new AttributeId(KernelAttributes.ExposedContent), expected.Width,
                 terms.Constant(serial, 32), atom.Operands[0], atom.Operands[1], atom.Operands[2]);
             var objects = state.Objects.SetItem(atom, fresh);
-            state = leftTemplate is null ? state with { Objects = objects, Frame = WriteInterval(state.Frame, offset, fresh) }
+            state = leftTemplate is null ? state with { Objects = objects, Memory = state.Memory!.Write(part, fresh) }
                 : state with { Objects = objects.SetItem(given, fresh) };
         }
     }
