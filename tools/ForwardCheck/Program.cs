@@ -65,8 +65,8 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
         Console.Error.WriteLine("      ForwardCheck recover --cases 清单 --assemblies 程序集目录 --binary 原生库 --metadata 元数据 (--symbols 符号库 | --fingerprint 参照表) [--show 方法名|all] [--emit 目录]");
         Console.Error.WriteLine("      ForwardCheck native --cases 清单 --assemblies 程序集目录 --binary 原生库 --metadata 元数据 (--symbols 符号库 | --fingerprint 参照表) [--show 方法名]");
-        Console.Error.WriteLine("      ForwardCheck fingerprint --binary 原生库 --metadata 元数据 --symbols 符号库 --runtime-version 版本 --toolchain 工具链 --fingerprint 输出表");
-        Console.Error.WriteLine("      ForwardCheck naming-check --binary 原生库 --metadata 元数据 --fingerprint 参照表 [--truth-symbols 对照符号库]");
+        Console.Error.WriteLine("      ForwardCheck fingerprint --binary 原生库 --metadata 元数据 --symbols 符号库 [--debug 调试库] --runtime-version 版本 --toolchain 工具链 --fingerprint 输出表");
+        Console.Error.WriteLine("      ForwardCheck naming-check --binary 原生库 --metadata 元数据 --fingerprint 参照表 [--truth-symbols 对照符号库] [--truth-debug 对照调试库]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
     }

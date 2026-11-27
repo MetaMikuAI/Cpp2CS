@@ -47,7 +47,9 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         {
             var signed = new Dictionary<ulong, RuntimeName>();
             foreach (var (a, aliases) in symbols)
-                if (RuntimeNaming.NameOf(aliases) != null) signed.Add(a, new([.. aliases], "符号"));
+                if (aliases.Length == 1 || RuntimeOperations.BySymbol(aliases[0]) is { } op &&
+                    aliases.All(n => RuntimeOperations.BySymbol(n) == op))
+                    signed.Add(a, new([.. aliases], "符号"));
             names = signed;
             Admission = "未指定参照表";
         }
@@ -95,11 +97,9 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         Callee? result = null;
         if (target.Unwind.Find(address) is { } f && f.Start == address && image.MayCallNamed(f, names))
         {
-            LiftResult lift;
-            try { lift = target.Lift(address); }
-            catch (FlowException failure) { lift = new(null, failure.Violations[0]); }
-            if (lift.Snapshot == null) wrapperFailures[address] = $"包装快照不可用：{lift.Reason}";
-            else if (CoExecution.WrapperTarget(lift.Snapshot, Direct, Abi.CallArgumentSlots) is ulong to)
+            ulong? expanded = WrapperTarget(target, address, Direct, out string? failure);
+            if (failure != null) wrapperFailures[address] = failure;
+            if (expanded is ulong to)
             {
                 var callee = Direct(to);
                 result = callee with { Basis = $"包装经 0x{to:x} {callee.Name}（{callee.Basis}）" };
@@ -108,9 +108,18 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         return wrappers[address] = result;
     }
 
+    internal static ulong? WrapperTarget(Arm64Target target, ulong address, Func<ulong, Callee> direct, out string? reason)
+    {
+        LiftResult lift;
+        try { lift = target.Lift(address); }
+        catch (FlowException failure) { lift = new(null, failure.Violations[0]); }
+        reason = lift.Snapshot == null ? $"包装快照不可用：{lift.Reason}" : null;
+        return lift.Snapshot == null ? null : CoExecution.WrapperTarget(lift.Snapshot, direct, Abi.CallArgumentSlots);
+    }
+
     public Dictionary<string, long> CountCalls()
     {
-        var counts = new Dictionary<string, long> { ["符号"] = 0, ["同体"] = 0, ["传递"] = 0, ["包装"] = 0, ["未命名"] = 0 };
+        var counts = new Dictionary<string, long> { ["符号"] = 0, ["锚点"] = 0, ["同体"] = 0, ["传递"] = 0, ["包装"] = 0, ["未命名"] = 0 };
         foreach (var (address, weight) in image.CallsFrom(target.Entries.ToHashSet()))
         {
             string basis = entries.Managed.Contains(address) ? "未命名" :

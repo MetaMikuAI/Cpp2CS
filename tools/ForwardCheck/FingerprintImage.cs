@@ -7,13 +7,10 @@ using Cpp2CS.Target;
 
 namespace Cpp2CS.Tools.ForwardCheck;
 
-internal readonly record struct CodeEdge(int Offset, ulong Target);
-internal sealed record ImageBody(FingerprintBody Body, CodeEdge[] Edges);
 
 /// <summary>按 FDE 划界。A64 位置字段的含义取自 Arm DDI 0487；不能解释的数据引用留作不可比较。</summary>
 internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwind)
 {
-    private readonly Dictionary<ElfSection, string> sectionHashes = [];
     private readonly ElfSection[] data = elf.Sections.Where(s => (s.Flags & 6) == 2 && s.Size > 0).ToArray();
     private readonly ElfSegment[] relro = elf.Segments.Where(s => s.Type == 0x6474e552).ToArray();
     private readonly ulong[] relocated = elf.Relocations.Select(r => r.Address).Order().ToArray();
@@ -27,14 +24,14 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
     private static bool Inside(ulong address, ulong start, ulong size) => address >= start && address - start < size;
     private static string Hash(ReadOnlySpan<byte> bytes) => Convert.ToHexString(SHA256.HashData(bytes));
 
-    private DataReference? Reference(int offset, ulong address, int width)
+    private FingerprintReference? Reference(int offset, ulong address, int width)
     {
         var section = Array.Find(data, s => Inside(address, s.Address, s.Size));
         if (section == null || (ulong)width > section.Size - (address - section.Address)) return null;
         if ((section.Flags & 1) != 0)
         {
             if (relro.Any(s => Inside(address, s.Address, s.MemorySize))) return null;
-            return new(offset, "可写", 0, null);
+            return new(offset, ReferenceKind.Writable, address);
         }
         if (section.Type != 1) return null;
         int delta = checked((int)(address - section.Address));
@@ -43,34 +40,28 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
         int length = width;
         if (width == 0)
         {
-            // 节明确给出字符串元素宽度时才能按终止符划界。合并多类常量的节保留整节及节内偏移。
+            // 没有读取宽度时，只有节声明的字符串元素能按终止符划界。
             if ((section.Flags & 0x30) == 0x30 && section.EntrySize == 1)
             {
                 int end = bytes[delta..].IndexOf((byte)0);
                 if (end < 0) return null;
                 length = end + 1;
             }
-            else { start = section.Address; length = bytes.Length; }
+            else return null;
         }
         int i = Array.BinarySearch(relocated, start >= 7 ? start - 7 : 0);
         if (i < 0) i = ~i;
         if (i < relocated.Length && relocated[i] < start + (uint)length) return null;
-        if (width == 0 && length == bytes.Length && start == section.Address)
-        {
-            if (!sectionHashes.TryGetValue(section, out var hash)) sectionHashes.Add(section, hash = Hash(bytes));
-            return new(offset, "只读", delta, hash);
-        }
-        return new(offset, "只读", 0, Hash(bytes.Slice(delta, length)));
+        return new(offset, ReferenceKind.ReadOnly, 0, Hash(bytes.Slice(delta, length)));
     }
 
-    public ImageBody Read(Frame frame)
+    public FingerprintBody Read(Frame frame, IReadOnlySet<ulong> entries)
     {
         int length = checked((int)(frame.End - frame.Start));
         if (length % 4 != 0 || elf.FileOffset(frame.Start, (ulong)length) is not int at)
-            throw new InvalidDataException("FDE 没有完整指令范围");
+            return new(0, Hash([]), [], false);
         byte[] body = file.AsSpan(at, length).ToArray();
-        var edges = new List<CodeEdge>();
-        var references = new List<DataReference>();
+        var references = new List<FingerprintReference>();
         var pairs = new HashSet<int>();
         var heads = new HashSet<int>();
         bool indirect = false, comparable = true;
@@ -78,6 +69,11 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
         void Mask(int pos, uint mask) => BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(pos), Word(pos) & ~mask);
         bool Data(int pos, ulong address, int width)
         {
+            if (width == 0 && entries.Contains(address))
+            {
+                references.Add(new(pos, ReferenceKind.Code, address));
+                return true;
+            }
             if (Reference(pos, address, width) is { } r) { references.Add(r); return true; }
             comparable = false;
             return false;
@@ -93,7 +89,7 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
                 ulong destination = op.Destination(pc);
                 if (Inside(destination, frame.Start, (uint)length)) heads.Add((int)(destination - frame.Start));
                 if (op.Form != Form.Call && Inside(destination, frame.Start, (uint)length)) continue;
-                edges.Add(new(pos, destination));
+                references.Add(new(pos, ReferenceKind.Code, destination));
                 Mask(pos, op.Form is Form.Call or Form.Branch ? 0x03ffffffu :
                     op.Form == Form.TestBranch ? 0x0007ffe0u : 0x00ffffe0u);
                 continue;
@@ -128,7 +124,7 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
             }
         }
         if (pairs.Count != 0 && (indirect || frame.Lsda != 0 || pairs.Overlaps(heads))) comparable = false;
-        return new(new(length, Hash(body), references.ToArray(), comparable), edges.ToArray());
+        return new(length, Hash(body), references.ToArray(), comparable);
     }
 
     /// <summary>仅用于选取要提升的快照。所有间接边也进入候选，是否能展开只由内核回答。</summary>
