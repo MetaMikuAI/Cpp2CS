@@ -137,7 +137,7 @@ internal sealed class SampleInput
         progress($"效果 {effects.Count}");
         var view = new FactView(graph, entities, facts.Layout);
         var context = new RecoveryContext(snapshot, host, host.IsTypeInitializer ? host.DeclaringType : null, facts, entities, Snapshot);
-        var (_, explanation) = ForwardCheck.Recover.ProveAndSelect(view, context, ForwardCheck.Recover.Propose(view));
+        var (_, explanation) = ForwardCheck.Recover.ProveAndSelect(view, context, ForwardCheck.Recover.Propose(view, entities));
         var covered = explanation.Selected.SelectMany(c => c.Claim.Occupied).Distinct().Count(effects.Contains);
         progress($"选中 {covered}");
         var body = Lowering.Lower(explanation);

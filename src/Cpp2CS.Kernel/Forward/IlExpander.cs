@@ -429,6 +429,7 @@ public sealed class IlExpander
         VariantCondition.ReturnsValue => context.Subject is not null,
         VariantCondition.StaticMethod => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: false },
         VariantCondition.StaticMethodWithInitializer => context.Method is { Dispatch: VariantCondition.StaticMethod, HasInitializer: true },
+        VariantCondition.InstanceMethod => context.Method is { HasThis: true },
         VariantCondition.ReferenceTypeConstructor => context.Method is { HasThis: true, Parameters: [{ Kind: StackKind.Object }, ..] },
         _ => context.Method?.Dispatch == condition,
     };

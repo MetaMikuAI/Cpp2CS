@@ -297,8 +297,18 @@ public static class Lowering
     {
         var writer = new Writer(explanation.Graph, explanation.Metadata, explanation.Selected, explanation.Outcomes);
         writer.Run();
+        if (writer.Holes.Count == 0 && ConstructorRejection(explanation, explanation.Selected) is { } rejected) return rejected;
         // 写不出的声明在原位留下了“值不可得”的洞（Writer.Landing）：方法体因此不完整，它占用的效果没有被解释。
         return new ManagedBody(writer.Host, [.. writer.Code], writer.Locals, [.. writer.Holes]);
+    }
+
+    /// <summary>按给定凭据核对方法体一级的初始化义务。失败时只生成入口洞，供下降和对抗变异共用。</summary>
+    public static ManagedBody? ConstructorRejection(Explanation explanation, IReadOnlyList<Certificate> selected)
+    {
+        var graph = explanation.Graph;
+        if (ConstructorInitialization.Check(graph, explanation.Metadata, selected) is not { } reason) return null;
+        var hole = new Hole(null, $"{graph.Snapshot.Entry} 入口", HoleLayer.Explanation, Obligation.Legality, reason, false);
+        return new ManagedBody(graph.Host, [new(".unrecovered")], [], [hole]);
     }
 
     /// <summary>

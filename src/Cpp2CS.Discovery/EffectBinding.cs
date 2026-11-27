@@ -76,6 +76,7 @@ internal sealed partial class TemplateSearch
     private static bool Fits(VariantCondition condition, MethodShape method) => condition switch
     {
         VariantCondition.None => true,
+        VariantCondition.InstanceMethod => method.HasThis,
         VariantCondition.StaticMethod => !method.HasThis && !method.HasInitializer,
         VariantCondition.StaticMethodWithInitializer => !method.HasThis && method.HasInitializer,
         VariantCondition.ReferenceTypeConstructor => method is { HasThis: true, Return: null, Parameters: [{ Kind: StackKind.Object }, ..] },

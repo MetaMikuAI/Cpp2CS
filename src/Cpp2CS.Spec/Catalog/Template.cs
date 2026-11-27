@@ -54,6 +54,8 @@ public enum VariantCondition : byte
     StaticMethodWithInitializer,
     /// <summary>构造函数，所属的类型是引用类型（this 是对象引用）。</summary>
     ReferenceTypeConstructor,
+    /// <summary>有 this 的方法，按方法令牌直接调用。</summary>
+    InstanceMethod,
 }
 
 /// <summary>模板抛出的异常。</summary>

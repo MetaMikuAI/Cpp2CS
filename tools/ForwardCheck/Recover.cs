@@ -130,7 +130,7 @@ internal static partial class Recover
             var graph = new EffectGraph(snapshot, real.Method, facts, Snapshot);
             var view = new FactView(graph, entities, facts.Layout);
             var context = new RecoveryContext(snapshot, real.Method, real.InitializerOf, facts, entities, Snapshot);
-            var claims = Propose(view).ToList();
+            var claims = Propose(view, entities).ToList();
             var (outcomes, explanation) = ProveAndSelect(view, context, claims);
             var body = Lowering.Lower(explanation);
             submitted += claims.Count;
@@ -182,7 +182,7 @@ internal static partial class Recover
                 }
                 var first = body.Holes.FirstOrDefault(h => !h.Derived) ?? body.Holes[0];
                 Line(name, $"  有洞     {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}；"
-                    + $"独立洞 {explanation.IndependentHoles}（{string.Join("，", kinds.Select(k => $"{k.Key} {k.Value}"))}）；首个：{first.What}：{Short(first.Reason)}");
+                    + $"独立洞 {body.Holes.Count(h => !h.Derived)}（{string.Join("，", kinds.Select(k => $"{k.Key} {k.Value}"))}）；首个：{first.What}：{Short(first.Reason)}");
                 continue;
             }
 
@@ -253,8 +253,8 @@ internal static partial class Recover
 
     private static readonly IDiscoverer[] Discoverers = [new GenericDiscoverer(), new GuardDiscoverer()];
 
-    internal static IEnumerable<Claim> Propose(FactView view) =>
-        Discoverers.SelectMany(d => d.Propose(view)).DistinctBy(c => c.Key);
+    internal static IEnumerable<Claim> Propose(FactView view, EntityFacts entities) =>
+        Discoverers.Append(new BaseConstructorDiscoverer(entities.InstanceConstructors)).SelectMany(d => d.Propose(view)).DistinctBy(c => c.Key);
 
     internal static (List<ProofOutcome> Outcomes, Explanation Explanation) ProveAndSelect(
         FactView view, RecoveryContext context, IEnumerable<Claim> claims)
