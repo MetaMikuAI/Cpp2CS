@@ -146,6 +146,12 @@ public interface IEntityMetadata : IMetadataView
     TypeShape? ElementOf(EntityRef array);
     FieldShape? FieldAt(EntityRef type, int offset);
     FieldShape? StaticFieldAt(EntityRef type, int offset);
+    /// <summary>调用的写法是否合法要问的几件事（<see cref="CallLegality"/>）。回答不了时为空。</summary>
+    EntityRef? DeclaringTypeOf(EntityRef method);
+    bool? IsInstanceConstructor(EntityRef method);
+    bool? IsValueType(EntityRef type);
+    /// <summary>类型的直接基类。没有基类，或回答不了（例如基类要代入类型实参才能写出）时为空。</summary>
+    EntityRef? BaseOf(EntityRef type);
 }
 
 /// <summary>

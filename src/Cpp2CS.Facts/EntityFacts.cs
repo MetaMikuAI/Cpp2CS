@@ -98,6 +98,34 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
         };
     }
 
+    public EntityRef? DeclaringTypeOf(EntityRef method)
+    {
+        if (metadata.Keys.DescribeMethod(method) is not { } instance) return null;
+        var owner = new NamedType(Model.Methods[instance.Definition].Owner, instance.TypeArguments);
+        return metadata.Keys.TypeKey(owner) is long key ? new EntityRef(EntityKind.Type, key) : null;
+    }
+
+    public bool? IsInstanceConstructor(EntityRef method)
+    {
+        if (metadata.Keys.DescribeMethod(method) is not { } instance) return null;
+        var definition = Model.Methods[instance.Definition];
+        return definition.Name == ".ctor" && definition.Flags.HasFlag(MethodAttributes.RTSpecialName) && !definition.Flags.HasFlag(MethodAttributes.Static);
+    }
+
+    public bool? IsValueType(EntityRef type) => metadata.Keys.DescribeType(type) switch
+    {
+        null => null,
+        NamedType named => Model.Types[named.Definition].ValueType,
+        _ => false,
+    };
+
+    public EntityRef? BaseOf(EntityRef type)
+    {
+        if (metadata.Keys.DescribeType(type) is not NamedType { Arguments.Count: 0 } named) return null;
+        if (Model.Types[named.Definition].Parent is not NamedType parent || metadata.Keys.TypeKey(parent) is not long key) return null;
+        return new EntityRef(EntityKind.Type, key);
+    }
+
     public bool Assignable(EntityRef from, EntityRef to)
     {
         if (from == to) return true;
