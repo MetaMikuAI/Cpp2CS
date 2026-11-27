@@ -235,6 +235,8 @@ internal static class NativeCheck
         var outcomes = new List<Outcome>();
         var proved = new List<(string Name, ulong Address, string Signature, string Il)>();
         var bodies = new List<(string Name, string Signature, string Il, Module Module, MethodBody Body)>();
+        var mutations = new List<(string Name, bool Refuted, string Detail)>();
+        int indistinguishable = 0;
         var assumed = new SortedDictionary<string, int>(StringComparer.Ordinal);
         long steps = 0, paths = 0;
 
@@ -285,6 +287,17 @@ internal static class NativeCheck
             facts.BeginCheck();
             var result = CoExecution.Check(snapshot, expansion.Graph, body, facts, Snapshot);
             if (result.Verdict == Verdict.Proved) proved.Add((name, address, signature, il));
+            if (result.Verdict == Verdict.Proved)
+                foreach (var (offset, change, changed) in FrameMutations(body, expansion))
+                {
+                    var module = bodies[^1].Module;
+                    var graph = IlExpander.Expand(changed, metadata.Facts, metadata.Tokens(module, body.Method.Entity), snapshot.Terms, 2, 64);
+                    // 只有原始 IL 与变异 IL 在观察点确有不同，才要求现场也能区分。死写入与等价的局部重命名不能作反例。
+                    var control = CoExecution.Equivalent(expansion.Graph, graph.Graph, body, facts);
+                    if (!DifferentObservation(control)) { indistinguishable++; continue; }
+                    var check = CoExecution.Check(snapshot, graph.Graph, changed, facts, Snapshot, output: true);
+                    mutations.Add(($"{name} 0x{address:x} IL_{offset:x4} {change}", DifferentObservation(check), check.Detail));
+                }
             steps += result.Steps;
             paths += result.Paths;
             foreach (string assumption in result.Assumptions) assumed[assumption] = assumed.GetValueOrDefault(assumption) + 1;
@@ -320,13 +333,52 @@ internal static class NativeCheck
         foreach (var (assumption, count) in assumed) Console.WriteLine($"  用到 {assumption}：{count} 个用例");
         Console.WriteLine($"  交叉对照：{crossed} 对（通过的用例的原生代码配上签名相同的另一个用例的 IL），被反驳 {refuted} 对，被证明 {accepted.Count} 对");
         foreach (string pair in accepted) Console.WriteLine($"    被证明：{pair}");
+        Console.WriteLine($"  地址变异：IL 对照有差异 {mutations.Count} 个，原生核对被反驳 {mutations.Count(m => m.Refuted)} 个；IL 对照未取得差异 {indistinguishable} 个");
+        foreach (var mutation in mutations)
+            Console.WriteLine($"    {mutation.Name}：{(mutation.Refuted ? "反驳" : "未取得反驳")} {mutation.Detail}");
         foreach (var group in outcomes.GroupBy(o => o.Class).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             Console.WriteLine($"{group.Key}（{group.Count()}）");
             foreach (var outcome in group)
                 Console.WriteLine($"  {outcome.Category,-12} {outcome.Name[(outcome.Name.IndexOf("::", StringComparison.Ordinal) + 2)..],-22} {outcome.Detail}");
         }
-        return 0;
+        return mutations.All(m => m.Refuted) ? 0 : 1;
+    }
+
+    private static bool DifferentObservation(ProofResult result) => result.Verdict == Verdict.Insufficient
+        && new[] { "现场写了 ", "模板写了 ", "写入 ", "返回值不同", "已暴露帧对象的内容不同" }
+            .Any(prefix => result.Detail.StartsWith(prefix, StringComparison.Ordinal));
+
+    /// <summary>在已经通过正向核对的原始 IL 上改一处，保持求值栈平衡与转移目标。来源是语料中的经地址写字段与传出局部地址。</summary>
+    private static IEnumerable<(int Offset, string Change, MethodBody Body)> FrameMutations(MethodBody body, Expansion expansion)
+    {
+        var instructions = IlDecoder.Decode(body.Code.AsSpan());
+        foreach (var instruction in instructions)
+        {
+            if (expansion.Entries.Contains((instruction.Offset, "stfld.address")))
+            {
+                var code = body.Code.ToArray();
+                // stfld 消耗地址和值。两个 pop 消耗同一对操作数，其余字节填 nop。
+                Array.Clear(code, instruction.Offset, instruction.Size);
+                code[instruction.Offset] = code[instruction.Offset + 1] = 0x26;
+                yield return (instruction.Offset, "去掉经地址的写入", body with { Code = [.. code] });
+            }
+        }
+        for (int i = 0; i + 1 < instructions.Length; i++)
+        {
+            var load = instructions[i];
+            if (load.Opcode.Canonical != "ldloca" || instructions[i + 1].Opcode.Canonical is not ("call" or "callvirt")) continue;
+            var local = (int)load.Operand;
+            if (!instructions.Any(op => op.Opcode.Canonical == "ldloc" && op.Operand == local)) continue;
+            // 换成同类型的新局部，保留原局部的初始化与之后的读取。
+            int other = body.Locals.Length;
+            bool shortForm = load.Opcode.Operand == Cpp2CS.Spec.IL.OperandKind.Variable8;
+            if (other > (shortForm ? byte.MaxValue : ushort.MaxValue)) continue;
+            var code = body.Code.ToArray();
+            if (shortForm) code[load.Next - 1] = (byte)other;
+            else BinaryPrimitives.WriteUInt16LittleEndian(code.AsSpan(load.Next - 2), (ushort)other);
+            yield return (load.Offset, "给调用另一个局部的地址", body with { Locals = body.Locals.Add(body.Locals[local]), Code = [.. code] });
+        }
     }
 
     private static void Dump(MethodSnapshot snapshot, BridgeFacts facts)

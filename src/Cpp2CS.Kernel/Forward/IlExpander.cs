@@ -14,7 +14,7 @@ public sealed record Expansion(FlowGraph<TemplateEffect> Graph, ImmutableArray<(
 ///
 /// 图的约定：入口块声明各形参（槽位类别为 Managed），把局部变量清零，转到偏移 0 处的块。
 /// 局部变量从零开始只在方法头设置了 InitLocals 时成立（ECMA-335 II.25.4.4、I.12.3.2.2）；有局部变量而没有设置时不展开。
-/// 其余每个块对应 IL 的一个基本块，参数依次是各形参、各局部变量、进入时求值栈上的各项，都按栈上的位宽。
+/// 其余每个块对应 IL 的一个基本块，参数依次是各形参、局部与求值栈。被取地址的变量传帧对象地址，其余传栈上的值。
 /// 每个块只用自己的参数，所以每个基本块只翻译一次；不同入边带来的栈的形状必须相同。
 /// </summary>
 public sealed class IlExpander
@@ -38,6 +38,7 @@ public sealed class IlExpander
     private readonly ImmutableArray<Instruction> instructions;
     private readonly Dictionary<int, int> indexAt = [];
     private readonly HashSet<int> leaders = [];
+    private readonly HashSet<int> addressArguments = [], addressLocals = [];
     private readonly Dictionary<int, (BlockId Block, ImmutableArray<StackKind> Stack)> blocks = [];
     private readonly Queue<int> pending = new();
     private readonly List<(int Offset, string Entry)> used = [];
@@ -71,6 +72,8 @@ public sealed class IlExpander
         leaders.Add(0);
         foreach (var instruction in instructions)
         {
+            if (instruction.Opcode.Canonical == "ldarga") addressArguments.Add((int)instruction.Operand);
+            if (instruction.Opcode.Canonical == "ldloca") addressLocals.Add((int)instruction.Operand);
             var flowKind = instruction.Opcode.Flow;
             if (flowKind is FlowKind.Branch or FlowKind.ConditionalBranch) Leader((int)instruction.Operand, instruction);
             foreach (int target in instruction.Targets) Leader(target, instruction);
@@ -85,10 +88,15 @@ public sealed class IlExpander
         for (int i = 0; i < arguments.Length; i++)
         {
             var type = method.Parameters[i];
-            arguments[i] = Widen(flow.EntryParameter(new Slot(SlotKind.Managed, i), type.StorageBits), type);
+            var value = flow.EntryParameter(new Slot(SlotKind.Managed, i), type.StorageBits);
+            arguments[i] = addressArguments.Contains(i) ? FrameObject(value, type, i) : Widen(value, type);
         }
         var locals = new Term[body.Locals.Length];
-        for (int i = 0; i < locals.Length; i++) locals[i] = Zeros(body.Locals[i].StackBits);
+        for (int i = 0; i < locals.Length; i++)
+        {
+            var type = body.Locals[i];
+            locals[i] = addressLocals.Contains(i) ? FrameObject(Zeros(type.StorageBits), type, arguments.Length + i) : Zeros(type.StackBits);
+        }
         flow.SetReturnWidths(method.Return is { } returned ? [returned.StorageBits] : []);
         var initial = new State { Arguments = arguments, Locals = locals, Stack = [] };
         flow.Terminate(flow.Entry, Terminator.Single(Edge(0, initial, instructions[0])));
@@ -126,8 +134,8 @@ public sealed class IlExpander
         if (!blocks.TryGetValue(offset, out var known))
         {
             var widths = new List<int>();
-            for (int i = 0; i < state.Arguments.Length; i++) widths.Add(body.Method.Parameters[i].StackBits);
-            for (int i = 0; i < state.Locals.Length; i++) widths.Add(body.Locals[i].StackBits);
+            foreach (var argument in state.Arguments) widths.Add(argument.Width);
+            foreach (var local in state.Locals) widths.Add(local.Width);
             foreach (var value in state.Stack) widths.Add(value.Value.Width);
             known = (flow.Block(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(widths)), stack);
             blocks.Add(offset, known);
@@ -211,6 +219,7 @@ public sealed class IlExpander
         public FieldShape? Field;
         public TypeShape? Type;
         public TypeShape? Subject;
+        public bool AddressTaken;
         /// <summary>ldstr 的字面量。</summary>
         public EntityRef? Literal;
         public StackValue[] Operands = [];
@@ -239,12 +248,20 @@ public sealed class IlExpander
             case OperandKind.Type: context.Type = metadata.Type(tokens.Type(token)); break;
             case OperandKind.String: context.Literal = tokens.String(token); break;
         }
-        if (opcode.Canonical is "ldarg" or "starg")
+        if (opcode.Canonical is "ldarg" or "starg" or "ldarga")
+        {
             context.Subject = Indexed(body.Method.Parameters, instruction, "形参");
-        else if (opcode.Canonical is "ldloc" or "stloc")
+            context.AddressTaken = addressArguments.Contains((int)instruction.Operand);
+        }
+        else if (opcode.Canonical is "ldloc" or "stloc" or "ldloca")
+        {
             context.Subject = Indexed(body.Locals, instruction, "局部变量");
+            context.AddressTaken = addressLocals.Contains((int)instruction.Operand);
+        }
         else if (opcode.Canonical == "ret")
             context.Subject = body.Method.Return;
+        else if (opcode.Canonical is "ldobj" or "stobj" or "initobj")
+            context.Subject = context.Type;
 
         // 适用的目录项必须恰好一个。
         CatalogEntry? chosen = null;
@@ -261,6 +278,8 @@ public sealed class IlExpander
                 var kind = state.Stack[state.Stack.Count - count + i].Kind;
                 if (candidate.OperandsFromSignature) fits = kind == context.Method!.Parameters[skip + i].Kind;
                 else fits = Matches(candidate.Operands[i], kind, context) && (!candidate.SameKind || kind == state.Stack[^count].Kind)
+                    && (candidate.Operands[i] != StackClass.ByRef || context.Type is null
+                        || state.Stack[state.Stack.Count - count + i].Pointee == context.Type.Entity)
                     // 经地址访问字段：托管指针须指向含该字段的值类型（ECMA-335 III.4.10、III.4.11、III.4.28）。两者都已知而不同时不适用。
                     && (candidate.Operands[i] != StackClass.ByRef || i != 0 || context.Field is not { IsStatic: false } member
                         || state.Stack[state.Stack.Count - count].Pointee is var pointee && (pointee == default || member.DeclaringType == default || pointee == member.DeclaringType))
@@ -397,7 +416,7 @@ public sealed class IlExpander
             var target = kind != StackKind.ByRef ? default : chosen.ResultKind switch
             {
                 ResultKind.Subject => context.Subject!.Entity,
-                ResultKind.ByRef => context.Field?.Type.Entity ?? default,
+                ResultKind.ByRef => context.Field?.Type.Entity ?? context.Subject!.Entity,
                 ResultKind.SameAsOperand => context.Operands[0].Pointee,
                 _ => default,
             };
@@ -407,6 +426,12 @@ public sealed class IlExpander
     }
 
     private ImmutableArray<Term> Emit(BlockId block, TemplateEffect effect) => flow.Append(block, effect);
+
+    private Term FrameObject(Term initial, TypeShape type, int slot)
+    {
+        if (type.Kind == StackKind.ByRef) throw new ExpansionException("指向托管指针的类型尚不能表示", $"帧内变量 {slot}");
+        return Emit(flow.Entry, new(EffectKind.FrameObject, [initial], [pointerBits], "帧对象", -1) { FrameSlot = slot, Entity = type.Entity })[0];
+    }
 
     private int Fallthrough(Instruction instruction) =>
         indexAt.ContainsKey(instruction.Next) ? instruction.Next
@@ -422,6 +447,8 @@ public sealed class IlExpander
     private static bool Holds(VariantCondition condition, Context context) => condition switch
     {
         VariantCondition.None => true,
+        VariantCondition.AddressTaken => context.AddressTaken,
+        VariantCondition.AddressNotTaken => !context.AddressTaken,
         VariantCondition.StaticWithoutInitializer => context.Field is { IsStatic: true, HasInitializer: false },
         VariantCondition.StaticWithInitializer => context.Field is { IsStatic: true, HasInitializer: true },
         VariantCondition.InstanceField => context.Field is { IsStatic: false },
@@ -467,8 +494,12 @@ public sealed class IlExpander
             case ValueOp.Step:
                 return context.Steps[template.A] ?? throw new InvalidOperationException($"模板引用了没有结果的第 {template.A} 步");
             case ValueOp.Immediate: return terms.Constant(instruction.Operand, template.A);
+            case ValueOp.ArgumentAddress:
             case ValueOp.Argument: return state.Arguments[instruction.Operand];
+            case ValueOp.LocalAddress:
             case ValueOp.Local: return state.Locals[instruction.Operand];
+            case ValueOp.StorageZero: return Zeros(context.Subject!.StorageBits);
+            case ValueOp.ToInt64: return terms.SignExtend(X(0), 64);
             case ValueOp.Null: return terms.Zero(pointerBits);
             case ValueOp.Literal: return terms.Entity(context.Literal ?? throw Missing(instruction, "字面量"), pointerBits);
             // 结果未规定：在产生它的这一步取得身份（图，块，指令偏移，第几个）。

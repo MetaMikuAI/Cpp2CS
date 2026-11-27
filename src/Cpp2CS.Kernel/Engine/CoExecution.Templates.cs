@@ -133,7 +133,7 @@ public sealed partial class CoExecution
                     if (!conditions.Same(onLeft.Values[i], onRight.Values[i]))
                         throw new Refuted(Verdict.Insufficient,
                             $"抛出的异常对象不同：左 {conditions.Evaluate(onLeft.Values[i])}，右 {conditions.Evaluate(onRight.Values[i])}");
-                CompareWrites(state);
+                CompareWrites(ref state);
                 paths++;
                 return;
             case (EventKind.Return, EventKind.Return) when onLeft.Values.Length == onRight.Values.Length:
@@ -141,17 +141,21 @@ public sealed partial class CoExecution
                     if (!conditions.Same(onLeft.Values[i], onRight.Values[i]))
                         throw new Refuted(Verdict.Insufficient,
                             $"返回值不同：左 {conditions.Evaluate(onLeft.Values[i])}，右 {conditions.Evaluate(onRight.Values[i])}");
-                CompareWrites(state);
+                CompareWrites(ref state);
                 paths++;
                 return;
             case (EventKind.Call, EventKind.Call) when SameMethod(onLeft, onRight):
             {
                 // 双方调用同一个方法：这是同一个事件，操作数须逐个相同。
                 for (int i = 0; i < onLeft.Values.Length; i++)
+                {
+                    int arg = i - (onRight.Effect!.Indirect ? 1 : 0);
+                    if (arg >= 0 && BindObject(ref state, onLeft.Values[i], onRight.Values[i], onRight.Effect.Signature!.Parameters[arg])) continue;
                     if (!conditions.Same(onLeft.Values[i], onRight.Values[i]))
                         throw new Refuted(Verdict.Insufficient,
                             $"调用 {onLeft.Effect!.Entity} 的第 {i} 个操作数不同：左 {conditions.Evaluate(onLeft.Values[i])}，右 {conditions.Evaluate(onRight.Values[i])}");
-                CompareWrites(state);
+                }
+                CompareWrites(ref state);
                 // 同一个事件：双方的结果相互绑定。此后是新的历元。
                 var (leftResults, rightResults) = (leftGraph!.Results(onLeft.Occurrence), templateGraph.Results(onRight.Occurrence));
                 var (leftEnv, rightEnv) = (onLeft.After!.Env, onRight.After!.Env);
@@ -169,7 +173,7 @@ public sealed partial class CoExecution
                 return;
             }
             case (EventKind.Initialize, EventKind.Initialize) when onLeft.Effect!.Entity == onRight.Effect!.Entity:
-                CompareWrites(state);
+                CompareWrites(ref state);
                 Explore(state with
                 {
                     Native = onLeft.After!, Template = onRight.After!, Conditions = conditions.WithInitialized(onLeft.Effect.Entity!.Value),
@@ -179,7 +183,7 @@ public sealed partial class CoExecution
             case (EventKind.Allocate, EventKind.Allocate) when onLeft.Effect!.Entity == onRight.Effect!.Entity:
             {
                 // 新对象：同一个事件，双方的结果是同一个新引用，非空；该类的初始化已触发。此后是新的历元。
-                CompareWrites(state);
+                CompareWrites(ref state);
                 var (mine, theirs) = (leftGraph!.Results(onLeft.Occurrence)[0], templateGraph.Results(onRight.Occurrence)[0]);
                 var created = EventResult(state.Serial, 0, mine.Width);
                 Explore(state with

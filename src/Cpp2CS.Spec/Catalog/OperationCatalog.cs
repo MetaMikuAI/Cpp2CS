@@ -65,13 +65,25 @@ public static class OperationCatalog
 
     private static readonly ImmutableArray<CatalogEntry> entries =
     [
-        // ---- 数据的搬动：没有效果 ----
-        E("ldarg", "ldarg", "形参的值", None, [], V(ValueOp.Argument), ResultKind.Subject, "L_n = ___i_name", "—", "III.3.38 ldarg"),
+        // ---- 形参、局部与常量 ----
+        E("ldarg", "ldarg", "形参的值", None, [], V(ValueOp.Argument), ResultKind.Subject, "L_n = ___i_name", "—", "III.3.38 ldarg",
+            condition: VariantCondition.AddressNotTaken),
+        E("ldarg.frame", "ldarg", "读被取地址的形参", None, [Read(LocationKind.Address, V(ValueOp.ArgumentAddress))],
+            Loaded(S(0)), ResultKind.Subject, "L_n = ___i_name", "—", "III.3.38 ldarg", condition: VariantCondition.AddressTaken),
+        E("ldarga", "ldarga", "形参的地址", None, [], V(ValueOp.ArgumentAddress), ResultKind.ByRef, "&___i_name", "—", "III.3.39 ldarga"),
         E("starg", "starg", "写形参：按形参类型存储", [StackClass.Assignable], [Do(StepKind.StoreArgument, Loaded(Stored(P0)))], null, ResultKind.None,
-            "___i_name = v", "—", "III.3.61 starg"),
-        E("ldloc", "ldloc", "局部变量的值", None, [], V(ValueOp.Local), ResultKind.Subject, "L_n = V_i", "—", "III.3.43 ldloc"),
+            "___i_name = v", "—", "III.3.61 starg", condition: VariantCondition.AddressNotTaken),
+        E("starg.frame", "starg", "写被取地址的形参", [StackClass.Assignable], [Write(LocationKind.Address, Stored(P0), V(ValueOp.ArgumentAddress))],
+            null, ResultKind.None, "___i_name = v", "—", "III.3.61 starg", condition: VariantCondition.AddressTaken),
+        E("ldloc", "ldloc", "局部变量的值", None, [], V(ValueOp.Local), ResultKind.Subject, "L_n = V_i", "—", "III.3.43 ldloc",
+            condition: VariantCondition.AddressNotTaken),
+        E("ldloc.frame", "ldloc", "读被取地址的局部", None, [Read(LocationKind.Address, V(ValueOp.LocalAddress))],
+            Loaded(S(0)), ResultKind.Subject, "L_n = V_i", "—", "III.3.43 ldloc", condition: VariantCondition.AddressTaken),
+        E("ldloca", "ldloca", "局部变量的地址", None, [], V(ValueOp.LocalAddress), ResultKind.ByRef, "&V_i", "—", "III.3.44 ldloca"),
         E("stloc", "stloc", "写局部变量：按变量类型存储", [StackClass.Assignable], [Do(StepKind.StoreLocal, Loaded(Stored(P0)))], null, ResultKind.None,
-            "V_i = v", "—", "III.3.63 stloc"),
+            "V_i = v", "—", "III.3.63 stloc", condition: VariantCondition.AddressNotTaken),
+        E("stloc.frame", "stloc", "写被取地址的局部", [StackClass.Assignable], [Write(LocationKind.Address, Stored(P0), V(ValueOp.LocalAddress))],
+            null, ResultKind.None, "V_i = v", "—", "III.3.63 stloc", condition: VariantCondition.AddressTaken),
         E("ldc.i4", "ldc.i4", "int32 常量", None, [], new(ValueOp.Immediate, [], 32), ResultKind.Int32, "字面量", "—", "III.3.40 ldc"),
         E("ldnull", "ldnull", "空引用", None, [], V(ValueOp.Null), ResultKind.Object, "NULL", "—", "III.3.45 ldnull"),
         // 字面量槽的惰性初始化不可观察；初始化之后槽里是字面量表里的那个字符串对象（同一内容同一对象）。
@@ -108,6 +120,8 @@ public static class OperationCatalog
         Shift("shr.un", ValueOp.ShiftRightUnsigned, ">>（按无符号）", "III.3.60 shr.un"),
 
         // ---- 转换 ----
+        E("conv.i8.int", "conv.i8", "整数按符号扩到 int64", [StackClass.Integer], [], V(ValueOp.ToInt64, P0), ResultKind.Int64,
+            "(int64_t)a", "—", "III.3.27 conv"),
         E("conv.i2", "conv.i2", "取低 16 位，按符号扩到 int32", [StackClass.Integer], [], Resize(P0, 16, 32, true), ResultKind.Int32,
             "(int16_t)a", "—", "III.3.27 conv"),
         E("conv.i4.int", "conv.i4", "整数转 int32：取低 32 位", [StackClass.Integer], [], Resize(P0, 32, 32, true), ResultKind.Int32,
@@ -121,6 +135,14 @@ public static class OperationCatalog
             "(double)a", "—", "III.3.27 conv"),
 
         // ---- 字段 ----
+        E("ldobj", "ldobj", "读指针所指的值", [StackClass.ByRef], [Read(LocationKind.Address, P0)], Loaded(S(0)), ResultKind.Subject,
+            "*p", "—", "III.4.13 ldobj"),
+        E("stobj", "stobj", "写指针所指的值", [StackClass.ByRef, StackClass.Assignable], [Write(LocationKind.Address, Stored(P1), P0)],
+            null, ResultKind.None, "*p = v", "—", "III.4.29 stobj"),
+        E("initobj", "initobj", "将指针所指的值置零", [StackClass.ByRef], [Write(LocationKind.Address, V(ValueOp.StorageZero), P0)],
+            null, ResultKind.None, "memset(p, 0, sizeof(T))", "—", "III.4.5 initobj"),
+        E("ldfld.address", "ldfld", "经地址读字段", [StackClass.ByRef], [Read(LocationKind.FieldAtAddress, P0)], Loaded(S(0)), ResultKind.Subject,
+            "p->field", "—", "III.4.10 ldfld", condition: VariantCondition.InstanceField),
         E("ldfld.object", "ldfld", "读对象的实例字段", [StackClass.Object], [ThrowIfNull(P0), Read(LocationKind.InstanceField, P0)],
             Loaded(S(1)), ResultKind.Subject, "NullCheck(o); o->field", $"{Codegen}: NullCheck", "III.4.10 ldfld", condition: VariantCondition.InstanceField),
         E("ldfld.value", "ldfld", "取值类型的值里的一个字段", [StackClass.Value], [], Loaded(V(ValueOp.FieldOfValue, P0)), ResultKind.Subject,
