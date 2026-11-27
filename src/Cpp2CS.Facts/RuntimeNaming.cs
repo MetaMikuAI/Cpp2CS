@@ -10,6 +10,7 @@ public sealed record RuntimeName(ImmutableArray<string> Symbols, string Basis, i
     public AdmissionStrength? Strength { get; init; }
     public ulong? ReferenceClass { get; init; }
     public string? ReferenceBuild { get; init; }
+    public string? ReferencePath { get; init; }
     public RuntimeOperation? Operation => RuntimeFingerprint.RegisteredOperation(Symbols);
     public string Name => Symbols.Length == 1 ? Symbols[0] : Operation?.Id ??
         (ReferenceClass is ulong id ? $"参照类 0x{id:x}（{Symbols.Length} 个符号）" : string.Join(" / ", Symbols));
@@ -17,16 +18,16 @@ public sealed record RuntimeName(ImmutableArray<string> Symbols, string Basis, i
 
 /// <summary>代码引用的参照端是类代表，可写引用的参照端是原始地址。</summary>
 public sealed record RuntimePair(ulong Address, ulong Reference, ReferenceKind Kind,
-    string Basis, int Depth, ulong? Parent, int? Offset);
+    string Basis, int Depth, ulong? Parent, int? Offset, string? ReferencePath = null);
 
 public sealed class RuntimeNaming
 {
     private enum Comparison { Same, Different, Incomparable }
     private readonly record struct Pair(ulong Address, ulong Class);
-    private sealed record Evidence(string Basis, int Depth = 0, ulong? Parent = null, int? Offset = null)
+    private sealed record Evidence(string Basis, int Depth = 0, ulong? Parent = null, int? Offset = null, string? Path = null)
     {
         public RuntimePair Describe(Pair pair, ReferenceKind kind) =>
-            new(pair.Address, pair.Class, kind, Basis, Depth, Parent, Offset);
+            new(pair.Address, pair.Class, kind, Basis, Depth, Parent, Offset, Path);
     }
     private sealed record ClassInfo(FingerprintBody? Body, string? Key, ImmutableArray<string> Names);
     private readonly Dictionary<ulong, RuntimeName> names = [];
@@ -124,10 +125,10 @@ public sealed class RuntimeNaming
                     var r = info.Body!.References[i];
                     ulong a = actual.References[i].Target;
                     if (r.Kind == ReferenceKind.Code && classOf.TryGetValue(r.Target, out ulong child))
-                        PairCode(new(a, child), new("传递", evidence.Depth + 1, p.Address, r.Offset));
+                        PairCode(new(a, child), new("传递", evidence.Depth + 1, p.Address, r.Offset, r.Path));
                     else if (r.Kind == ReferenceKind.Writable)
                     {
-                        dataProofs.TryAdd(new(a, r.Target), new("传递", evidence.Depth + 1, p.Address, r.Offset));
+                        dataProofs.TryAdd(new(a, r.Target), new("传递", evidence.Depth + 1, p.Address, r.Offset, r.Path));
                         Add(writable, a, r.Target);
                         Add(inverse, r.Target, a);
                     }
@@ -208,6 +209,6 @@ public sealed class RuntimeNaming
         foreach (var (p, e) in proofs)
             if (!classes[p.Class].Names.IsEmpty)
                 names[p.Address] = new(classes[p.Class].Names, e.Basis, e.Depth, e.Parent, e.Offset)
-                    { Strength = strength, ReferenceClass = p.Class, ReferenceBuild = reference.BuildId };
+                    { Strength = strength, ReferenceClass = p.Class, ReferenceBuild = reference.BuildId, ReferencePath = e.Path };
     }
 }

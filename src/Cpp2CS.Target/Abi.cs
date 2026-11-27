@@ -37,6 +37,7 @@ public static class Abi
     internal static readonly int[] Results = [0, 1, 32, 33, 34, 35];
     internal static readonly int[] Return = [.. Results, 30, 31, .. Enumerable.Range(19, 11), .. Enumerable.Range(40, 8)];
     internal static readonly int[] TailInputs = [.. Arguments, 30, .. Enumerable.Range(19, 11), .. Enumerable.Range(40, 8)];
+    public static bool RequiredAtTail(int register) => TailInputs.Contains(register);
     internal static (Slot Slot, int Width)[] Slots(IEnumerable<int> regs) =>
         regs.Select(r => (Entry(r)!.Value, r is >= 40 and < 48 ? 64 : Width(r))).ToArray();
 }
@@ -48,5 +49,6 @@ public enum ArmOperation
     // FPMax、FPMin、FPMaxNum、FPMinNum；依次按 Arm 的 NaN 与有符号零规则选择。
     Maximum, Minimum, MaximumNumber, MinimumNumber,
     // FPRoundInt：最近偶数、向正无穷、向负无穷、向零。
-    RoundEven, RoundPositive, RoundNegative, RoundZero
+    RoundEven, RoundPositive, RoundNegative, RoundZero,
+    SignReturnAddressA, SignReturnAddressB
 }

@@ -7,6 +7,23 @@ internal sealed partial class Machine(SnapshotBuilder builder, BlockId block, Te
     TermPool T => builder.Terms;
     public Term[] Row => registers;
     public bool PlatformRegister { get; private set; }
+    // 只对同一入口返回地址、同一 SP 与密钥消去认证，否则快照保留为洞。
+    public bool LinkAuthentication(Instruction i)
+    {
+        int key = (int)(i.Name is "paciasp" or "autiasp" or "retaa"
+            ? ArmOperation.SignReturnAddressA : ArmOperation.SignReturnAddressB);
+        var link = registers[30];
+        if (i.Name is "paciasp" or "pacibsp")
+        {
+            registers[30] = T.Opaque(key, 64, link, registers[31]);
+            return true;
+        }
+        if (link.Op != Op.Opaque || link.OpaqueCode != key || link.Operands[1] != registers[31] ||
+            link.Operands[0] is not { Kind: TermKind.EntryParameter, Slot.Kind: SlotKind.ReturnAddress } original)
+            return false;
+        registers[30] = original;
+        return true;
+    }
     public Term G(int r, int w = 64, bool sp = false)
     {
         if (r == 18) PlatformRegister = true;

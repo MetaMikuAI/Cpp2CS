@@ -19,6 +19,7 @@ internal static class LiveRows
         UInt128 d = G(i.D), n = G(i.N), m = G(i.M), a = G(i.A);
         switch (i.Form)
         {
+            case Form.PointerAuth: return (Bit(30) | Bit(31), Bit(30));
             case Form.Return: return ((returns & ~Bit(30)) | n, 0);
             case Form.Call: case Form.CallRegister: return (arguments | n, volatileRegs);
             case Form.Condition: return (flags, 0);

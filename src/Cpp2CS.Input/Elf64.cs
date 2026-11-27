@@ -20,8 +20,11 @@ public sealed class Elf64
     public IReadOnlyList<ElfSection> Sections { get; }
     public IReadOnlyList<ElfSymbol> DynamicSymbols { get; }
     public IReadOnlyList<ElfRela> Relocations { get; }
+    public bool BindsLocally { get; }
+    private readonly Lazy<Dictionary<int, string>> neededVersions;
 
-    public static Elf64 Load(string path) => new(File.ReadAllBytes(path));
+    public string SourcePath { get; }
+    public static Elf64 Load(string path) => new(File.ReadAllBytes(path), path);
 
     /// <summary>GNU 构建标识，同一映像的分离符号文件有相同标识。</summary>
     public string BuildId()
@@ -43,7 +46,10 @@ public sealed class Elf64
         throw new InvalidDataException("缺少 GNU 构建标识");
     }
 
-    public IEnumerable<ElfSymbol> FunctionSymbols()
+    public IEnumerable<ElfSymbol> FunctionSymbols() => DefinedSymbols(2);
+    public IEnumerable<ElfSymbol> ObjectSymbols() => DefinedSymbols(1);
+
+    private IEnumerable<ElfSymbol> DefinedSymbols(int kind)
     {
         foreach (var section in Sections.Where(s => s.Type == 2))
         {
@@ -52,16 +58,17 @@ public sealed class Elf64
             for (ulong i = 0; i < section.Size; i += 24)
             {
                 var s = Slice(section.Offset + i, 24);
-                if ((s[4] & 15) == 2 && U16(s, 6) != 0)
+                if ((s[4] & 15) == kind && U16(s, 6) != 0)
                     yield return new(CString(Slice(strings.Offset, strings.Size), U32(s)), s[4], s[5],
                         U16(s, 6), U64(s, 8), U64(s, 16));
             }
         }
     }
 
-    private Elf64(byte[] file)
+    private Elf64(byte[] file, string path)
     {
         this.file = file;
+        SourcePath = path;
         var h = Slice(0, 64);
         if (!h[..7].SequenceEqual(new byte[] { 0x7f, 69, 76, 70, 2, 1, 1 }) || U16(h, 16) is not (2 or 3))
             throw new InvalidDataException("需要小端 ELF64 可执行文件或共享对象");
@@ -125,7 +132,9 @@ public sealed class Elf64
                 tags[tag] = U64(item, 8);
             }
         }
+        BindsLocally = U16(h, 16) == 2 || tags.ContainsKey(16) || (tags.GetValueOrDefault(30ul) & 2) != 0;
         DynamicSymbols = ReadSymbols(tags);
+        neededVersions = new(ReadNeededVersions);
         var tables = new HashSet<(ulong Offset, ulong Size)>();
         foreach (var s in sections.Where(s => s.Type == 4 && (s.Flags & 2) != 0))
         {
@@ -286,6 +295,81 @@ public sealed class Elf64
 
     public ulong Pointer(ulong slot) => TryPointer(slot, out var value) ? value :
         throw new InvalidDataException($"指针无法在映像中解析 0x{slot:x}");
+
+    private Dictionary<int, string> ReadNeededVersions()
+    {
+        var result = new Dictionary<int, string>();
+        foreach (var verneed in Sections.Where(s => s.Type == 0x6ffffffe))
+        {
+            var namesSection = Sections[(int)verneed.Link];
+            var strings = Slice(namesSection.Offset, namesSection.Size);
+            var needs = Slice(verneed.Offset, verneed.Size);
+            while (needs.Length >= 16)
+            {
+                if (U16(needs) != 1) throw new InvalidDataException("ELF 符号版本记录无效");
+                string library = CString(strings, U32(needs, 4));
+                int aux = checked((int)U32(needs, 8));
+                for (int j = 0; j < U16(needs, 2); j++)
+                {
+                    if (aux > needs.Length - 16) throw new InvalidDataException("ELF 符号版本索引越界");
+                    var a = needs[aux..];
+                    string version = CString(strings, U32(a, 8));
+                    result.Add(U16(a, 6) & 0x7fff, $"{library.Length}:{library}{version}");
+                    aux = checked(aux + (int)U32(a, 12));
+                }
+                int next = checked((int)U32(needs, 12));
+                if (next == 0) break;
+                if (next < 16 || next > needs.Length - 16) throw new InvalidDataException("ELF 符号版本链越界");
+                needs = needs[next..];
+            }
+        }
+        return result;
+    }
+
+    /// <summary>动态查找包括名字、绑定与 GNU 版本；版本号只在本映像内有意义。</summary>
+    public string? SymbolIdentity(uint index)
+    {
+        var symbol = DynamicSymbols[(int)index];
+        if (symbol.Name.Length == 0) return null;
+        string? requirement = "";
+        if (Sections.SingleOrDefault(s => s.Type == 0x6fffffff) is { } versions)
+        {
+            if (2ul * index + 2 > versions.Size) return null;
+            int version = U16(Slice(versions.Offset + 2ul * index, 2)) & 0x7fff;
+            if (version > 1)
+            {
+                if (symbol.Section == 0)
+                {
+                    if (!neededVersions.Value.TryGetValue(version, out requirement)) return null;
+                }
+                else if ((requirement = DefinedVersion(version)) == null) return null;
+            }
+        }
+        return $"{symbol.Info}:{symbol.Name.Length}:{symbol.Name}{requirement}";
+    }
+
+    private string? DefinedVersion(int version)
+    {
+        var section = Sections.SingleOrDefault(s => s.Type == 0x6ffffffd);
+        if (section == null) return null;
+        var names = Sections[(int)section.Link];
+        var records = Slice(section.Offset, section.Size);
+        while (records.Length >= 20)
+        {
+            if (U16(records) != 1) throw new InvalidDataException("ELF 符号版本定义无效");
+            if ((U16(records, 4) & 0x7fff) == version && U16(records, 6) != 0)
+            {
+                int aux = checked((int)U32(records, 12));
+                if (aux > records.Length - 8) throw new InvalidDataException("ELF 符号版本名越界");
+                return CString(Slice(names.Offset, names.Size), U32(records, aux));
+            }
+            int next = checked((int)U32(records, 16));
+            if (next == 0) break;
+            if (next < 20 || next > records.Length - 20) throw new InvalidDataException("ELF 符号版本定义链越界");
+            records = records[next..];
+        }
+        return null;
+    }
     internal bool MatchString(ulong va, byte[] terminated)
     {
         var at = FileOffset(va, (ulong)terminated.Length);

@@ -11,9 +11,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// <summary>按 FDE 划界。A64 位置字段的含义取自 Arm DDI 0487；不能解释的数据引用留作不可比较。</summary>
 internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwind)
 {
-    private readonly ElfSection[] data = elf.Sections.Where(s => (s.Flags & 6) == 2 && s.Size > 0).ToArray();
-    private readonly ElfSegment[] relro = elf.Segments.Where(s => s.Type == 0x6474e552).ToArray();
-    private readonly ulong[] relocated = elf.Relocations.Select(r => r.Address).Order().ToArray();
+    private readonly FingerprintData objects = new(elf, file);
     public const string AndroidArm64 = "android-arm64-v8a";
     public string? Target => elf.Machine == 183 && elf.Sections.Any(s =>
         s.Name == ".note.android.ident" && s.Type == 7 && s.Size >= 24 &&
@@ -24,107 +22,152 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
     private static bool Inside(ulong address, ulong start, ulong size) => address >= start && address - start < size;
     private static string Hash(ReadOnlySpan<byte> bytes) => Convert.ToHexString(SHA256.HashData(bytes));
 
-    private FingerprintReference? Reference(int offset, ulong address, int width)
+    public void AddObjectBounds(IEnumerable<(ulong Address, ulong Size)> bounds) => objects.AddBounds(bounds);
+
+    // 页基只在一个基本块内有效。每次读都须给出同一地址，直至覆盖页基或证明它在出口死亡。
+    private bool PageUses(Frame frame, int at, int length, int pos, int reg, HashSet<int> heads,
+        IReadOnlySet<ulong> entries, List<(int Pos, ulong Address, int Width)> uses)
     {
-        var section = Array.Find(data, s => Inside(address, s.Address, s.Size));
-        if (section == null || (ulong)width > section.Size - (address - section.Address)) return null;
-        if ((section.Flags & 1) != 0)
+        if (reg is 18 or 31) return false; // Android 保留 x18，31 不是通用寄存器。
+        uint bit = 1u << reg;
+        ulong pc = frame.Start + (uint)pos;
+        uint Word(int i) => BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(at + i));
+        ulong page = Decoder.Decode(Word(pos)).Destination(pc & ~4095ul);
+        // 只在本块配对。页基没有被使用者覆写时，后继各路径须在再读之前改写它。
+        bool DeadFrom(int next)
         {
-            if (relro.Any(s => Inside(address, s.Address, s.MemorySize))) return null;
-            return new(offset, ReferenceKind.Writable, address);
-        }
-        if (section.Type != 1) return null;
-        int delta = checked((int)(address - section.Address));
-        var bytes = file.AsSpan((int)section.Offset, (int)section.Size);
-        ulong start = address;
-        int length = width;
-        if (width == 0)
-        {
-            // 没有读取宽度时，只有节声明的字符串元素能按终止符划界。
-            if ((section.Flags & 0x30) == 0x30 && section.EntrySize == 1)
+            var pending = new Stack<int>();
+            var seen = new HashSet<int>();
+            pending.Push(next);
+            while (pending.TryPop(out int i))
             {
-                int end = bytes[delta..].IndexOf((byte)0);
-                if (end < 0) return null;
-                length = end + 1;
+                for (; i < length && seen.Add(i); i += 4)
+                {
+                    var op = Decoder.Decode(Word(i));
+                    if (op.Form is Form.Unknown or Form.BranchRegister || (op.ReadGeneralRegisters & bit) != 0) return false;
+                    if ((op.WrittenGeneralRegisters & bit) != 0 || op.Form is Form.Return or Form.Trap) break;
+                    if (op.IsCall) return false;
+                    if (op.Form == Form.Branch || op.Conditional)
+                    {
+                        ulong dest = op.Destination(frame.Start + (uint)i);
+                        if (Inside(dest, frame.Start, (uint)length)) pending.Push((int)(dest - frame.Start));
+                        else if (Abi.RequiredAtTail(reg)) return false;
+                        if (!op.Conditional) break;
+                    }
+                }
+                if (i == length) return false;
             }
-            else return null;
+            return true;
         }
-        int i = Array.BinarySearch(relocated, start >= 7 ? start - 7 : 0);
-        if (i < 0) i = ~i;
-        if (i < relocated.Length && relocated[i] < start + (uint)length) return null;
-        return new(offset, ReferenceKind.ReadOnly, 0, Hash(bytes.Slice(delta, length)));
+        for (int i = pos + 4; i < length; i += 4)
+        {
+            if (heads.Contains(i) || entries.Contains(frame.Start + (uint)i)) return uses.Count != 0 && DeadFrom(i);
+            uint word = Word(i);
+            var ins = Decoder.Decode(word);
+            if (ins.Form == Form.Unknown) return false;
+            if ((ins.ReadGeneralRegisters & bit) != 0)
+            {
+                bool add = (word & 0xffc00000) == 0x91000000;
+                bool load = (word & 0x3b000000) == 0x39000000 && ins.Form == Form.Memory && ins.Name[0] == 'l';
+                if (ins.N != reg || !add && !load) return false;
+                ulong address = page + (ulong)ins.Imm;
+                if (uses.Count > 0 && address != uses[0].Address) return false;
+                uses.Add((i, address, load ? ins.Size / 8 : 0));
+            }
+            if ((ins.WrittenGeneralRegisters & bit) != 0 || ins.Form is Form.Return or Form.Trap) return uses.Count != 0;
+            if (ins.Conditional || ins.IsCall || ins.Form is Form.Branch or Form.BranchRegister)
+                return uses.Count != 0 && DeadFrom(i);
+        }
+        return false;
     }
 
-    public FingerprintBody Read(Frame frame, IReadOnlySet<ulong> entries)
+    public FingerprintBody Read(Frame frame, IReadOnlySet<ulong> entries, Action<int, string>? failure = null)
     {
         int length = checked((int)(frame.End - frame.Start));
-        if (length % 4 != 0 || elf.FileOffset(frame.Start, (ulong)length) is not int at)
+        if (length == 0 || length % 4 != 0 || elf.FileOffset(frame.Start, (ulong)length) is not int at)
+        {
+            failure?.Invoke(0, "代码范围不完整");
             return new(0, Hash([]), [], false);
+        }
         byte[] body = file.AsSpan(at, length).ToArray();
         var references = new List<FingerprintReference>();
-        var pairs = new HashSet<int>();
-        var heads = new HashSet<int>();
-        bool indirect = false, comparable = true;
-        uint Word(int pos) => BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(pos));
+        bool comparable = true;
+        uint Word(int pos) => BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(at + pos));
         void Mask(int pos, uint mask) => BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(pos), Word(pos) & ~mask);
         bool Data(int pos, ulong address, int width)
         {
-            if (width == 0 && entries.Contains(address))
-            {
-                references.Add(new(pos, ReferenceKind.Code, address));
-                return true;
-            }
-            if (Reference(pos, address, width) is { } r) { references.Add(r); return true; }
+            if (objects.Reference(pos, address, width, entries, references)) return true;
+            failure?.Invoke(pos, $"数据范围或重定位未核实 0x{address:x}，读取宽度 {width}");
             comparable = false;
             return false;
+        }
+        var heads = new HashSet<int>();
+        bool indirect = false, hasPage = false;
+        for (int pos = 0; pos < length; pos += 4)
+        {
+            var op = Decoder.Decode(Word(pos));
+            if (op.Name == "adrp") hasPage = true;
+            if (op.Form == Form.BranchRegister || op.Form == Form.Unknown && (Word(pos) & 0xfe000000) == 0xd6000000)
+                indirect = true;
+            if (op.Form is Form.Branch or Form.Call || op.Conditional)
+            {
+                ulong dest = op.Destination(frame.Start + (uint)pos);
+                if (Inside(dest, frame.Start, (uint)length)) heads.Add((int)(dest - frame.Start));
+            }
+        }
+        if (hasPage && frame.Lsda != 0)
+        {
+            try
+            {
+                foreach (var site in unwind.Sites(frame))
+                    if (Inside(site.Landing, frame.Start, (uint)length)) heads.Add((int)(site.Landing - frame.Start));
+            }
+            catch (InvalidDataException e) { comparable = false; failure?.Invoke(0, e.Message); }
+        }
+        var uses = new List<(int Pos, ulong Address, int Width)>();
+        if (indirect && hasPage)
+        {
+            comparable = false;
+            failure?.Invoke(0, "间接跳转的块入口未核实");
         }
         for (int pos = 0; pos < length; pos += 4)
         {
             ulong pc = frame.Start + (uint)pos;
             uint w = Word(pos);
             var op = Decoder.Decode(w);
-            if (op.Form == Form.BranchRegister) indirect = true;
             if (op.Form is Form.Branch or Form.Call || op.Conditional)
             {
                 ulong destination = op.Destination(pc);
-                if (Inside(destination, frame.Start, (uint)length)) heads.Add((int)(destination - frame.Start));
                 if (op.Form != Form.Call && Inside(destination, frame.Start, (uint)length)) continue;
                 references.Add(new(pos, ReferenceKind.Code, destination));
                 Mask(pos, op.Form is Form.Call or Form.Branch ? 0x03ffffffu :
                     op.Form == Form.TestBranch ? 0x0007ffe0u : 0x00ffffe0u);
-                continue;
             }
-            if (op.Form == Form.Address)
+            else if (op.Name == "adrp")
             {
-                ulong destination = op.Destination(pc);
-                if (op.Name == "adrp")
+                uses.Clear();
+                if (!PageUses(frame, at, length, pos, op.D, heads, entries, uses))
                 {
-                    if (pos + 4 >= length) { comparable = false; continue; }
-                    uint next = Word(pos + 4);
-                    var use = Decoder.Decode(next);
-                    // 页地址只在紧接的同寄存器覆写中使用；另一入口可能跳过 ADRP 时不可屏蔽低位。
-                    if (op.D == 31 || use.N != op.D || use.D != op.D) { comparable = false; continue; }
-                    bool add = (next & 0xffc00000) == 0x91000000;
-                    bool load = (next & 0x3b000000) == 0x39000000 && use.Form == Form.Memory &&
-                        !use.Vector && use.Name.StartsWith("ldr", StringComparison.Ordinal);
-                    if (!add && !load) { comparable = false; continue; }
-                    destination = checked((destination & ~4095ul) + (ulong)use.Imm);
-                    if (!Data(pos, destination, load ? use.Size / 8 : 0)) continue;
-                    Mask(pos + 4, 0x003ffc00);
-                    pairs.Add(pos + 4);
+                    failure?.Invoke(pos, $"页基 x{op.D} 的块内使用未闭合");
+                    comparable = false;
+                    continue;
                 }
-                else if (!Data(pos, destination, 0)) continue;
+                foreach (var use in uses)
+                    if (Data(use.Pos, use.Address, use.Width)) Mask(use.Pos, 0x003ffc00);
                 Mask(pos, 0x60ffffe0);
+            }
+            else if (op.Form == Form.Address)
+            {
+                if (Data(pos, op.Destination(pc), 0)) Mask(pos, 0x60ffffe0);
             }
             else if ((w & 0x3b000000) == 0x18000000)
             {
-                if (op.Form != Form.Literal || op.Size == 0) { comparable = false; continue; }
-                if (!Data(pos, op.Destination(pc), op.Size / 8)) continue;
-                Mask(pos, 0x00ffffe0);
+                if (op.Form != Form.Literal || op.Size == 0)
+                { failure?.Invoke(pos, "文字池读取宽度未知"); comparable = false; continue; }
+                if (Data(pos, op.Destination(pc), op.Size / 8)) Mask(pos, 0x00ffffe0);
             }
         }
-        if (pairs.Count != 0 && (indirect || frame.Lsda != 0 || pairs.Overlaps(heads))) comparable = false;
-        return new(length, Hash(body), references.ToArray(), comparable);
+        return new(length, Hash(body), [.. references.OrderBy(r => r.Offset)], comparable);
     }
 
     /// <summary>仅用于选取要提升的快照。所有间接边也进入候选，是否能展开只由内核回答。</summary>
