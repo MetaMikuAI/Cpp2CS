@@ -94,8 +94,7 @@ internal sealed record ClaimTemplate(FlowGraph<TemplateEffect> Graph, MethodBody
         var tokens = new Tokens(claim);
         MethodShape? method = opcode.Operand == OperandKind.Method ? metadata.Method(tokens.Method(0)) : null;
         FieldShape? field = opcode.Operand == OperandKind.Field ? metadata.Field(tokens.Field(0)) : null;
-        TypeShape? subject = field?.Type ?? method?.Return;
-        if (entry.ImpliedBits > 0) subject = new TypeShape(StackKind.Int32, entry.ImpliedBits, true, default);
+        TypeShape? subject = field?.Type ?? method?.Return ?? TypeShape.Implied(entry, pointerBits);
         if (opcode.Operand is not (OperandKind.None or OperandKind.Method or OperandKind.Field or OperandKind.Type))
             throw new ClaimFormatException($"{entry.Id} 的内联操作数不是实体");
 

@@ -64,13 +64,12 @@ public sealed partial class CoExecution
 
     private ClaimRun? run;
 
-    internal static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>>? ConventionOrReason(MethodShape method,
-        out ImmutableArray<(Slot Slot, int Bits)>? result, out string reason)
+    internal static ImmutableArray<Passing>? ConventionOrReason(MethodShape method, out Passing? result, out string reason)
     {
         try
         {
             reason = "";
-            return Convention(method, out result);
+            return Convention(method, out result, checkHomogeneous: false);
         }
         catch (Refuted refuted)
         {
@@ -154,7 +153,7 @@ public sealed partial class CoExecution
         if (refutation is not null) return new(claim, null, refutation, rows, engine.paths, engine.steps);
         var certificate = new Certificate(claim, context.Snapshot.DigestText, [.. run.Before.OrderBy(b => b.Index)], [.. run.After.Order()], rows,
             [.. engine.assumptions], template.OperandTypes, template.ResultType,
-            template.Entry.Steps.Any(step => step.Location == LocationKind.ArrayElement) ? template.Entry.ImpliedBits : 0, engine.paths, engine.steps);
+            template.Entry.Steps.Any(step => step.Location == LocationKind.ArrayElement) ? template.Entry.Storage?.Bits ?? 0 : 0, engine.paths, engine.steps);
         return new(claim, certificate, null, rows, engine.paths, engine.steps);
     }
 
@@ -494,19 +493,23 @@ public sealed partial class CoExecution
 /// <summary>事实层与引擎共用的几处判断：调用约定，帧上的常量偏移，地址是否由栈指针算出。各只有这一份实现。</summary>
 internal static class EngineFacts
 {
-    public static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>>? Convention(MethodShape method,
-        out ImmutableArray<(Slot Slot, int Bits)>? result, out string reason) => CoExecution.ConventionOrReason(method, out result, out reason);
+    public static ImmutableArray<Passing>? Convention(MethodShape method, out Passing? result, out string reason) =>
+        CoExecution.ConventionOrReason(method, out result, out reason);
 
     /// <summary>按调用约定取出一个值：各段依次是值的低位到高位，每段取所在槽位的低位。某个槽位没有给出时为空。</summary>
-    public static Term? Gather(TermPool terms, ImmutableArray<(Slot Slot, int Bits)> pieces, Func<Slot, Term?> value)
+    public static Term? Gather(TermPool terms, Passing passing, Func<Slot, Term?> value)
     {
+        if (passing.Indirect != 0) return null;
+        var pieces = passing.Pieces;
+        if (pieces.Length == 1)
+            return value(pieces[0].Slot) is { } scalar && scalar.Width >= pieces[0].Bits ? terms.Slice(scalar, 0, pieces[0].Bits) : null;
         var parts = new Term[pieces.Length];
         for (int i = 0; i < parts.Length; i++)
         {
             if (value(pieces[i].Slot) is not { } whole || whole.Width < pieces[i].Bits) return null;
             parts[i] = terms.Slice(whole, 0, pieces[i].Bits);
         }
-        return parts.Length == 1 ? parts[0] : terms.Concat(parts);
+        return terms.Concat(parts);
     }
     public static long? FrameOffset(Term address, Term pointer) => CoExecution.FrameOffsetOf(address, pointer);
     public static bool MentionsStack(Term term, Term pointer) => CoExecution.MentionsStackPointer(term, pointer);

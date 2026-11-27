@@ -319,11 +319,11 @@ public sealed class EffectGraph
             for (int e = unwinds ? 1 : 0; e < terminator.Exits.Length; e++)
             {
                 var exit = terminator.Exits[e];
-                if (exit.Kind == ExitKind.Return && returned is { } pieces)
+                if (exit.Kind == ExitKind.Return && returned is { } passing)
                 {
                     Term? Slot(Slot slot) => snapshot.ReturnSlots.IndexOf(slot) is var at && at >= 0 ? Resolve(exit.Arguments[at]) : null;
-                    returns[index] = EngineFacts.Gather(terms, pieces, Slot);
-                    if (pieces.Length == 1) returnSlots[index] = Slot(pieces[0].Slot);
+                    returns[index] = EngineFacts.Gather(terms, passing, Slot);
+                    if (passing.Pieces.Length == 1) returnSlots[index] = Slot(passing.Pieces[0].Slot);
                 }
                 if (exit.Kind != ExitKind.Target) continue;
                 live.Add(new(block, e));
@@ -393,8 +393,10 @@ public sealed class EffectGraph
             {
                 // 实参按栈上的位宽取：不超过 32 位的整数取所在槽位的低 32 位（被调方法只用其中的低位）。
                 var type = ClaimTemplate.OnStack(shape.Parameters[i]);
-                var pieces = slots[i].Length == 1 ? [(slots[i][0].Slot, ClaimTemplate.StackBits(type))] : slots[i];
-                if (EngineFacts.Gather(terms, pieces, Argument) is not { } given) return unnamed($"调用没有给出第 {i} 个实参的槽位");
+                var passing = slots[i];
+                if (passing.Pieces is [var piece] && piece.Bits != ClaimTemplate.StackBits(type))
+                    passing = passing with { Pieces = [(piece.Slot, ClaimTemplate.StackBits(type))] };
+                if (EngineFacts.Gather(terms, passing, Argument) is not { } given) return unnamed($"调用没有给出第 {i} 个实参的槽位");
                 if (EngineFacts.MentionsStack(given, pointer)) return unnamed("帧地址作为实参：帧对象逃逸");
                 arguments.Add(given);
             }
