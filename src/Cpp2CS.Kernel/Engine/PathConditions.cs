@@ -33,12 +33,12 @@ public sealed class PathConditions
     private readonly ImmutableDictionary<Term, bool> literals;
     private readonly ImmutableDictionary<Term, Term> constants;
     private readonly ImmutableHashSet<EntityRef> initialized;
-    private readonly ImmutableHashSet<(Term Address, int Width)> immutable;
+    private readonly ImmutableDictionary<Term, int> immutable;
     /// <summary>区间：项按无符号数不超过的上界（含）。来自规格登记的取值范围，以及成立的无符号比较。</summary>
     private readonly ImmutableDictionary<Term, UInt128> upper;
 
     private PathConditions(TermPool terms, ImmutableDictionary<Term, bool> literals, ImmutableDictionary<Term, Term> constants,
-        ImmutableHashSet<EntityRef> initialized, ImmutableHashSet<(Term, int)> immutable, ImmutableDictionary<Term, UInt128>? upper = null)
+        ImmutableHashSet<EntityRef> initialized, ImmutableDictionary<Term, int> immutable, ImmutableDictionary<Term, UInt128>? upper = null)
     {
         this.terms = terms;
         this.literals = literals;
@@ -49,7 +49,7 @@ public sealed class PathConditions
     }
 
     public static PathConditions Empty(TermPool terms) => new(terms, ImmutableDictionary<Term, bool>.Empty,
-        ImmutableDictionary<Term, Term>.Empty, [], []);
+        ImmutableDictionary<Term, Term>.Empty, [], ImmutableDictionary<Term, int>.Empty);
 
     /// <summary>登记一个取值范围：项按无符号数不超过 maximum。</summary>
     public PathConditions WithUpperBound(Term term, UInt128 maximum) =>
@@ -67,21 +67,38 @@ public sealed class PathConditions
     public PathConditions WithInitialized(EntityRef type) => new(terms, literals, constants, initialized.Add(type), immutable, upper);
 
     /// <summary>
-    /// 登记一个运行时不可变的位置：它上面的读取与历元无关。已有文字里这个位置上的读取换成与历元无关的写法，键随之更新；
-    /// 换写之后两条文字成了同一个条件而取值相反，或成了与取值相反的常量，说明这组文字不能同时成立，返回空。
+    /// 登记一个运行时不可变的位置：它上面的读取与历元无关。已有文字、等式与上界里这个位置上的读取换成与历元无关的写法，键随之更新；
+    /// 换写之后两条文字成了同一个条件而取值相反、成了与取值相反的常量，或同一个项等于两个不同的常量，说明这组条件不能同时成立，返回空。
     /// </summary>
     public PathConditions? WithImmutable(Term address, int width)
     {
-        if (immutable.Contains((address, width))) return this;
-        var next = new PathConditions(terms, literals, constants, initialized, immutable.Add((address, width)), upper);
+        if (immutable.GetValueOrDefault(address) >= width) return this;
+        var fields = immutable.SetItem(address, width);
+        // 用读取身份重建键。若用旧键上的等式化简其自身，读数等于零的文字会被化成真而丢失。
+        var canonical = new PathConditions(terms, ImmutableDictionary<Term, bool>.Empty, ImmutableDictionary<Term, Term>.Empty,
+            initialized, fields);
         var rekeyed = ImmutableDictionary<Term, bool>.Empty.ToBuilder();
         foreach (var (literal, truth) in literals)
         {
             bool value = truth;
-            var now = Strip(next.Evaluate(literal, ImmutableDictionary<Term, bool>.Empty), ref value);
+            var now = Strip(canonical.Evaluate(literal), ref value);
             if (!Settle(rekeyed, now, value)) return null;
         }
-        return new PathConditions(terms, rekeyed.ToImmutable(), constants, initialized, next.immutable, upper);
+        var values = ImmutableDictionary<Term, Term>.Empty.ToBuilder();
+        foreach (var (term, constant) in constants)
+        {
+            var key = canonical.Evaluate(term);
+            if (key.IsConstant) { if (!ReferenceEquals(key, constant)) return null; continue; }
+            if (values.TryGetValue(key, out var known)) { if (!ReferenceEquals(known, constant)) return null; continue; }
+            values[key] = constant;
+        }
+        var bounds = ImmutableDictionary<Term, UInt128>.Empty.ToBuilder();
+        foreach (var (term, maximum) in upper)
+        {
+            var key = canonical.Evaluate(term);
+            if (!bounds.TryGetValue(key, out var bound) || maximum < bound) bounds[key] = maximum;
+        }
+        return new PathConditions(terms, rekeyed.ToImmutable(), values.ToImmutable(), initialized, fields, bounds.ToImmutable());
     }
 
     /// <summary>
@@ -96,6 +113,9 @@ public sealed class PathConditions
         return true;
     }
 
+    /// <summary>从同一地址开始的读取是否完全落在已登记的不可变字内。</summary>
+    public bool IsImmutable(Term address, int width) => immutable.GetValueOrDefault(Evaluate(address)) >= width;
+
     /// <summary>在成立的文字之下求值：已定的条件换成常量，已知等于常量的项换成常量，不可变位置上的读取去掉历元。</summary>
     public Term Evaluate(Term term) => Evaluate(term, literals);
 
@@ -106,12 +126,17 @@ public sealed class PathConditions
         {
             if (t.Width == 1 && known.TryGetValue(t, out bool value)) return value ? terms.True : terms.False;
             if (constants.TryGetValue(t, out var constant)) return constant;
-            if (t.Kind == TermKind.Attribute && t.Attribute.Value == KernelAttributes.Load && !t.Operands[1].IsZero
-                && immutable.Contains((t.Operands[0], t.Width)))
-                return terms.Attribute(t.Attribute, t.Width, t.Operands[0], terms.Zero(32));
-            // 运行时不可变的位置不被任何写入改变（设计 7.4）：排在一次不能证明不重叠的写入之后的读取，仍是同一个值。
-            if (t.Kind == TermKind.Attribute && t.Attribute.Value == KernelAttributes.LoadAfter && immutable.Contains((t.Operands[0], t.Width)))
-                return terms.Attribute(new AttributeId(KernelAttributes.Load), t.Width, t.Operands[0], terms.Zero(32));
+            // 选择项与常量相等，当且仅当选中臂与该常量相等。il2cpp-codegen-il2cpp.h 的 IsInstClass 两臂分别返回对象和空。
+            if (t.Kind == TermKind.Operation && t.Op == Op.Eq && t.Operands[0] is { Kind: TermKind.Select } choice && t.Operands[1].IsConstant)
+                return terms.Select(choice.Operands[0], terms.Eq(choice.Operands[1], t.Operands[1]), terms.Eq(choice.Operands[2], t.Operands[1]));
+            // ARM64 小端上，同址窄读取存储字的低位。Il2CppArray::max_length 由 IL2CPP_ARRAY_BOUNDS_CHECK 转为 uint32_t。
+            // 只统一已登记的不可变字，跨历元或可能重叠的写入后仍是同一读取（设计 7.4）。
+            if (t.Kind == TermKind.Attribute && t.Attribute.Value is KernelAttributes.Load or KernelAttributes.LoadAfter
+                && immutable.TryGetValue(t.Operands[0], out int width) && t.Width <= width)
+            {
+                var word = terms.Attribute(new AttributeId(KernelAttributes.Load), width, t.Operands[0], terms.Zero(32));
+                return terms.Slice(word, 0, t.Width);
+            }
             // 规格登记的等式：登记的操作数为零时，具名函数的结果为零。
             if (t.Kind == TermKind.Attribute)
                 foreach (var (function, operand) in Cpp2CS.Spec.Runtime.RuntimeEquations.ZeroPreserving)

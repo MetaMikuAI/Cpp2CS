@@ -56,62 +56,65 @@ internal sealed partial class SrmMetadata
             throw Unresolved($"模块 {module.Image} 缺少类型定义 {index} 的 TypeRef");
         }
 
-        /// <summary>II.23.2.12。具名的基元取短编码，复合类型内嵌元素与实参，保留调用方的类型和方法参数作用域。</summary>
-        public ImmutableArray<byte> TypeSignature(EntityRef entity)
-        {
-            var facts = metadata.Facts;
-            if (entity.Kind != EntityKind.Type || (ulong)entity.Key >= (ulong)facts.Model.RuntimeTypes.Count)
-                throw Unresolved($"局部变量类型实体 {entity}");
-            var type = facts.Model.RuntimeTypes[(int)entity.Key];
-            var blob = new BlobBuilder();
-            WriteType(type is M.ReferenceType reference ? reference.Element : type);
-            return blob.ToImmutableArray();
+        public ImmutableArray<byte> TypeSignature(EntityRef entity) =>
+            EncodeType(metadata.Facts, caller, entity, DefinitionHandle);
+    }
 
-            void WriteType(M.TypeReference t)
+    /// <summary>II.23.2.12。具名的基元取短编码，复合类型内嵌元素与实参，保留调用方的类型和方法参数作用域。</summary>
+    internal static ImmutableArray<byte> EncodeType(Cpp2CS.Facts.ModelMetadata facts, EntityRef caller, EntityRef entity,
+        Func<int, EntityHandle> definitionHandle)
+    {
+        if (entity.Kind != EntityKind.Type || (ulong)entity.Key >= (ulong)facts.Model.RuntimeTypes.Count)
+            throw Unresolved($"局部变量类型实体 {entity}");
+        var type = facts.Model.RuntimeTypes[(int)entity.Key];
+        var blob = new BlobBuilder();
+        WriteType(type is M.ReferenceType reference ? reference.Element : type);
+        return blob.ToImmutableArray();
+
+        void WriteType(M.TypeReference t)
+        {
+            switch (t)
             {
-                switch (t)
-                {
-                    case M.NamedType named:
-                        var d = facts.Model.Types[named.Definition];
-                        if (named.Arguments.Count == 0 && d.Namespace == "System"
-                            && Enum.TryParse<PrimitiveTypeCode>(d.Name, out var primitive) && primitive.ToString() == d.Name
-                            && facts.CoreType(d.Name).Definition == named.Definition)
-                        {
-                            blob.WriteByte((byte)primitive);
-                            return;
-                        }
-                        if (named.Arguments.Count > 0) blob.WriteByte((byte)SignatureTypeCode.GenericTypeInstance);
-                        blob.WriteByte(d.ValueType ? (byte)0x11 : (byte)0x12);
-                        blob.WriteCompressedInteger(CodedIndex.TypeDefOrRef(DefinitionHandle(named.Definition)));
-                        if (named.Arguments.Count > 0)
-                        {
-                            blob.WriteCompressedInteger(named.Arguments.Count);
-                            foreach (var argument in named.Arguments) WriteType(argument);
-                        }
-                        break;
-                    case M.ArrayType array:
-                        blob.WriteByte((byte)(array.Vector ? SignatureTypeCode.SZArray : SignatureTypeCode.Array));
-                        WriteType(array.Element);
-                        if (!array.Vector)
-                        {
-                            blob.WriteCompressedInteger(array.Rank);
-                            blob.WriteCompressedInteger(0);
-                            blob.WriteCompressedInteger(0);
-                        }
-                        break;
-                    case M.PointerType pointer:
-                        blob.WriteByte((byte)SignatureTypeCode.Pointer);
-                        WriteType(pointer.Element);
-                        break;
-                    case M.VariableType variable:
-                        var context = metadata.Context(caller)!;
-                        if (variable.Owner != (variable.Method ? context.Method.Definition : context.Type.Definition))
-                            throw Unresolved("泛型形参的作用域与写出方法不符");
-                        blob.WriteByte((byte)(variable.Method ? SignatureTypeCode.GenericMethodParameter : SignatureTypeCode.GenericTypeParameter));
-                        blob.WriteCompressedInteger(variable.Position);
-                        break;
-                    default: throw Unresolved($"局部变量元素类型 {t}");
-                }
+                case M.NamedType named:
+                    var d = facts.Model.Types[named.Definition];
+                    if (named.Arguments.Count == 0 && d.Namespace == "System"
+                        && Enum.TryParse<PrimitiveTypeCode>(d.Name, out var primitive) && primitive.ToString() == d.Name
+                        && facts.CoreType(d.Name).Definition == named.Definition)
+                    {
+                        blob.WriteByte((byte)primitive);
+                        return;
+                    }
+                    if (named.Arguments.Count > 0) blob.WriteByte((byte)SignatureTypeCode.GenericTypeInstance);
+                    blob.WriteByte(d.ValueType ? (byte)0x11 : (byte)0x12);
+                    blob.WriteCompressedInteger(CodedIndex.TypeDefOrRef(definitionHandle(named.Definition)));
+                    if (named.Arguments.Count > 0)
+                    {
+                        blob.WriteCompressedInteger(named.Arguments.Count);
+                        foreach (var argument in named.Arguments) WriteType(argument);
+                    }
+                    break;
+                case M.ArrayType array:
+                    blob.WriteByte((byte)(array.Vector ? SignatureTypeCode.SZArray : SignatureTypeCode.Array));
+                    WriteType(array.Element);
+                    if (!array.Vector)
+                    {
+                        blob.WriteCompressedInteger(array.Rank);
+                        blob.WriteCompressedInteger(0);
+                        blob.WriteCompressedInteger(0);
+                    }
+                    break;
+                case M.PointerType pointer:
+                    blob.WriteByte((byte)SignatureTypeCode.Pointer);
+                    WriteType(pointer.Element);
+                    break;
+                case M.VariableType variable:
+                    var context = facts.Keys.DescribeMethod(caller) ?? throw Unresolved($"调用方 {caller}");
+                    if (variable.Owner != (variable.Method ? context.Definition : facts.Model.Methods[context.Definition].Owner))
+                        throw Unresolved("泛型形参的作用域与写出方法不符");
+                    blob.WriteByte((byte)(variable.Method ? SignatureTypeCode.GenericMethodParameter : SignatureTypeCode.GenericTypeParameter));
+                    blob.WriteCompressedInteger(variable.Position);
+                    break;
+                default: throw Unresolved($"局部变量元素类型 {t}");
             }
         }
     }

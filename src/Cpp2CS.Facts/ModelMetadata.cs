@@ -41,14 +41,25 @@ public sealed class ModelMetadata : IMetadataView
     private bool IsCore(int index, string name) => core.TryGetValue(name, out int i) && i == index;
     public NamedType CoreType(string name) => core.TryGetValue(name, out int i) ? new(i, []) : throw Missing($"核心库类型 {name}");
     internal static ExpansionException Missing(string what) => new("元数据事实不足", what);
-    public EntityRef TypeEntity(TypeReference t) => new(EntityKind.Type, Keys.TypeKey(t) ?? throw Missing($"运行时类型表缺少 {t}"));
+    public EntityRef TypeEntity(TypeReference t) => new(EntityKind.Type, Keys.TypeKey(t) ?? throw Missing($"模型缺少类型结构 {EntityKeys.Structure(t)}"));
 
     public TypeShape Type(EntityRef entity)
     {
-        if (entity.Kind != EntityKind.Type || entity.Key < 0 || entity.Key >= Model.RuntimeTypes.Count) throw Missing($"类型实体 {entity}");
-        var t = EntityKeys.Element(Model.RuntimeTypes[(int)entity.Key]);
-        if (TypeEntity(t) != entity) throw Missing($"非规范类型实体 {entity}");
-        return Shape(t);
+        return Shape(Keys.DescribeType(entity) ?? throw Missing($"未知或非规范类型实体 {entity}"));
+    }
+
+    /// <summary>vm/Class.cpp 的 Class::IsAssignableFrom：普通引用类按继承层级判断，密封类只与自身相符。</summary>
+    public RuntimeTypeCondition? TypeTestCondition(EntityRef type)
+    {
+        if (type.Kind != EntityKind.Type || type.Key < 0 || type.Key >= Model.RuntimeTypes.Count
+            || EntityKeys.Element(Model.RuntimeTypes[(int)type.Key]) is not NamedType named) return null;
+        var definition = Model.Types[named.Definition];
+        if (definition.ValueType || definition.Flags.HasFlag(TypeAttributes.Interface) || definition.Parent is null
+            || definition.GenericParameters.Count != named.Arguments.Count) return null;
+        // 泛型委托可能按变体匹配。数组不是 NamedType，Nullable 是值类型。
+        if (definition.Parent is NamedType parent && IsCore(parent.Definition, "MulticastDelegate")
+            && definition.GenericParameters.Any(p => (p.Flags & GenericParameterAttributes.VarianceMask) != 0)) return null;
+        return definition.Flags.HasFlag(TypeAttributes.Sealed) ? RuntimeTypeCondition.SealedOrdinaryClass : RuntimeTypeCondition.OrdinaryClass;
     }
 
     public TypeShape Shape(TypeReference t)

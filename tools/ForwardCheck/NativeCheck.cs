@@ -22,18 +22,19 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     private readonly ModelMetadata metadata;
     private readonly ModelNativeFacts native;
     private readonly Dictionary<ulong, string> symbols = [];
+    private readonly Dictionary<ulong, Callee> managedCallees = [];
     private readonly Dictionary<ulong, EntityRef?> slots = [];
     private readonly Dictionary<ulong, ElfRela> relocations = [];
     private readonly byte[] file;
 
-    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string symbolFile, byte[] file)
+    public BridgeFacts(Il2CppInput input, ModelMetadata metadata, string? symbolFile, byte[] file)
     {
         this.input = input;
         this.metadata = metadata;
         this.file = file;
         foreach (var relocation in input.Elf.Relocations) relocations[relocation.Address] = relocation;
         native = new(metadata, input.Code);
-        ReadSymbols(symbolFile);
+        if (symbolFile != null) ReadSymbols(symbolFile);
     }
 
     /// <summary>读符号表（.symtab）：函数符号的地址到名字。</summary>
@@ -58,88 +59,73 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     }
 
     public RuntimeLayout Layout => RuntimeLayout.Unity2022Lp64;
+    public RuntimeTypeCondition? TypeTestCondition(EntityRef type) => metadata.TypeTestCondition(type);
 
     public string Symbol(ulong address) => symbols.GetValueOrDefault(address, $"0x{address:x}");
 
     public Callee Callee(ulong address)
     {
+        if (managedCallees.TryGetValue(address, out var known)) return known;
         string name = Symbol(address);
         if (native.IsEntry(address))
         {
-            // 内联体中的原生调用也走 Callee.Signature；旧引擎只比较显式实参。
-            bool hidden = native.RequiresMethodArgument(address);
-            string reason = "隐含实参的核对尚未实现";
-            var signature = hidden ? null : native.Signature(address, out reason);
-            return new(CalleeKind.Managed, null, signature == null ? $"{name}（{reason}）" : name, "代码登记表") { Signature = signature };
+            var signatures = native.Signatures(address, out string reason);
+            return managedCallees[address] = new(CalleeKind.Managed, null, reason.Length == 0 ? name : $"{name}（{reason}）", "代码登记表")
+            {
+                Signature = signatures.Length == 1 ? signatures[0] : null,
+                SharedSignatures = native.RequiresMethodArgument(address) ? signatures : null,
+            };
         }
         if (symbols.TryGetValue(address, out var symbol) && RuntimeOperations.BySymbol(symbol) is { } operation)
             return new(CalleeKind.Runtime, operation, name, "符号表");
         return new(CalleeKind.Unknown, null, name, "");
     }
 
-    private GenericEntry? pendingMethod;
     private string offsetReason = "";
-    public void BeginCheck()
-    {
-        pendingMethod = null;
-        offsetReason = "";
-    }
-    public ulong? Entry(EntityRef method)
-    {
-        var entry = native.Entry(method);
-        if (entry == null) pendingMethod = GenericEntry(method);
-        return entry;
-    }
+    public void BeginCheck() => offsetReason = "";
+    public ulong? Entry(EntityRef method) => native.Entry(method);
     public GenericEntry? GenericEntry(EntityRef method) => native.GenericEntry(method);
     public int? InstanceFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Instance, out offsetReason);
     public int? StaticFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Static, out offsetReason);
 
-    // 引擎在 Entry 返回空的地方结束本次证明。补上该次查询的依据，不改变判定。
-    public string Detail(ProofResult result) => result.Verdict == Verdict.MissingFact && pendingMethod is { } entry
-        ? $"隐含实参的核对尚未实现（期望 {entry.ExpectedMethod}，登记入口 0x{entry.Address:x}）"
-        : result.Verdict == Verdict.MissingFact && offsetReason.Length != 0 ? offsetReason : result.Detail;
+    public string Detail(ProofResult result) => result.Verdict == Verdict.MissingFact && offsetReason.Length != 0 ? offsetReason : result.Detail;
 
     /// <summary>
-    /// 元数据槽里的编码（vm/MetadataCache.cpp 的 InitializeRuntimeMetadata）：最低位为 1 表示尚未初始化，
-    /// 低 32 位的高 3 位是用途（1 是类型信息），其余是下标（右移一位）。类型信息的下标指向运行时类型表。
+    /// 元数据槽的初始编码（Il2CppMetadataUsage）：最低位为 1，低 32 位的高 3 位是用途，中间 28 位是下标。
     /// </summary>
-    public EntityRef? TypeAtSlot(ulong address)
+    private (uint Usage, int Index) SlotEncoding(ulong address)
+    {
+        if (input.Elf.FileOffset(address, 8) is not int offset) return default;
+        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
+        if (value > uint.MaxValue || (value & 1) == 0) return default;
+        return ((uint)value >> 29, (int)((value & 0x1FFFFFFE) >> 1));
+    }
+
+    public bool MetadataSlot(ulong address) => SlotEncoding(address).Usage is >= 1 and <= 7;
+
+    /// <summary>
+    /// vm/MetadataCache.cpp 的 InitializeRuntimeMetadata 经 GlobalMetadata::InitializeRuntimeMetadata 初始化槽。
+    /// 用途 1、5 分别指向运行时类型和字符串字面量；GetMethodInfoFromEncodedIndex 的
+    /// kIl2CppMetadataUsageMethodDef（3）取方法定义，kIl2CppMetadataUsageMethodRef（6）取方法实例。
+    /// </summary>
+    public EntityRef? EntityAtSlot(ulong address)
     {
         if (slots.TryGetValue(address, out var known)) return known;
-        EntityRef? result = null;
-        if (input.Elf.FileOffset(address, 8) is int offset)
+        var (usage, index) = SlotEncoding(address);
+        var model = input.Model;
+        return slots[address] = usage switch
         {
-            ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
-            uint encoded = unchecked((uint)value);
-            int index = (int)((encoded & 0x1FFFFFFE) >> 1);
-            if (value >> 32 == 0 && (encoded & 1) == 1 && encoded >> 29 == 1 && index < input.Model.RuntimeTypes.Count
-                && metadata.Keys.TypeKey(input.Model.RuntimeTypes[index]) is long key)
-                result = new(EntityKind.Type, key);
-        }
-        return slots[address] = result;
+            1 when index < model.RuntimeTypes.Count && metadata.Keys.TypeKey(model.RuntimeTypes[index]) is long key => new(EntityKind.Type, key),
+            3 when index < model.Methods.Count => new(EntityKind.Method, index),
+            5 when index < model.StringLiterals.Count && metadata.Keys.StringKey(model.StringLiterals[index]) is long key => new(EntityKind.String, key),
+            6 when index < model.MethodInstances.Count && metadata.Keys.MethodKey(model.MethodInstances[index]) is long key => new(EntityKind.Method, key),
+            _ => null,
+        };
     }
 
-    /// <summary>
-    /// 字符串字面量的元数据槽：用途 5（il2cpp-metadata.h 的 kIl2CppMetadataUsageStringLiteral），下标指向字面量表；
-    /// vm/MetadataCache.cpp 的 InitializeRuntimeMetadata 把它换成 GetStringLiteralFromIndex 的结果。实体是内容相同的最小下标。
-    /// </summary>
-    /// <summary>元数据槽：低位为 1 的编码，用途在 1 到 7 之间（il2cpp-metadata.h 的 Il2CppMetadataUsage）。</summary>
-    public bool MetadataSlot(ulong address)
-    {
-        if (input.Elf.FileOffset(address, 8) is not int offset) return false;
-        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
-        return value >> 32 == 0 && (value & 1) == 1 && (uint)value >> 29 is >= 1 and <= 7;
-    }
-
-    public EntityRef? StringAtSlot(ulong address)
-    {
-        if (input.Elf.FileOffset(address, 8) is not int offset) return null;
-        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(file.AsSpan(offset, 8));
-        uint encoded = unchecked((uint)value);
-        int index = (int)((encoded & 0x1FFFFFFE) >> 1);
-        if (value >> 32 != 0 || (encoded & 1) != 1 || encoded >> 29 != 5 || index >= input.Model.StringLiterals.Count) return null;
-        return metadata.Keys.StringKey(input.Model.StringLiterals[index]) is long key ? new(EntityKind.String, key) : null;
-    }
+    public EntityRef? TypeAtSlot(ulong address) => EntityAtSlot(address) is { Kind: EntityKind.Type } type ? type : null;
+    public EntityRef? StringAtSlot(ulong address) => EntityAtSlot(address) is { Kind: EntityKind.String } literal ? literal : null;
+    public EntityRef? MethodAtSlot(ulong address) => EntityAtSlot(address) is { Kind: EntityKind.Method } method ? method : null;
 
     public ulong? LinkConstant(ulong address)
     {

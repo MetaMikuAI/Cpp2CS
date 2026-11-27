@@ -18,10 +18,6 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
     public FieldShape Field(EntityRef entity) => metadata.Field(entity);
     public TypeShape Type(EntityRef entity) => metadata.Type(entity);
 
-    private TypeReference? Reference(EntityRef type) =>
-        type.Kind == EntityKind.Type && type.Key >= 0 && type.Key < Model.RuntimeTypes.Count
-            ? Model.RuntimeTypes[(int)type.Key] is ReferenceType reference ? reference.Element : Model.RuntimeTypes[(int)type.Key] : null;
-
     private int ImageOf(int definition)
     {
         for (int i = 0; i < Model.Images.Count; i++)
@@ -73,7 +69,7 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 
     public bool Accessible(EntityRef member, EntityRef from)
     {
-        if (Reference(from) is not NamedType host) return false;
+        if (metadata.Keys.DescribeType(from) is not NamedType host) return false;
         int owner;
         int access;
         if (member.Kind == EntityKind.Field && metadata.Keys.DescribeField(member) is { } field)
@@ -105,7 +101,7 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
     public bool Assignable(EntityRef from, EntityRef to)
     {
         if (from == to) return true;
-        if (Reference(from) is not { } source || Reference(to) is not NamedType target) return false;
+        if (metadata.Keys.DescribeType(from) is not { } source || metadata.Keys.DescribeType(to) is not NamedType target) return false;
         var targetType = Model.Types[target.Definition];
         bool isObject = targetType.Parent is null && !targetType.Flags.HasFlag(TypeAttributes.Interface);
         if (source is ArrayType) return isObject;
@@ -123,7 +119,7 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 
     public TypeShape? ElementOf(EntityRef array)
     {
-        if (Reference(array) is not ArrayType { Vector: true } vector) return null;
+        if (metadata.Keys.DescribeType(array) is not ArrayType { Vector: true } vector) return null;
         try
         {
             return metadata.Shape(vector.Element);
@@ -136,7 +132,7 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 
     public FieldShape? FieldAt(EntityRef type, int offset)
     {
-        for (var at = Reference(type) as NamedType; at is not null; )
+        for (var at = metadata.Keys.DescribeType(type) as NamedType; at is not null; )
         {
             var definition = Model.Types[at.Definition];
             for (int i = definition.FirstField; i < definition.FirstField + definition.FieldCount; i++)
@@ -160,7 +156,7 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 
     public FieldShape? StaticFieldAt(EntityRef type, int offset)
     {
-        if (Reference(type) is not NamedType owner) return null;
+        if (metadata.Keys.DescribeType(type) is not NamedType owner) return null;
         var definition = Model.Types[owner.Definition];
         for (int i = definition.FirstField; i < definition.FirstField + definition.FieldCount; i++)
         {

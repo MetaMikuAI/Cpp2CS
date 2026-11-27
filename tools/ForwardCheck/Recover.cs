@@ -76,7 +76,6 @@ internal static partial class Recover
             }
         }
 
-        IDiscoverer[] discoverers = [new GenericDiscoverer(), new GuardDiscoverer()];
         int cases = 0, equivalent = 0, different = 0, holed = 0, unreadable = 0, submitted = 0, certified = 0, chosen = 0, inexact = 0;
         var adversary = new Adversary();
         var output = emit == null ? null : new Emit(emit, assemblies, metadata, facts);
@@ -130,9 +129,8 @@ internal static partial class Recover
             var graph = new EffectGraph(snapshot, real.Method, facts);
             var view = new FactView(graph, entities, facts.Layout);
             var context = new RecoveryContext(snapshot, real.Method, real.InitializerOf, facts, entities, Snapshot);
-            var claims = discoverers.SelectMany(d => d.Propose(view)).DistinctBy(c => c.Key).ToList();
-            var outcomes = claims.Select(c => Proof.Prove(context, c)).ToList();
-            var explanation = Selection.Select(view, outcomes);
+            var claims = Propose(view).ToList();
+            var (outcomes, explanation) = ProveAndSelect(view, context, claims);
             var body = Lowering.Lower(explanation);
             submitted += claims.Count;
             certified += outcomes.Count(o => o.Certificate is not null);
@@ -194,7 +192,7 @@ internal static partial class Recover
             {
                 var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
                 var actual = IlExpander.Expand(recovered, entities, tokens, snapshot.Terms, 2, snapshot.PointerBits);
-                var result = CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts);
+                var result = CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts, metadata.Callees(snapshot.Terms, snapshot.PointerBits));
                 verdict = result.Verdict == Verdict.Proved ? "" : $"{result.Verdict}：{result.Detail}";
             }
             catch (ExpansionException e)
@@ -217,7 +215,7 @@ internal static partial class Recover
                     var (body2, tokens2) = candidate.Encode()!.Value;
                     var expected = IlExpander.Expand(real, metadata.Facts, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, 1, snapshot.PointerBits);
                     var actual = IlExpander.Expand(body2, entities, tokens2, snapshot.Terms, 2, snapshot.PointerBits);
-                    return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts).Verdict == Verdict.Proved;
+                    return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts, metadata.Callees(snapshot.Terms, snapshot.PointerBits)).Verdict == Verdict.Proved;
                 });
             Line(name, $"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
                 + $"、指令 {body.Instructions.Count(i => i.Opcode[0] != '.')} 条{(verdict.Length == 0 ? "" : "；" + Short(verdict))}");
@@ -241,7 +239,7 @@ internal static partial class Recover
                 pairs++;
                 var left = IlExpander.Expand(expected.Body, metadata.Facts, expected.Tokens, expected.Terms, number++, expected.PointerBits);
                 var right = IlExpander.Expand(other.Body, entities, other.Tokens, expected.Terms, number++, expected.PointerBits);
-                if (CoExecution.Equivalent(left.Graph, right.Graph, expected.Body, facts).Verdict == Verdict.Proved) passed.Add($"{expected.Name} 的真实 IL ≡ {other.Name} 的恢复结果");
+                if (CoExecution.Equivalent(left.Graph, right.Graph, expected.Body, facts, metadata.Callees(expected.Terms, expected.PointerBits)).Verdict == Verdict.Proved) passed.Add($"{expected.Name} 的真实 IL ≡ {other.Name} 的恢复结果");
                 else rejected++;
             }
         Console.WriteLine($"交叉对照：{pairs} 对（一个用例的真实 IL 配上签名相同的另一个用例的恢复结果），被反驳 {rejected} 对，被证明 {passed.Count} 对");
@@ -251,9 +249,21 @@ internal static partial class Recover
         return different == 0 && adversary.Failures == 0 && emitted ? 0 : 1;
     }
 
+    private static readonly IDiscoverer[] Discoverers = [new GenericDiscoverer(), new GuardDiscoverer()];
+
+    internal static IEnumerable<Claim> Propose(FactView view) =>
+        Discoverers.SelectMany(d => d.Propose(view)).DistinctBy(c => c.Key);
+
+    internal static (List<ProofOutcome> Outcomes, Explanation Explanation) ProveAndSelect(
+        FactView view, RecoveryContext context, IEnumerable<Claim> claims)
+    {
+        var outcomes = claims.Select(c => Proof.Prove(context, c)).ToList();
+        return (outcomes, Selection.Select(view, outcomes));
+    }
+
     private static void Tally(SortedDictionary<string, int> counts, string key) => counts[key] = counts.GetValueOrDefault(key) + 1;
 
-    private static string Reason(string layer, Obligation? obligation) => (layer switch
+    internal static string Reason(string layer, Obligation? obligation) => (layer switch
     {
         "Fact" => "事实层",
         "Catalog" => "目录层",

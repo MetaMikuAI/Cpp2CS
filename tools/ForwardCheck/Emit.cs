@@ -121,7 +121,7 @@ internal sealed class Emit(string directory, string assemblies, SrmMetadata meta
             var left = IlExpander.Expand(expected.Real, metadata.Facts, metadata.Tokens(expected.Module, expected.Real.Method.Entity),
                 expected.Terms, nextGraph++, expected.PointerBits);
             var right = IlExpander.Expand(body, metadata.Facts, tokens, expected.Terms, nextGraph++, expected.PointerBits);
-            var result = CoExecution.Equivalent(left.Graph, right.Graph, expected.Real, facts);
+            var result = CoExecution.Equivalent(left.Graph, right.Graph, expected.Real, facts, metadata.Callees(expected.Terms, expected.PointerBits));
             if (expected == item)
             {
                 if (result.Verdict != Verdict.Proved) throw new InvalidDataException($"{item.Name} 回读未证等价：{result.Detail}");

@@ -64,6 +64,8 @@ public sealed partial class CoExecution
         /// <summary>这条路径上已经展开的调用数，以及已经引入的任意值的个数。</summary>
         public int Inlines { get; init; }
         public int Fresh { get; init; }
+        /// <summary>现场路径上实际执行过的纯运行时调用，按函数与实参区分。</summary>
+        public ImmutableHashSet<Term> PureCalls { get; init; } = [];
         /// <summary>证明一条声明时，这条路径上与声明有关的记录（见 CoExecution.Claims.cs）。</summary>
         public Trail? Trail { get; init; }
         /// <summary>模板一侧的一步使路径条件矛盾（登记不可变的位置之后，已成立的文字不能同时成立）：这条路径不存在。</summary>
@@ -97,6 +99,8 @@ public sealed partial class CoExecution
     private readonly Func<ulong, MethodSnapshot?>? snapshots;
     private readonly TermPool terms;
     private readonly int budget;
+    private ImmutableArray<RuntimeInlineBody> inlineBodies;
+    private readonly Dictionary<RuntimeInlineBody, WalkResult> inlinePaths = [];
     private readonly SortedSet<string> assumptions = new(StringComparer.Ordinal);
     private readonly Term stackPointer;
     private int steps, paths;
@@ -338,7 +342,7 @@ public sealed partial class CoExecution
             substituted[i] = foreign ? Import(row[i], side.Env, memo, ref fresh) : Substitute(row[i], side.Env, memo);
             // 声明的操作数是原生一侧的项：模板的形参换成它们之后，再按现场的环境取值。
             if (lower && run is not null) substituted[i] = Substitute(substituted[i], state.Native.Env, native2 ??= new(ReferenceEqualityComparer.Instance));
-            if (lower) substituted[i] = Lower(substituted[i], ref state);
+            if (lower && !state.Infeasible) substituted[i] = Lower(substituted[i], ref state);
         }
         if (fresh != state.Fresh) state = state with { Fresh = fresh };
         var result = ImmutableArray.CreateBuilder<Term>(row.Length);
@@ -376,17 +380,26 @@ public sealed partial class CoExecution
     };
 
     /// <summary>
-    /// 把模板里布局登记的运行时属性换成现场的读取（规格登记的等式，设计 7.8）：数组的长度是数组对象里固定偏移上的字，
-    /// 运行时不可变，读取与历元无关。模板在数组上使用这个属性，说明该值是数组，这个位置由此登记为不可变。
+    /// 把模板里布局登记的运行时属性换成现场的读取（设计 7.4、7.8）。不可变字段上的读取与历元无关。
     /// </summary>
     private Term Lower(Term term, ref State state)
     {
         var conditions = state.Conditions;
+        // 登记不可变的位置使路径条件矛盾时（PathConditions.WithImmutable 得到空），这条路径不存在；其余的项不再下降。
         bool infeasible = false;
+        var atCall = state;
+        var layout = facts.Layout;
+        Term Field(Term owner, int offset, int bits)
+        {
+            var address = conditions.Evaluate(terms.Add(owner, terms.Constant(offset, layout.PointerBits)));
+            if (conditions.WithImmutable(address, bits) is { } known) conditions = known;
+            else infeasible = true;
+            return terms.Attribute(new AttributeId(KernelAttributes.Load), bits, address, terms.Zero(32));
+        }
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         Term Go(Term t)
         {
-            if (t.Operands.Length == 0) return t;
+            if (infeasible || t.Operands.Length == 0) return t;
             if (memo.TryGetValue(t, out var done)) return done;
             var parts = new Term[t.Operands.Length];
             bool changed = false;
@@ -395,23 +408,37 @@ public sealed partial class CoExecution
                 parts[i] = Go(t.Operands[i]);
                 changed |= !ReferenceEquals(parts[i], t.Operands[i]);
             }
+            if (infeasible) return t;
             Term result = changed ? terms.Rebuild(t, parts) : t;
-            if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLength)
+            if (result.Kind == TermKind.Attribute && result.Attribute.Value is (int)RuntimeFunction.ArrayLength or (int)RuntimeFunction.ArrayLengthNative)
             {
-                var layout = facts.Layout;
-                var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
-                result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.ArrayLengthBits, address, terms.Zero(32));
-                if (conditions.WithImmutable(address, layout.ArrayLengthBits) is { } known) conditions = known.WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
-                else infeasible = true;
+                // il2cpp-object-internals.h: Il2CppArray::max_length；il2cpp-codegen-il2cpp.h: IL2CPP_ARRAY_BOUNDS_CHECK。
+                int bits = result.Attribute.Value == (int)RuntimeFunction.ArrayLength ? layout.ArrayLengthBits : layout.ArrayLengthStorageBits;
+                result = Field(result.Operands[0], layout.ArrayLengthOffset, bits);
+                if (!infeasible) conditions = conditions.WithUpperBound(conditions.Evaluate(result), (UInt128)layout.ArrayLengthMaximum);
             }
-            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLengthNative)
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ClassOf)
             {
-                // 同一个长度字段按 il2cpp_array_size_t 读（指针位宽），取值范围相同。
-                var layout = facts.Layout;
-                var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
-                result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.PointerBits, address, terms.Zero(32));
-                if (conditions.WithImmutable(address, layout.PointerBits) is { } known) conditions = known.WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
-                else infeasible = true;
+                // il2cpp-object-internals.h: Il2CppObject::klass。
+                result = Field(result.Operands[0], layout.ObjectClassOffset, layout.PointerBits);
+            }
+            else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ElementClass)
+            {
+                // il2cpp-codegen-il2cpp.h: ArrayElementTypeCheck 读取 Il2CppClass::element_class。
+                result = Field(result.Operands[0], layout.ClassElementOffset, layout.PointerBits);
+            }
+            else if (result.Kind == TermKind.Attribute && result.Attribute == RuntimeAttributes.ImmutableRead)
+            {
+                // 内联体的字段读取由其头文件定义与布局登记，IsInstClass 读取深度、层级表指针与祖先项。
+                result = Field(result.Operands[0], 0, result.Width);
+            }
+            else if (leftTemplate is null && result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.IsInstance
+                && result.Operands[1] is { Kind: TermKind.Entity } target && facts.TypeTestCondition(target.Entity) is { } type)
+            {
+                var named = result;
+                if (!atCall.PureCalls.Any(call => call.Attribute == named.Attribute && conditions.Same(call.Operands[0], named.Operands[0])
+                    && conditions.Same(call.Operands[1], named.Operands[1])))
+                    result = InlineTypeTest(result, type, atCall, ref conditions, ref infeasible);
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.FieldAddress && result.Operands[1].Kind == TermKind.Entity)
             {
@@ -458,6 +485,77 @@ public sealed partial class CoExecution
             return (Instantiate(definition.Value), Instantiate(definition.DefinedWhen), definition.Function);
         }
         return null;
+    }
+
+    /// <summary>执行规格登记的 IsInstSealed 或 IsInstClass 的纯内联图（设计 9.1）。
+    /// 走查给出所有返回路径，实参按内联体的签名绑定。尚未确定的分支用选择项保留。
+    /// 内联体里的读取登记为不可变时路径条件矛盾：在必经前缀上，调用点所在的路径不存在（infeasible 置真）；否则只是内联体的这条路径不存在。</summary>
+    private Term InlineTypeTest(Term call, RuntimeTypeCondition type, State state, ref PathConditions conditions, ref bool infeasible)
+    {
+        if (inlineBodies.IsDefault) inlineBodies = RuntimeInlineBodies.ForLayout(facts.Layout);
+        var body = inlineBodies.Single(b => b.Function == RuntimeFunction.IsInstance && b.TargetType == type);
+        var graph = body.Graph;
+        if (!inlinePaths.TryGetValue(body, out var walk))
+        {
+            walk = new ValueSources(graph, graph.Terms).Walk(new([new(graph.Entry, 0)], []));
+            inlinePaths.Add(body, walk);
+        }
+        if (walk.Status != WalkStatus.Complete || walk.Paths.IsEmpty || walk.Paths.Any(p =>
+            p.End != PathEnd.Return || !p.Steps.IsEmpty || p.Outcome.Length != 1 || p.Outcome[0].HasUndefined
+            || p.Conditions.Any(l => l.Kind != LiteralKind.Condition || l.Term!.HasUndefined)))
+            throw new Refuted(Verdict.Insufficient, $"运行时内联体不是无环的纯值图：{body.Source}");
+
+        var env = ImmutableDictionary<Term, Term>.Empty;
+        foreach (var parameter in graph.EntryParameters)
+            env = env.Add(parameter, call.Operands[body.ArgumentOrder[parameter.Slot.Index]]);
+        var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
+        int fresh = state.Fresh;
+        var returns = new List<(Term Guard, Term Value)>();
+        foreach (var path in walk.Paths)
+        {
+            var local = state with { Conditions = conditions };
+            Term guard = terms.True;
+            Term Value(Term t) => Lower(Import(t, env, memo, ref fresh), ref local);
+            foreach (var literal in path.Conditions)
+            {
+                Step();
+                var test = Value(literal.Term!);
+                if (local.Infeasible)
+                {
+                    if (ReferenceEquals(guard, terms.True)) { infeasible = true; return call; }
+                    guard = terms.False;
+                    break;
+                }
+                // 只有必经前缀上的读取可以在整个调用点登记为不可变。
+                if (ReferenceEquals(guard, terms.True)) conditions = local.Conditions;
+                bool truth = literal.Value != 0;
+                if (local.Conditions.Decide(test) is bool taken)
+                {
+                    if (taken == truth) continue;
+                    guard = terms.False;
+                    break;
+                }
+                var branch = local.Conditions.With(test, truth);
+                if (branch is null) { guard = terms.False; break; }
+                guard = terms.And(guard, truth ? test : terms.Not(test));
+                local = local with { Conditions = branch };
+            }
+            if (guard.IsZero) continue;
+            var value = Value(path.Outcome[0]);
+            if (local.Infeasible)
+            {
+                if (ReferenceEquals(guard, terms.True)) { infeasible = true; return call; }
+                continue;
+            }
+            value = local.Conditions.Evaluate(value);
+            if (ReferenceEquals(guard, terms.True)) { conditions = local.Conditions; return value; }
+            returns.Add((guard, value));
+        }
+        if (returns.Count == 0) throw new Refuted(Verdict.Insufficient, $"运行时内联体没有可达的返回：{body.Source}");
+        var result = returns[^1].Value;
+        for (int i = returns.Count - 2; i >= 0; i--)
+            result = terms.Select(returns[i].Guard, returns[i].Value, result);
+        return result;
     }
 
     private Side Enter(IFlowGraph graph, Side side, Exit exit, ref State state, Role role)
@@ -633,6 +731,7 @@ public sealed partial class CoExecution
                                 var arguments = new Term[operation.Arguments];
                                 for (int k = 0; k < arguments.Length; k++) arguments[k] = Argument(call, operands, new Slot(SlotKind.Integer, k));
                                 value = terms.Attribute(new AttributeId((int)operation.Function), pointerBits, arguments);
+                                if (!inner) state = state with { PureCalls = state.PureCalls.Add(value) };
                             }
                             else
                                 value = terms.Attribute(new AttributeId(KernelAttributes.ExceptionObject), pointerBits,
@@ -1030,6 +1129,20 @@ public sealed partial class CoExecution
 
     // ---- 事件的对照 ----
 
+    private static Term? HiddenArgument(CallOccurrence call, Event reached, Slot slot, PathConditions conditions)
+    {
+        int index = call.ArgumentSlots.IndexOf(slot);
+        return index < 0 ? null : conditions.Evaluate(reached.Values[index + 1]);
+    }
+
+    private static void CheckHiddenArgument(CallOccurrence call, Event reached, Slot slot, PathConditions conditions, EntityRef expected)
+    {
+        if (HiddenArgument(call, reached, slot, conditions) is not { Kind: TermKind.Entity } value)
+            throw new Refuted(Verdict.MissingFact, $"共享入口的隐含实参 {slot} 未解析为实体，期望 {expected}");
+        if (value.Entity != expected)
+            throw new Refuted(Verdict.Insufficient, $"共享入口的隐含实参 {slot} 不同：实得 {value.Entity}，期望 {expected}");
+    }
+
     private static string Name(Event e) => e.Kind switch
     {
         EventKind.Throw => e.Values.Length == 1 ? "抛出异常对象" : $"抛出 {e.Exception}",
@@ -1092,11 +1205,14 @@ public sealed partial class CoExecution
                 if (onNative.Address != onTemplate.Address)
                     throw new Refuted(Verdict.Insufficient, $"调用的目标不同：现场 0x{onNative.Address:x}，被展开的方法里 0x{onTemplate.Address:x}");
                 var callee = facts.Callee(onNative.Address);
-                var shape = callee.Signature ?? throw new Refuted(Verdict.MissingFact, $"被调方法 {callee.Name} 的签名未知");
                 var inner = state.Inner!;
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 var other = (CallOccurrence)inner.Snapshot[onTemplate.Occurrence];
+                var shape = callee.MethodAtCall(slot => HiddenArgument(other, onTemplate, slot, conditions), out string reason)
+                    ?? throw new Refuted(Verdict.MissingFact, reason);
                 var convention = Convention(shape, out _);
+                if (callee.SharedSignatures.HasValue)
+                    CheckHiddenArgument(call, onNative, NativeEntryQueries.MethodArgumentSlot(convention), conditions, shape.Entity);
                 for (int i = 0; i < convention.Length; i++)
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
@@ -1123,7 +1239,9 @@ public sealed partial class CoExecution
             {
                 var effect = onTemplate.Effect!;
                 if (effect.Indirect) throw new Refuted(Verdict.Insufficient, "间接调用的对照尚未实现");
-                ulong entry = facts.Entry(effect.Entity!.Value) ?? throw new Refuted(Verdict.MissingFact, $"方法 {effect.Entity} 的入口未知");
+                var method = effect.Entity!.Value;
+                var generic = facts.GenericEntry(method);
+                ulong entry = generic?.Address ?? facts.Entry(method) ?? throw new Refuted(Verdict.MissingFact, $"方法 {method} 的入口未知");
                 if (entry != onNative.Address)
                 {
                     Expand(state, onNative, onTemplate);
@@ -1131,6 +1249,13 @@ public sealed partial class CoExecution
                 }
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 var convention = Convention(effect.Signature!, out var result);
+                var candidates = facts.Callee(entry).SharedSignatures;
+                if (candidates.HasValue || generic is { MultipleEntities: true })
+                {
+                    var hidden = NativeEntryQueries.SharedMethodSlot(candidates ?? [], out string reason)
+                        ?? throw new Refuted(Verdict.MissingFact, reason);
+                    CheckHiddenArgument(call, onNative, hidden, conditions, method);
+                }
                 for (int i = 0; i < convention.Length; i++)
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
@@ -1280,10 +1405,13 @@ public sealed partial class CoExecution
     private void Expand(State state, Event onNative, Event onTemplate)
     {
         var effect = onTemplate.Effect!;
-        ulong entry = facts.Entry(effect.Entity!.Value) ?? throw new Refuted(Verdict.MissingFact, $"方法 {effect.Entity} 的入口未知");
+        var method = effect.Entity!.Value;
+        var generic = facts.GenericEntry(method);
+        ulong entry = generic?.Address ?? facts.Entry(method) ?? throw new Refuted(Verdict.MissingFact, $"方法 {method} 的入口未知");
         var snapshot = snapshots?.Invoke(entry) ?? throw new Refuted(Verdict.MissingFact,
             $"事件不同：现场 {Name(onNative)}，模板 {Name(onTemplate)}；展开需要被调方法 0x{entry:x} 的快照，它没有快照");
         var convention = Convention(effect.Signature!, out var returned);
+        Slot? hidden = generic is { MultipleEntities: true } ? NativeEntryQueries.MethodArgumentSlot(convention) : null;
         var env = ImmutableDictionary<Term, Term>.Empty;
         Term? pointer = null;
         foreach (var parameter in snapshot.EntryParameters)
@@ -1291,6 +1419,7 @@ public sealed partial class CoExecution
             var slot = parameter.Slot;
             var value = terms.Attribute(new AttributeId(KernelAttributes.InnerEntry), parameter.Width,
                 terms.Constant(state.Inlines, 32), terms.Constant((int)slot.Kind, 32), terms.Constant(slot.Index, 32));
+            if (slot == hidden) value = terms.Entity(method, parameter.Width);
             for (int i = 0; i < convention.Length; i++)
             {
                 int offset = 0;
