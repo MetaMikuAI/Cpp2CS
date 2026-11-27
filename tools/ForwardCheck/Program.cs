@@ -15,6 +15,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 ///   il --cases 用例清单.json --assemblies 程序集目录     读语料的真实 IL，按操作目录展开，并在展开的图上核对合流的三个操作
 ///   counterexamples --assemblies 程序集目录              逐项核对有出处的反例（核心库取自程序集目录）
 ///   native --cases … --assemblies … --binary … --metadata … --symbols …   原生一侧的正向核对：真实 IL 的展开与原生快照共同执行
+///   returns --binary … --metadata … [--symbols …]         全映像核对“排在函数范围末尾的调用不返回”
 /// </summary>
 internal static class Program
 {
@@ -27,6 +28,8 @@ internal static class Program
         {
             case "sample":
                 return Sample.Run(arguments);
+            case "returns" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
+                return ReturnAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"));
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
                 using (var metadata = ModelInput.Load(assemblies, options))
                     return arguments[0] == "keys" ? MetadataAudit.Keys(metadata, options.GetValueOrDefault("--order") == "reverse", options.GetValueOrDefault("--keys-file"))
@@ -63,6 +66,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
         Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 目录]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck returns --binary 原生库 --metadata 元数据文件 [--symbols 带符号的原生库]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
     }

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Cpp2CS.Kernel.Facts;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Kernel.Sources;
 using Cpp2CS.Snapshot;
@@ -42,9 +43,12 @@ public sealed partial class CoExecution
         public bool Unsupported { get; init; }
     }
 
-    /// <summary>一侧的位置与环境。Visits 是这条路径上各块已进入的次数。</summary>
+    /// <summary>
+    /// 一侧的位置与环境。Visits 是这条路径上各块已进入的次数。
+    /// Ended：这个位置排在一次不返回的调用之后（设计 7.5），不属于任何执行；路径在那次调用处已经结束。
+    /// </summary>
     private sealed record Side(BlockId Block, int Index, ImmutableDictionary<Term, Term> Env, ImmutableDictionary<int, int> Visits,
-        ExceptionKind Thrown = ExceptionKind.None);
+        ExceptionKind Thrown = ExceptionKind.None, bool Ended = false);
 
     /// <summary>一次堆上的写入，以及写入之后本侧的内存版本。</summary>
     private readonly record struct Store(Term Address, Term Value, Term Version);
@@ -72,7 +76,8 @@ public sealed partial class CoExecution
 
     private enum Role : byte { Native, Template, Inner }
 
-    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Allocate, Landing, Departed }
+    /// <summary>Ended：上一个事件是一次不返回的调用，路径在那里已经结束；此后的出现与出口不属于任何执行。</summary>
+    private enum EventKind : byte { Fork, Call, Throw, Return, Initialize, Trap, Vacuous, Allocate, Landing, Departed, Ended }
 
     private sealed record Event(EventKind Kind)
     {
@@ -105,6 +110,9 @@ public sealed partial class CoExecution
     /// <summary>最近一次原生读写落在托管堆上（不是帧对象，也不是映像数据区）。</summary>
     private bool heapAccess;
 
+    /// <summary>模板一侧是写出的方法体：恒无定义的路径是反驳。</summary>
+    private bool output;
+
     private CoExecution(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
         Func<ulong, MethodSnapshot?>? snapshots, int budget)
     {
@@ -124,14 +132,15 @@ public sealed partial class CoExecution
     /// <summary>
     /// 核对一个方法：原生快照与它的真实 IL 按目录展开的效果图是否等价。两张图须建在同一个项池里，模板的图号大于 0。
     /// snapshots 按入口地址给出别的方法的快照（可以属于别的项池），展开调用时使用；没有时为空。
+    /// output：模板一侧是写出的方法体（待证的一方），不是真实 IL。它在现场走得到的路径上没有定义时是反驳，不是通过（设计 9.1）。
     /// </summary>
     public static ProofResult Check(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
-        Func<ulong, MethodSnapshot?>? snapshots = null, int budget = 200_000)
+        Func<ulong, MethodSnapshot?>? snapshots = null, int budget = 200_000, bool output = false)
     {
         CoExecution? engine = null;
         try
         {
-            engine = new CoExecution(native, template, body, facts, snapshots, budget);
+            engine = new CoExecution(native, template, body, facts, snapshots, budget) { output = output };
             engine.Run();
             return new(Verdict.Proved, "", engine.paths, engine.steps, [.. engine.assumptions]);
         }
@@ -244,8 +253,13 @@ public sealed partial class CoExecution
         if (leftTemplate is not null) { ExploreTemplates(state); return; }
         var onNative = Machine(ref state, inner: false);
         if (onNative.Kind == EventKind.Fork) { Fork(state, onNative, native: true); return; }
+        // 上一个对上的事件是一次不返回的调用：双方的词都在那里结束，其后的部分不属于任何执行。
+        if (onNative.Kind == EventKind.Ended) { paths++; return; }
         var onTemplate = Template(ref state);
-        if (onTemplate.Kind == EventKind.Vacuous) { paths++; return; }
+        // 有定义条件与路径条件矛盾：真实 IL 在这条路径上没有定义，不要求等价；写出的方法体在走得到的路径上没有定义是反驳（设计 9.1）。
+        if (onTemplate.Kind == EventKind.Vacuous && output)
+            throw new Refuted(Verdict.Insufficient, "写出的方法体在这条路径上没有定义：一步的有定义条件与路径条件矛盾");
+        if (onTemplate.Kind is EventKind.Vacuous or EventKind.Ended) { paths++; return; }
         if (onTemplate.Kind == EventKind.Fork) { Fork(state, onTemplate, native: false); return; }
         Match(state, onNative, onTemplate);
     }
@@ -537,7 +551,9 @@ public sealed partial class CoExecution
                     case ExitKind.Target: Advance(Go(exit, ref state), ref state); return null;
                     case ExitKind.Return: return new Event(EventKind.Return) { Values = Values(exit.Arguments, side, ref state, lower, foreign) };
                     case ExitKind.Trap: return new Event(EventKind.Trap);
-                    default: throw new Refuted(Verdict.MissingFact, "不返回的出口之前不是登记为不返回的调用");
+                    // 块的最后一个出现是函数范围里的最后一条指令：对托管方法的调用在那里已经作为事件对上，路径在那次调用处结束。
+                    // 走到这里说明最后一个出现不是事件（登记为会返回的运行时操作）：登记与代码不符。
+                    default: throw new Refuted(Verdict.MissingFact, "不返回的出口之前不是事件：登记为会返回的运行时操作排在函数范围的末尾");
                 }
             }
             case TerminatorKind.Branch:
@@ -594,6 +610,7 @@ public sealed partial class CoExecution
             var side = inner ? state.Inner!.Side : state.Native;
             if (run is not null && !inner && side.Block == run.Claim.Landing.Block && side.Index == run.Claim.Landing.Index)
                 return new Event(EventKind.Landing);
+            if (side.Ended) return new Event(EventKind.Ended);
             // 证明一条声明时，走进到不了落点的块就离开了它的窗口（被占用的边之后的只抛出尾除外）。
             if (run is not null && !inner && !run.Peeking && side.Index == 0 && !run.Reaching[side.Block.Index] && !state.Trail!.Tail)
                 return new Event(EventKind.Departed);
@@ -636,6 +653,10 @@ public sealed partial class CoExecution
                     switch (callee.Kind)
                     {
                         case CalleeKind.Managed:
+                            // 不返回的调用（设计 7.5）：被调方法的效果摘要，或这次调用是函数范围里的最后一条指令。事件照常对照，之后的位置不属于任何执行。
+                            if (ReturnSummary.LastInFunction(graph, id)
+                                || snapshots is not null && ReturnSummary.EndsBlock(graph, id) && ReturnSummary.NeverReturns(snapshots(address)))
+                                after = after with { Ended = true };
                             return new Event(EventKind.Call) { Address = address, Occurrence = id, Values = operands, After = after };
                         case CalleeKind.Runtime when callee.Operation!.Effect == RuntimeEffect.Throw:
                             // 登记为不返回：路径在此结束，其后的出现与出口不属于任何执行（设计 7.5）。
@@ -1085,6 +1106,7 @@ public sealed partial class CoExecution
         EventKind.Initialize => "类初始化",
         EventKind.Allocate => "新对象",
         EventKind.Departed => "走进到不了落点的块",
+        EventKind.Ended => "不返回的调用",
         _ => e.Kind.ToString(),
     };
 
