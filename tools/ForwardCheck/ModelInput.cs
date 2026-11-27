@@ -37,17 +37,15 @@ internal static class ModelInput
                 ulong sizeRecord = elf.Pointer(checked(table + (ulong)i * 8));
                 int offset = elf.FileOffset(sizeRecord, 4) ?? throw new InvalidDataException($"类型 {i} 的大小登记不可读");
                 int size = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(offset, 4)));
-                if (module == null)
+                if (module != null)
                 {
-                    layouts[i] = new(size, null, null);
-                    continue;
+                    var h = (System.Reflection.Metadata.TypeDefinitionHandle)MetadataTokens.EntityHandle((int)type.Token);
+                    var definition = module.Md.GetTypeDefinition(h);
+                    if (module.Md.GetString(definition.Name) != type.Name || module.Md.GetString(definition.Namespace) != type.Namespace)
+                        throw new InvalidDataException($"映像 {image.Name} 类型记号 0x{type.Token:x8} 与模型不匹配");
                 }
-                var h = (System.Reflection.Metadata.TypeDefinitionHandle)MetadataTokens.EntityHandle((int)type.Token);
-                var definition = module.Md.GetTypeDefinition(h);
-                if (module.Md.GetString(definition.Name) != type.Name || module.Md.GetString(definition.Namespace) != type.Namespace)
-                    throw new InvalidDataException($"映像 {image.Name} 类型记号 0x{type.Token:x8} 与模型不匹配");
-                var layout = definition.GetLayout();
-                layouts[i] = new(size, layout.PackingSize, layout.Size == 0);
+                var layout = input.RuntimeLayout(i);
+                layouts[i] = new(size, layout.Packing, layout.DefaultSize);
             }
         }
         var raw = Enumerable.Range(0, model.Fields.Count).Select(i => input.FieldOffsetSource(i)?.Value).ToArray();

@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using Cpp2CS.Facts;
 using Cpp2CS.Kernel;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
@@ -36,6 +37,16 @@ internal static class Counterexamples
         using var metadata = ModelInput.Load(assemblies, options);
         var items = new List<Item>
         {
+            new("参照类的符号登记到不同操作", "vm/Exception.cpp：RaiseNullReferenceException 与 RaiseDivideByZeroException 抛出不同的异常", () =>
+            {
+                const string nullReference = "_ZN6il2cpp2vm9Exception27RaiseNullReferenceExceptionEv";
+                const string divideByZero = "_ZN6il2cpp2vm9Exception26RaiseDivideByZeroExceptionEv";
+                if (new RuntimeName([nullReference], "符号").Operation?.Exception != ExceptionKind.NullReference ||
+                    new RuntimeName([divideByZero], "符号").Operation?.Exception != ExceptionKind.DivideByZero)
+                    return "单个符号的异常种类与运行时不符";
+                return new RuntimeName([nullReference, divideByZero], "参照类").Operation == null ? null : "冲突的参照类取得了运行时操作";
+            }),
+
             // ---- IL 一侧的展开 ----
 
             // ECMA-335 III.3.63 stloc：浮点值从内部表示舍入到局部变量的大小；I.12.1.3：存入存储位置时转换到该位置的类型。

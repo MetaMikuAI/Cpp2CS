@@ -10,7 +10,18 @@ public sealed class Il2CppInput
     public MetadataModel Model { get; }
     public CodeMap Code { get; }
     public Lazy<AssemblyMetadata> AssemblyMetadata { get; }
+    private readonly MetadataFile metadata;
     private readonly ulong[] fieldTables;
+
+    // vm/GlobalMetadata.cpp::FromTypeDefinition、StructLayoutSizeIsDefault。
+    // 第 7 至 10 位给运行时的 packingSize；第 13 至 16 位给反射的显式 packing。
+    public (int? Packing, bool DefaultSize) RuntimeLayout(int definition)
+    {
+        uint bits = Elf64.U32(metadata.Row(Table.Type, definition), 80);
+        int code = (int)((bits >> 6) & 15);
+        int? packing = code switch { 0 => 0, <= 8 => 1 << (code - 1), _ => null };
+        return (packing, (bits & (1u << 11)) != 0);
+    }
 
     /// <summary>已注册字段槽的链接地址；零填充段内的槽也有地址。</summary>
     public (ulong Address, int? FileOffset, int Value)? FieldOffsetSource(int field)
@@ -27,6 +38,7 @@ public sealed class Il2CppInput
     private Il2CppInput(Elf64 elf, MetadataFile metadata)
     {
         Elf = elf;
+        this.metadata = metadata;
         var images = Enumerable.Range(0, metadata.Count(Table.Image)).Select(metadata.Image).ToArray();
         var assemblies = Enumerable.Range(0, metadata.Count(Table.Assembly)).Select(metadata.Assembly).ToArray();
         var reg = Registrations.Locate(elf, metadata, images);

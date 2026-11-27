@@ -53,9 +53,14 @@ public sealed record RuntimeFingerprint(int Format, string BuildId, string Symbo
 
     public static RuntimeOperation? RegisteredOperation(IEnumerable<string> names)
     {
-        var ops = names.Select(RuntimeOperations.BySymbol).OfType<RuntimeOperation>().Distinct().ToArray();
-        if (ops.Length > 1) throw new InvalidDataException($"同一参照类有不同操作：{string.Join('、', ops.Select(o => o.Id))}");
-        return ops.SingleOrDefault();
+        RuntimeOperation? operation = null;
+        foreach (string name in names)
+        {
+            var entry = RuntimeOperations.BySymbol(name);
+            if (entry == null || operation != null && operation != entry) return null;
+            operation = entry;
+        }
+        return operation;
     }
 
     private void Validate()
@@ -89,7 +94,6 @@ public sealed record RuntimeFingerprint(int Format, string BuildId, string Symbo
         }
         if (!Partition(Rows, Imports).Select(r => r.Class).SequenceEqual(Rows.Select(r => r.Class)))
             throw new InvalidDataException("参照类与划分不一致");
-        foreach (var group in Rows.GroupBy(r => r.Class)) RegisteredOperation(group.SelectMany(r => r.Names));
     }
 
     public static RuntimeFingerprint Read(string path)
@@ -103,6 +107,11 @@ public sealed record RuntimeFingerprint(int Format, string BuildId, string Symbo
     public void Write(string path)
     {
         Validate();
+        foreach (var group in Rows.Where(r => r.Runtime).GroupBy(r => r.Class))
+        {
+            var operations = group.SelectMany(r => r.Names).Select(RuntimeOperations.BySymbol).OfType<RuntimeOperation>().Distinct().ToArray();
+            if (operations.Length > 1) throw new InvalidDataException($"同一参照类有不同操作：{string.Join('、', operations.Select(o => o.Id))}");
+        }
         string directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
         Directory.CreateDirectory(directory);
         string temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".local.tmp");

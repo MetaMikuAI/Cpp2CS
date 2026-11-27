@@ -48,8 +48,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         {
             var signed = new Dictionary<ulong, RuntimeName>();
             foreach (var (a, aliases) in symbols)
-                if (aliases.Length == 1 || RuntimeOperations.BySymbol(aliases[0]) is { } op &&
-                    aliases.All(n => RuntimeOperations.BySymbol(n) == op))
+                if (aliases.Length == 1 || RuntimeFingerprint.RegisteredOperation(aliases) != null)
                     signed.Add(a, new([.. aliases], "符号"));
             names = signed;
             Admission = "未指定参照表";
