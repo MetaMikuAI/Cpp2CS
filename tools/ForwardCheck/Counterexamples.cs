@@ -669,6 +669,9 @@ internal static class Counterexamples
         return first != second ? null : $"两个实例上的方法都是 {first}";
     }
 
+    /// <summary>目录里 IL 助记符为 il 的第一个目录项：合法性只按助记符判断。</summary>
+    private static CatalogEntry IlEntry(string il) => OperationCatalog.Entries.First(e => e.Il == il);
+
     private static string? CallForms(SrmMetadata metadata)
     {
         var core = metadata.Load("mscorlib") ?? throw new InvalidOperationException("程序集目录里没有核心库");
@@ -706,13 +709,13 @@ internal static class Counterexamples
                 || Member(parent, true) is not { } direct || Member(grandparent, true) is not { } far) continue;
             if (facts.DeclaringTypeOf(host) is not { } owner || facts.IsValueType(owner) != false) continue;
             plain = other;
-            chain = Legal("对 this 调用直接基类的构造函数", CallLegality.Check("call", direct, true, host, facts))
-                ?? Legal("对 this 调用本类的另一个构造函数", CallLegality.Check("call", host, true, host, facts))
-                ?? Illegal("对 this 调用祖父类的构造函数", CallLegality.Check("call", far, true, host, facts))
-                ?? Illegal("对别的对象调用直接基类的构造函数", CallLegality.Check("call", direct, false, host, facts))
-                ?? Illegal("在普通方法里用 call 调用构造函数", CallLegality.Check("call", direct, true, other, facts))
-                ?? Illegal("用 callvirt 调用构造函数", CallLegality.Check("callvirt", direct, true, host, facts))
-                ?? Legal("用 callvirt 调用引用类型的实例方法", CallLegality.Check("callvirt", other, true, other, facts));
+            chain = Legal("对 this 调用直接基类的构造函数", CallLegality.Check(IlEntry("call"), direct, true, host, facts))
+                ?? Legal("对 this 调用本类的另一个构造函数", CallLegality.Check(IlEntry("call"), host, true, host, facts))
+                ?? Illegal("对 this 调用祖父类的构造函数", CallLegality.Check(IlEntry("call"), far, true, host, facts))
+                ?? Illegal("对别的对象调用直接基类的构造函数", CallLegality.Check(IlEntry("call"), direct, false, host, facts))
+                ?? Illegal("在普通方法里用 call 调用构造函数", CallLegality.Check(IlEntry("call"), direct, true, other, facts))
+                ?? Illegal("用 callvirt 调用构造函数", CallLegality.Check(IlEntry("callvirt"), direct, true, host, facts))
+                ?? Legal("用 callvirt 调用引用类型的实例方法", CallLegality.Check(IlEntry("callvirt"), other, true, other, facts));
             break;
         }
         if (chain is not null || plain is not { } caller) return chain;
@@ -721,10 +724,10 @@ internal static class Counterexamples
         {
             if (!Plain(handle) || Member(handle, false) is not { } method) continue;
             if (facts.DeclaringTypeOf(method) is not { } owner || facts.IsValueType(owner) != true) continue;
-            return Illegal("对值类型的方法用 callvirt", CallLegality.Check("callvirt", method, false, caller, facts))
-                ?? Legal("对值类型的方法用 call", CallLegality.Check("call", method, false, caller, facts))
+            return Illegal("对值类型的方法用 callvirt", CallLegality.Check(IlEntry("callvirt"), method, false, caller, facts))
+                ?? Legal("对值类型的方法用 call", CallLegality.Check(IlEntry("call"), method, false, caller, facts))
                 ?? (Member(handle, true) is { } constructor
-                    ? Legal("对着地址调用值类型的构造函数", CallLegality.Check("call", constructor, false, caller, facts)) : null);
+                    ? Legal("对着地址调用值类型的构造函数", CallLegality.Check(IlEntry("call"), constructor, false, caller, facts)) : null);
         }
         return "核心库里没有带实例方法的值类型";
     }

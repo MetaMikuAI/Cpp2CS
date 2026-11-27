@@ -1,3 +1,4 @@
+using Cpp2CS.Spec.Catalog;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Snapshot;
@@ -11,12 +12,13 @@ namespace Cpp2CS.Kernel;
 public static class CallLegality
 {
     /// <summary>
-    /// 不合法时给出原因，合法时为空。operation 是 IL 助记符；target 是被调方法；host 是宿主方法；receiverIsHostThis：第 0 个操作数就是宿主方法入口处的 this。
+    /// 不合法时给出原因，合法时为空。operation 是声明的目录项（按它的 IL 助记符判断）；target 是被调方法；host 是宿主方法；receiverIsHostThis：第 0 个操作数就是宿主方法入口处的 this。
     /// 只问实体之间的关系，不需要方法的形状。
     /// 元数据回答不了的事实按不合法处理。
     /// </summary>
-    public static string? Check(string operation, EntityRef target, bool receiverIsHostThis, EntityRef host, IEntityMetadata metadata)
+    public static string? Check(CatalogEntry entry, EntityRef target, bool receiverIsHostThis, EntityRef host, IEntityMetadata metadata)
     {
+        string operation = entry.Il;
         if (operation is not ("call" or "callvirt")) return null;
         if (metadata.DeclaringTypeOf(target) is not { } owner) return $"{target} 所属的类型不可知";
         if (metadata.IsValueType(owner) is not bool valueType) return $"{target} 所属的类型是不是值类型不可知";

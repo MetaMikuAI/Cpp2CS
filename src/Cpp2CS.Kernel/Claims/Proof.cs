@@ -1,6 +1,7 @@
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Snapshot;
+using Cpp2CS.Spec.Catalog;
 
 namespace Cpp2CS.Kernel;
 
@@ -42,7 +43,7 @@ public static class Proof
         if (claim.Entity is { Kind: EntityKind.Field or EntityKind.Method } member && !context.Metadata.Accessible(member, context.Host.DeclaringType))
             return Refute(RefutationLayer.Explanation, Obligation.Legality, $"{member} 在本方法所属的类里不可访问");
         if (claim.Entity is { Kind: EntityKind.Method } callee
-            && CallLegality.Check(claim.Operation, callee, claim.Operands.Length > 0 && ReferenceEquals(claim.Operands[0], CallLegality.HostThis(snapshot, context.Host)),
+            && CallLegality.Check(OperationCatalog.Get(claim.Operation), callee, claim.Operands.Length > 0 && ReferenceEquals(claim.Operands[0], CallLegality.HostThis(snapshot, context.Host)),
                 context.Host.Entity, context.Metadata) is { } illegal)
             return Refute(RefutationLayer.Explanation, Obligation.Legality, illegal);
 
