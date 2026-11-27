@@ -27,6 +27,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     private readonly Arm64Target target;
     private readonly RegisteredEntries entries;
     private readonly FingerprintImage image;
+    private readonly Lazy<TypeInfoNames> typeInfo;
     public string Admission { get; }
     private readonly Dictionary<ulong, EntityRef?> slots = [];
     private readonly Dictionary<ulong, ElfRela> relocations = [];
@@ -43,25 +44,31 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         native = new(metadata, input.Code);
         entries = new(input);
         image = new(input.Elf, file, target.Unwind);
-        var symbols = NamingCheck.Symbols(input, symbolFile, image: fingerprint != null ? image : null);
+        var symbolImage = NamingCheck.OpenSymbols(input.Elf, symbolFile);
+        typeInfo = new(() => new(input.Elf, file, symbolImage));
+        var symbols = NamingCheck.Symbols(input, symbolImage, image: fingerprint != null ? image : null);
+        var imports = image.ImportStubs();
+        Dictionary<ulong, RuntimeName> known;
         if (fingerprint == null)
         {
-            var signed = new Dictionary<ulong, RuntimeName>();
+            known = [];
             foreach (var (a, aliases) in symbols)
                 if (aliases.Length == 1 || RuntimeFingerprint.RegisteredOperation(aliases) != null)
-                    signed.Add(a, new([.. aliases], "符号"));
-            names = signed;
+                    known.Add(a, new([.. aliases], "符号"));
             Admission = "未指定参照表";
         }
         else
         {
-            var naming = NamingCheck.Match(input, image, target.Unwind, entries, symbols, RuntimeFingerprint.Read(fingerprint));
-            names = naming.Names;
+            var naming = NamingCheck.Match(input, image, target.Unwind, entries, symbols, RuntimeFingerprint.Read(fingerprint), imports);
+            known = naming.Names.ToDictionary();
             Admission = naming.Admission;
         }
+        NamingCheck.NameImports(known, imports);
+        names = known;
     }
 
     public RuntimeLayout Layout => RuntimeLayout.Unity2022Lp64;
+    public string? TypeInfoName(ulong address) => typeInfo.Value.Read(address);
     public RuntimeTypeCondition? TypeTestCondition(EntityRef type) => metadata.TypeTestCondition(type);
 
     public string Symbol(ulong address) => names.TryGetValue(address, out var name) ? name.Name : $"0x{address:x}";
@@ -122,7 +129,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
 
     public Dictionary<string, long> CountCalls()
     {
-        var counts = new Dictionary<string, long> { ["符号"] = 0, ["锚点"] = 0, ["同体"] = 0, ["传递"] = 0, ["包装"] = 0, ["未命名"] = 0 };
+        var counts = new Dictionary<string, long> { ["符号"] = 0, ["导入重定位"] = 0, ["锚点"] = 0, ["同体"] = 0, ["传递"] = 0, ["包装"] = 0, ["未命名"] = 0 };
         foreach (var (address, weight) in image.CallsFrom(target.Entries.ToHashSet()))
         {
             string basis = entries.Managed.Contains(address) ? "未命名" :
@@ -436,6 +443,12 @@ internal static class NativeCheck
                 Console.WriteLine($"    {i}: {text}");
             }
             var terminator = block.Terminator;
+            if (terminator.Kind == TerminatorKind.Invoke)
+            {
+                string Name(ulong address) => address == 0 ? "全捕获" : facts.TypeInfoName(address) ?? $"0x{address:x}";
+                var clauses = terminator.Clauses.Select(c => $"{c.Selector}={Name(c.TypeInfo)}");
+                Console.WriteLine($"    Invoke 0x{terminator.Address:x}，子句 [{string.Join(", ", clauses)}]，清理 {terminator.Cleanup}");
+            }
             if (terminator.Condition is not null) Console.WriteLine($"    {terminator.Kind} {terminator.Condition}");
             for (int e = 0; e < terminator.Exits.Length; e++)
             {

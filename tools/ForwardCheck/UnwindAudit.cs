@@ -1,4 +1,3 @@
-using System.Text;
 using Cpp2CS.Input;
 using Cpp2CS.Target;
 
@@ -7,10 +6,11 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// <summary>按 FDE 遍历整幅映像的 LSDA。子句按调用点行计数，落地块按地址去重。</summary>
 internal static class UnwindAudit
 {
-    public static int Run(string binary)
+    public static int Run(string binary, string? symbolFile)
     {
         var elf = Elf64.Load(binary);
         byte[] file = File.ReadAllBytes(binary);
+        var names = new TypeInfoNames(elf, file, NamingCheck.OpenSymbols(elf, symbolFile));
         var unwind = new UnwindIndex(elf, file);
         int functions = 0, rows = 0, landed = 0, failed = 0;
         var typeCounts = new SortedDictionary<ulong, int>();
@@ -43,24 +43,21 @@ internal static class UnwindAudit
         }
         Console.WriteLine($"有 LSDA 的函数 {functions}，调用点行 {rows}，带落地块的行 {landed}，读不通 {failed}");
         Console.WriteLine($"带清理的落地块 {pads.Values.Count(p => p.Cleanup)}，只有清理 {pads.Values.Count(p => p.Cleanup && !p.HasClause && !p.Specification)}，带异常说明 {pads.Values.Count(p => p.Specification)}");
-        var named = typeCounts.Select(p => (Address: p.Key, Name: p.Key == 0 ? "全捕获" : TypeName(elf, file, p.Key), Count: p.Value));
+        var named = typeCounts.Select(p => (Address: p.Key, Name: p.Key == 0 ? "全捕获" :
+            names.Read(p.Key) ?? throw new InvalidDataException($"类型信息 0x{p.Key:x} 缺少名字串"), Count: p.Value));
         foreach (var group in named.GroupBy(t => t.Name).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             Console.WriteLine($"子句 {group.Key}：{group.Sum(t => t.Count)}");
             foreach (var type in group.Where(t => t.Address != 0))
                 Console.WriteLine($"  类型信息 0x{type.Address:x} {type.Name}");
         }
+        if (symbolFile != null)
+        {
+            var objects = typeCounts.Keys.Where(a => a != 0).ToArray();
+            int matched = objects.Count(names.HasSymbol);
+            Console.WriteLine($"类型信息符号与名字串一致 {matched}/{objects.Length}");
+            if (matched != objects.Length) return 1;
+        }
         return failed == 0 ? 0 : 1;
-    }
-
-    // Itanium C++ ABI 的 std::type_info：第二个指针指向类型的名字串。
-    static string TypeName(Elf64 elf, byte[] file, ulong address)
-    {
-        ulong name = elf.Pointer(checked(address + 8));
-        int start = elf.FileOffset(name) ?? throw new InvalidDataException($"类型信息 0x{address:x} 的名字没有文件内容");
-        int end = Array.IndexOf(file, (byte)0, start);
-        if (end <= start || elf.FileOffset(name, (ulong)(end - start + 1)) == null)
-            throw new InvalidDataException($"类型信息 0x{address:x} 的名字串无效");
-        return Encoding.UTF8.GetString(file, start, end - start);
     }
 }

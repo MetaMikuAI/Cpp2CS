@@ -121,6 +121,15 @@ public enum RuntimeFunction : byte
     ArrayLengthNative,
     /// <summary>数组类的元素类。出处：il2cpp-class-internals.h 的 Il2CppClass::element_class；il2cpp-codegen-il2cpp.h 的 ArrayElementTypeCheck 读 array-&gt;klass-&gt;element_class。</summary>
     ElementClass,
+    /// <summary>
+    /// __cxa_begin_catch(异常对象)：返回调整后的捕获对象指针。运行时操作。出处：Itanium C++ ABI 异常处理 2.5.3 __cxa_begin_catch。
+    /// </summary>
+    BeginCatch,
+    /// <summary>
+    /// Class::IsAssignableFrom(目标类, 来源类)：来源类的实例可以当作目标类使用时为真。运行时操作，结果是 C++ 的 bool。
+    /// 出处：vm/Class.cpp 的 Class::IsAssignableFrom；codegen 的 il2cpp_codegen_class_is_assignable_from。
+    /// </summary>
+    ClassIsAssignableFrom,
 }
 
 /// <summary>模板里的值的构造方式。</summary>

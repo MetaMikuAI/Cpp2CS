@@ -35,7 +35,8 @@ internal static class Program
             case "sample" or "assemblies":
                 return Sample.Run(arguments);
             case "unwind" when options.TryGetValue("--binary", out string? binary):
-                return UnwindAudit.Run(binary);
+                try { return UnwindAudit.Run(binary, options.GetValueOrDefault("--symbols")); }
+                catch (InvalidDataException error) { Console.Error.WriteLine(error.Message); return 1; }
             case "returns" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
                 return ReturnAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"));
             case "passing" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
@@ -76,7 +77,7 @@ internal static class Program
     {
         Console.Error.WriteLine("用法：ForwardCheck terms [--seed N] [--rounds N]");
         Console.Error.WriteLine("      ForwardCheck snapshot");
-        Console.Error.WriteLine("      ForwardCheck unwind --binary 原生库");
+        Console.Error.WriteLine("      ForwardCheck unwind --binary 原生库 [--symbols 符号库]");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
         Console.Error.WriteLine("      ForwardCheck sample|assemblies --binary 原生库 --metadata 元数据文件 [--fingerprint 参照表] [--count 个数] [--seed 种子] [--out 生成目录]");

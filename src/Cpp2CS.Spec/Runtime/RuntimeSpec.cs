@@ -25,6 +25,8 @@ public enum RuntimeEffect : byte
     NewArray,
     /// <summary>正常返回时只查询运行时不可变数据；失败时抛出登记的异常。</summary>
     ReadOrThrow,
+    /// <summary>继续传播当前正在展开或处理的异常，不返回。</summary>
+    Resume,
 }
 
 /// <summary>
@@ -97,12 +99,33 @@ public static class RuntimeOperations
             Observable: false, Idempotent: true, ExceptionKind.None, "对象、类", "对象可以当作该类使用时是对象自己，否则为空", "无；只读对象的类与类的继承、接口数据（运行时不可变）",
             "codegen/il2cpp-codegen-il2cpp.cpp: IsInst；vm/Object.cpp: Object::IsInst（导入类型与 Windows 运行时的分支在本平台不出现）")
             { Function = RuntimeFunction.IsInstance, Arguments = 2 },
+        new("type.class-is-assignable-from", ["_Z39il2cpp_codegen_class_is_assignable_fromP11Il2CppClassS0_", "il2cpp_class_is_assignable_from",
+            "_ZN6il2cpp2vm5Class16IsAssignableFromEP11Il2CppClassS3_"], RuntimeEffect.Pure, Returns: true, Observable: false,
+            Idempotent: true, ExceptionKind.None, "目标类、来源类", "C++ bool：来源类的实例能否赋给目标类", "只查询类的赋值关系",
+            "codegen/il2cpp-codegen-il2cpp.cpp：il2cpp_codegen_class_is_assignable_from 与 il2cpp-api.cpp：il2cpp_class_is_assignable_from 均转交 vm/Class.cpp：Class::IsAssignableFrom")
+            { Function = RuntimeFunction.ClassIsAssignableFrom, Arguments = 2 },
         new("exception.array-type-mismatch", ["_Z48il2cpp_codegen_get_array_type_mismatch_exceptionv", "_ZN6il2cpp2vm9Exception29GetArrayTypeMismatchExceptionEv"], RuntimeEffect.MakeException, Returns: true,
             Observable: false, Idempotent: false, ExceptionKind.ArrayTypeMismatch, "无", "新的 ArrayTypeMismatchException 对象", "分配一个异常对象；它在被抛出之前不可见",
             "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_array_type_mismatch_exception；vm/Exception.cpp: Exception::GetArrayTypeMismatchException") { Arguments = 0 },
         new("raise.exception", ["_Z30il2cpp_codegen_raise_exceptionP11Exception_tP10MethodInfo"], RuntimeEffect.ThrowArgument, Returns: false,
             Observable: true, Idempotent: false, ExceptionKind.None, "异常对象、最近的托管帧", "不返回", "抛出实参给出的异常对象（先清空它的栈迹字段）",
             "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_exception；vm/Exception.cpp: Exception::Raise") { Arguments = 2 },
+        new("exception.begin-catch", ["__cxa_begin_catch"], RuntimeEffect.Pure, Returns: true, Observable: false,
+            Idempotent: true, ExceptionKind.None, "展开异常指针", "捕获的包装对象地址", "更新 C++ 运行时私有的捕获状态",
+            "Itanium C++ ABI 异常处理：__cxa_begin_catch 返回调整后的捕获对象指针") { Function = RuntimeFunction.BeginCatch, Arguments = 1 },
+        new("exception.end-catch", ["__cxa_end_catch"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
+            Idempotent: false, ExceptionKind.None, "无", "无", "结束当前处理块，更新 C++ 运行时私有的捕获状态",
+            "Itanium C++ ABI 异常处理：__cxa_end_catch；il2cpp-object-internals.h：Il2CppExceptionWrapper 只持有托管异常指针") { Arguments = 0 },
+        new("exception.resume", ["_Unwind_Resume"], RuntimeEffect.Resume, Returns: false, Observable: true,
+            Idempotent: false, ExceptionKind.None, "展开异常指针", "不返回", "清理结束后继续当前异常的展开",
+            "Itanium C++ ABI 异常处理：_Unwind_Resume") { Arguments = 1 },
+        new("exception.rethrow", ["__cxa_rethrow"], RuntimeEffect.Resume, Returns: false, Observable: true,
+            Idempotent: false, ExceptionKind.None, "无", "不返回", "重新抛出当前捕获的异常",
+            "Itanium C++ ABI 异常处理：__cxa_rethrow") { Arguments = 0 },
+        new("exception.rethrow-argument", ["_ZN6il2cpp5utils16RethrowExceptionEP15Il2CppException", "_Z32il2cpp_codegen_rethrow_exceptionP11Exception_t"],
+            RuntimeEffect.ThrowArgument, Returns: false, Observable: true, Idempotent: false, ExceptionKind.None,
+            "托管异常对象", "不返回", "以实参为 ex 构造包装并抛出",
+            "vm-utils/Finally.h、Finally.cpp：RethrowException；codegen/il2cpp-codegen-il2cpp.cpp：il2cpp_codegen_rethrow_exception；两者均调用 vm/Exception.cpp 的 Exception::Rethrow") { Arguments = 1 },
         new("class.initialize", ["_Z33il2cpp_codegen_runtime_class_initP11Il2CppClass", "_ZN6il2cpp2vm7Runtime9ClassInitEP11Il2CppClass"], RuntimeEffect.ClassInitialize, Returns: true, Observable: true,
             Idempotent: true, ExceptionKind.None, "类", "无", "执行该类的类型初始化器（至多一次）；返回时该类的初始化已触发",
             "vm/Runtime.cpp: Runtime::ClassInit；codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline") { Arguments = 1 },
