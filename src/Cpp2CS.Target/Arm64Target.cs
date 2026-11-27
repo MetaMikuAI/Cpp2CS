@@ -225,6 +225,8 @@ public sealed class Arm64Target
                 instructionCount++;
                 var i = instructions[pc];
                 if (loads.TryGetValue(pc, out var loaded)) selector = state.G(loaded.Index, 32);
+                if ((i.Form == Form.PointerAuth || i is { Form: Form.Return, Name: "retaa" or "retab" }) &&
+                    !state.LinkAuthentication(i)) return new(null, "返回地址的签名来源、密钥或栈指针未核实");
                 if (i.Form == Form.Return) { builder.Return(b, state.ReturnValues(state.G(i.N))); break; }
                 if (i.Form == Form.Trap) { builder.Terminate(b, Terminator.Single(Exit.Trap, pc)); break; }
                 if (i.Form == Form.BranchRegister)
@@ -275,7 +277,7 @@ public sealed class Arm64Target
                     }
                     if (pc + 4 == f.End) { builder.Terminate(b, Terminator.Single(Exit.NoReturn, pc)); break; }
                 }
-                else state.Apply(i, pc);
+                else if (i.Form != Form.PointerAuth) state.Apply(i, pc);
                 if (heads.Contains(pc + 4)) { builder.Terminate(b, Terminator.Single(To(pc + 4), pc)); break; }
             }
             if (locations?.CollectBlocks == true) locations.Blocks.Add(b, (start, instructionCount));

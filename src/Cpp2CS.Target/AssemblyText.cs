@@ -25,7 +25,7 @@ public static partial class AssemblyText
         switch (form)
         {
             case Form.Unknown: return "?";
-            case Form.Nop: return name;
+            case Form.Nop: case Form.PointerAuth: return name;
             case Form.Trap: return Join(I(imm));
             case Form.Branch: case Form.Call: return Join(target);
             case Form.Return: return n == 30 ? name : Join(N);

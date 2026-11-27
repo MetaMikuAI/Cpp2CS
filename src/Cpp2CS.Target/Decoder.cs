@@ -4,7 +4,7 @@ namespace Cpp2CS.Target;
 
 public enum Form
 {
-    Unknown, Nop, Trap, Return, BranchRegister, CallRegister, Branch, Call, Condition, CompareBranch, TestBranch,
+    Unknown, Nop, Trap, PointerAuth, Return, BranchRegister, CallRegister, Branch, Call, Condition, CompareBranch, TestBranch,
     Address, Wide, Immediate, Shifted, Extended, Logical, Mask, Bitfield, Select, Multiply, Binary, Unary,
     Memory, Pair, Literal, Thread, FloatBinary, FloatUnary, FloatCompare, FloatMove, FloatSelect, Fused, LongMultiply, Extract, VectorImmediate, VectorOr, FloatImmediate, Convert,
     ConditionalCompare, FloatConditionalCompare, Reverse, RoundConvert, SimdBinary, SimdUnary,
@@ -19,6 +19,7 @@ public readonly record struct Instruction(Form Form, string Name, int Width = 64
     public string? Extension => Form < Form.ConditionalCompare ? null : $"{Form}/{Name}" + (Form == Form.SimdCopy ? $"/{Mode}" : "");
     public UInt128 WrittenRegisters => LiveRows.Description(this).Write;
     public uint WrittenGeneralRegisters => (uint)WrittenRegisters;
+    public uint ReadGeneralRegisters => (uint)LiveRows.Description(this).Read;
     public bool Conditional => Form is Form.Condition or Form.CompareBranch or Form.TestBranch;
     public bool IsCall => Form is Form.Call or Form.CallRegister;
     public ulong Destination(ulong pc) => unchecked(pc + (ulong)Imm);
@@ -39,6 +40,13 @@ public static class Decoder
         int d = F(0, 5), n = F(5, 5), a = F(10, 5), m = F(16, 5), w = F(31, 1) == 0 ? 32 : 64;
         int opc = F(29, 2), shift = F(10, 6), mode = F(22, 2);
         if (word == 0xd503201f) return new(Form.Nop, "nop");
+        // DDI 0487：以 SP 为修饰值的 LR 签名、认证与认证返回，A/B 为不同密钥。
+        if (word is 0xd503233f or 0xd503237f or 0xd50323bf or 0xd50323ff)
+            return new(Form.PointerAuth, word switch
+            {
+                0xd503233f => "paciasp", 0xd503237f => "pacibsp", 0xd50323bf => "autiasp", _ => "autibsp"
+            }, N: 30);
+        if (word is 0xd65f0bff or 0xd65f0fff) return new(Form.Return, word == 0xd65f0bff ? "retaa" : "retab", N: 30);
         if (Is(0xffe0001f, 0xd4200000)) return new(Form.Trap, "brk", Imm: F(5, 16));
         if (Is(0xffff0000, 0)) return new(Form.Trap, "udf", Imm: F(0, 16));
         if (Is(0xfffffc1f, 0xd65f0000)) return new(Form.Return, "ret", N: n);

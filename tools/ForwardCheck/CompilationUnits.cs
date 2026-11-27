@@ -8,7 +8,44 @@ internal sealed class CompilationUnits
     internal enum Owner { Unknown, Runtime, Generated }
     private readonly List<(ulong Start, ulong End, Owner Owner)> spans = [];
 
-    internal CompilationUnits(string path)
+    internal CompilationUnits(string path, Action<IEnumerable<(ulong Address, ulong Size)>>? objects = null)
+    {
+        var events = new SortedDictionary<ulong, (int Runtime, int Generated)>();
+        void Add(ulong pc, Owner owner, int count)
+        {
+            var e = events.GetValueOrDefault(pc);
+            events[pc] = owner == Owner.Runtime ? (e.Runtime + count, e.Generated) : (e.Runtime, e.Generated + count);
+        }
+        Visit(path, die =>
+        {
+            objects?.Invoke(DwarfObjects.InUnit(die));
+            string name = (Marshal.PtrToStringUTF8(dwarf_diename(die)) ?? "").Replace('\\', '/');
+            var owner = name.EndsWith(".lump.cpp", StringComparison.OrdinalIgnoreCase) ? LumpOwner(die, name) : Classify(name);
+            if (owner == Owner.Unknown || dwarf_hasattr(die, 0x55) == 0 && dwarf_hasattr(die, 0x11) == 0) return;
+            nint cursor = 0;
+            ulong basis = 0;
+            while ((cursor = dwarf_ranges(die, cursor, ref basis, out ulong start, out ulong end)) > 0)
+            {
+                if (start == 0 || start >= end) continue;
+                Add(start, owner, 1);
+                Add(end, owner, -1);
+            }
+            if (cursor < 0) throw new InvalidDataException("无法读取编译单元范围");
+        });
+        int runtime = 0, generated = 0;
+        ulong previous = 0;
+        foreach (var (pc, delta) in events)
+        {
+            if (previous < pc && (runtime > 0 || generated > 0))
+                spans.Add((previous, pc, generated > 0 ? Owner.Generated : Owner.Runtime));
+            runtime += delta.Runtime;
+            generated += delta.Generated;
+            previous = pc;
+        }
+        if (!spans.Any(s => s.Owner == Owner.Runtime)) throw new InvalidDataException("没有运行时编译单元的地址范围");
+    }
+
+    internal static void Visit(string path, Action<nint> visit)
     {
         using var stream = File.OpenRead(path);
         var dwarf = dwarf_begin(stream.SafeFileHandle.DangerousGetHandle().ToInt32(), 0);
@@ -18,41 +55,13 @@ internal sealed class CompilationUnits
         {
             ulong offset = 0;
             int rc;
-            var events = new SortedDictionary<ulong, (int Runtime, int Generated)>();
-            void Add(ulong pc, Owner owner, int count)
-            {
-                var e = events.GetValueOrDefault(pc);
-                events[pc] = owner == Owner.Runtime ? (e.Runtime + count, e.Generated) : (e.Runtime, e.Generated + count);
-            }
             while ((rc = dwarf_nextcu(dwarf, offset, out ulong next, out nuint header, 0, 0, 0)) == 0)
             {
                 if (dwarf_offdie(dwarf, offset + header, die) == 0) throw new InvalidDataException("无法读取编译单元");
+                visit(die);
                 offset = next;
-                string name = (Marshal.PtrToStringUTF8(dwarf_diename(die)) ?? "").Replace('\\', '/');
-                var owner = name.EndsWith(".lump.cpp", StringComparison.OrdinalIgnoreCase) ? LumpOwner(die, name) : Classify(name);
-                if (owner == Owner.Unknown || dwarf_hasattr(die, 0x55) == 0 && dwarf_hasattr(die, 0x11) == 0) continue;
-                nint cursor = 0;
-                ulong basis = 0;
-                while ((cursor = dwarf_ranges(die, cursor, ref basis, out ulong start, out ulong end)) > 0)
-                {
-                    if (start == 0 || start >= end) continue;
-                    Add(start, owner, 1);
-                    Add(end, owner, -1);
-                }
-                if (cursor < 0) throw new InvalidDataException("无法读取编译单元范围");
             }
             if (rc < 0) throw new InvalidDataException("编译单元头无效");
-            int runtime = 0, generated = 0;
-            ulong previous = 0;
-            foreach (var (pc, delta) in events)
-            {
-                if (previous < pc && (runtime > 0 || generated > 0))
-                    spans.Add((previous, pc, generated > 0 ? Owner.Generated : Owner.Runtime));
-                runtime += delta.Runtime;
-                generated += delta.Generated;
-                previous = pc;
-            }
-            if (!spans.Any(s => s.Owner == Owner.Runtime)) throw new InvalidDataException("没有运行时编译单元的地址范围");
         }
         finally { Marshal.FreeHGlobal(die); dwarf_end(dwarf); }
     }

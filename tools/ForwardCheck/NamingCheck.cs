@@ -10,7 +10,7 @@ namespace Cpp2CS.Tools.ForwardCheck;
 
 internal static class NamingCheck
 {
-    internal static Dictionary<ulong, string[]> Symbols(Il2CppInput input, string? path, bool truthOnly = false)
+    internal static Dictionary<ulong, string[]> Symbols(Il2CppInput input, string? path, bool truthOnly = false, FingerprintImage? image = null)
     {
         IEnumerable<ElfSymbol> rows = input.Elf.DynamicSymbols;
         if (path != null)
@@ -19,6 +19,7 @@ internal static class NamingCheck
             if (symbols.BuildId() != input.Elf.BuildId() || symbols.Machine != input.Elf.Machine)
                 throw new InvalidDataException("分离符号与映像的构建标识或目标不一致");
             if (!symbols.Sections.Any(s => s.Type == 2)) throw new InvalidDataException("符号文件缺少完整符号表");
+            if (!truthOnly) image?.AddObjectBounds(symbols.ObjectSymbols().Where(s => s.Section < symbols.Sections.Count).Select(s => (s.Value, s.Size)));
             rows = truthOnly ? symbols.FunctionSymbols() : rows.Concat(symbols.FunctionSymbols());
         }
         return rows.Where(s => s.Section != 0 && (s.Info & 15) == 2 && s.Name.Length > 0)
@@ -56,6 +57,8 @@ internal static class NamingCheck
         var bodies = new Dictionary<ulong, FingerprintBody>();
         if (table.Target == image.Target)
         {
+            if (input.Elf.Sections.Any(s => s.Name is ".debug_info" or ".zdebug_info"))
+                CompilationUnits.Visit(input.Elf.SourcePath, die => image.AddObjectBounds(DwarfObjects.InUnit(die)));
             var starts = Entries(unwind, entries, anchors.Keys);
             foreach (var f in Bounds(unwind, input.Elf.DynamicSymbols).Values)
                 // 代码登记中的调用器、逆向包装、封送和模块初始化入口属于生成代码。
@@ -70,9 +73,10 @@ internal static class NamingCheck
         if (image.Target != FingerprintImage.AndroidArm64) throw new InvalidDataException("缺少 Android AArch64 目标依据");
         string build = input.Elf.BuildId();
         if (Elf64.Load(debug).BuildId() != build) throw new InvalidDataException("调试信息与映像的构建标识不一致");
-        var units = new CompilationUnits(debug);
-        var names = Symbols(input, symbols);
-        var bounds = Bounds(unwind, Elf64.Load(symbols).FunctionSymbols().Concat(input.Elf.DynamicSymbols));
+        var units = new CompilationUnits(debug, image.AddObjectBounds);
+        var names = Symbols(input, symbols, image: image);
+        var symbolFile = Elf64.Load(symbols);
+        var bounds = Bounds(unwind, symbolFile.FunctionSymbols().Concat(input.Elf.DynamicSymbols));
         var imports = image.ImportStubs();
         var starts = Entries(unwind, entries, names.Keys.Concat(imports.Keys));
         var functions = starts.Where(a => !entries.Managed.Contains(a) && units.At(a) == CompilationUnits.Owner.Runtime).Order().ToArray();
@@ -108,7 +112,7 @@ internal static class NamingCheck
             return Convert.ToHexString(SHA256.HashData(stream));
         }
         ImportAnchor[] stubs = [.. imports.Select(i => new ImportAnchor(i.Key, i.Value))];
-        return new(3, build, Hash(symbols), Hash(debug), image.Target, version, toolchain,
+        return new(4, build, Hash(symbols), Hash(debug), image.Target, version, toolchain,
             RuntimeFingerprint.Partition([.. rows], stubs), stubs);
     }
 

@@ -43,7 +43,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         native = new(metadata, input.Code);
         entries = new(input);
         image = new(input.Elf, file, target.Unwind);
-        var symbols = NamingCheck.Symbols(input, symbolFile);
+        var symbols = NamingCheck.Symbols(input, symbolFile, image: fingerprint != null ? image : null);
         if (fingerprint == null)
         {
             var signed = new Dictionary<ulong, RuntimeName>();
@@ -91,7 +91,7 @@ internal sealed class BridgeFacts : IGenericEntryFacts
         if (entries.Managed.Contains(address) || !names.TryGetValue(address, out var n)) return new(CalleeKind.Unknown, null, Symbol(address), "");
         var operation = n.Operation;
         return new(operation == null ? CalleeKind.Unknown : CalleeKind.Runtime, operation, n.Name,
-            n.Depth == 0 ? n.Basis : $"{n.Basis} {n.Depth} 层，经 0x{n.Parent:x}+{n.Offset}");
+            n.Depth == 0 ? n.Basis : $"{n.Basis} {n.Depth} 层，经 0x{n.Parent:x}+{n.Offset}{n.ReferencePath}");
     }
 
     private Callee? Wrapper(ulong address)
