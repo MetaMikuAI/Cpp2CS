@@ -80,6 +80,13 @@ internal sealed class Writer
     /// <summary>写出。块参数的局部变量是按需出现的，所以反复写到它们的集合与类型不再变化。</summary>
     public void Run()
     {
+        // 事实层没有建成效果图（设计 9.8）：方法里的效果一个也没有被解释，整个方法是一个洞，不能写成空方法体。
+        if (graph.Failure is { } failure)
+        {
+            code = [];
+            holes = [new Hole(null, "效果图", HoleLayer.Fact, null, failure, false)];
+            return;
+        }
         for (int round = 0; round < 8; round++)
         {
             int before = parameterLocalCount;

@@ -63,6 +63,10 @@ public static class Selection
     public static Explanation? Select(FactView facts, IReadOnlyList<ProofOutcome> outcomes, Certificate? pinned, int budget = 2_000)
     {
         var graph = facts.Effects;
+        // 事实层没有建成效果图：没有可解释的效果，解释只有这一个洞（下降同样只写出这个洞）。
+        if (graph.Failure is { } failure)
+            return pinned is not null ? null
+                : new Explanation(graph, facts.Metadata, [.. outcomes], [], [new Hole(null, "效果图", HoleLayer.Fact, null, failure, false)], false, 0);
         string digest = graph.Snapshot.DigestText;
         var certificates = new List<Certificate>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
