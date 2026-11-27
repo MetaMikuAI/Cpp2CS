@@ -77,12 +77,9 @@ internal static class Program
     ];
 
     // 下降只读解释与事实，照着写出（设计第 10 节）：这些类型（连同嵌套类型）的方法体不引用走查、证明入口、来源关系与独立关系表。
-    // 例外只按成员列出：核对写出的表达式时，下降用内核唯一的合流解释里的分情况读出表达式代表的项（设计 7.3、第 10 节）；
-    // 同一个类型上的走查、按边代入、来源关系与逐情况提升仍不许引用。
-    private static readonly (string Assembly, string[] Types, string[] Forbidden, (string Type, string[] Members)[] Permitted) lowering =
+    private static readonly (string Assembly, string[] Types, string[] Forbidden) lowering =
         ("Cpp2CS.Kernel", ["Cpp2CS.Kernel.Writer", "Cpp2CS.Kernel.Lowering", "Cpp2CS.Kernel.ManagedBody"],
-        ["Cpp2CS.Kernel.Engine.CoExecution", "Cpp2CS.Kernel.Proof", "Cpp2CS.Kernel.Sources.ValueSources", "Cpp2CS.Spec.Independence."],
-        [("Cpp2CS.Kernel.Sources.ValueSources", [".ctor", "SplitCases"])]);
+        ["Cpp2CS.Kernel.Engine.CoExecution", "Cpp2CS.Kernel.Proof", "Cpp2CS.Kernel.Sources.ValueSources", "Cpp2CS.Spec.Independence."]);
 
     // 现在还没有检查对象的条目，列出来以免被当成已经检查过。只读查询面就是内核公开的成员：入边与来源关系不在其中由第六项检查。
     private static readonly string[] pending = [];
@@ -215,11 +212,10 @@ internal static class Program
                 {
                     var method = md.GetMethodDefinition(methodHandle);
                     if (method.RelativeVirtualAddress == 0) continue;
-                    foreach (var (referenced, member) in Referenced(md, artifact.Pe.GetMethodBody(method.RelativeVirtualAddress)))
+                    foreach (string referenced in Referenced(md, artifact.Pe.GetMethodBody(method.RelativeVirtualAddress)))
                         if (lowering.Forbidden.Any(f => f.EndsWith('.') ? referenced.StartsWith(f, StringComparison.Ordinal)
-                            : referenced == f || referenced.StartsWith(f + "/", StringComparison.Ordinal))
-                            && !lowering.Permitted.Any(p => p.Type == referenced && member is not null && p.Members.Contains(member)))
-                            violations.Add($"下降的代码 {full}.{md.GetString(method.Name)} 引用了 {referenced}{(member is null ? "" : "." + member)}");
+                            : referenced == f || referenced.StartsWith(f + "/", StringComparison.Ordinal)))
+                            violations.Add($"下降的代码 {full}.{md.GetString(method.Name)} 引用了 {referenced}");
                 }
             }
         }
@@ -248,11 +244,11 @@ internal static class Program
         .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
         .Select(f => (System.Reflection.Emit.OpCode)f.GetValue(null)!).ToDictionary(o => unchecked((ushort)o.Value), o => o.OperandType);
 
-    /// <summary>一个方法体里的指令引用到的类型与成员：被调方法与被访问字段所属的类型及其名字，以及直接引用的类型（成员为空）。</summary>
-    private static IEnumerable<(string Owner, string? Member)> Referenced(MetadataReader md, MethodBodyBlock body)
+    /// <summary>一个方法体里的指令引用到的类型：被调方法与被访问字段所属的类型，以及直接引用的类型。</summary>
+    private static IEnumerable<string> Referenced(MetadataReader md, MethodBodyBlock body)
     {
         var il = body.GetILReader();
-        var names = new HashSet<(string, string?)>();
+        var names = new HashSet<string>();
         while (il.RemainingBytes > 0)
         {
             ushort code = il.ReadByte();
@@ -267,26 +263,13 @@ internal static class Program
                 case System.Reflection.Emit.OperandType.InlineSwitch: for (uint n = il.ReadUInt32(); n > 0; n--) il.ReadInt32(); break;
                 case System.Reflection.Emit.OperandType.InlineMethod or System.Reflection.Emit.OperandType.InlineField
                     or System.Reflection.Emit.OperandType.InlineType or System.Reflection.Emit.OperandType.InlineTok:
-                {
-                    var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.EntityHandle(il.ReadInt32());
-                    if (Owner(md, handle) is { } owner) names.Add((owner, Member(md, handle)));
+                    if (Owner(md, System.Reflection.Metadata.Ecma335.MetadataTokens.EntityHandle(il.ReadInt32())) is { } owner) names.Add(owner);
                     break;
-                }
                 default: il.ReadInt32(); break;
             }
         }
         return names;
     }
-
-    /// <summary>一个记号引用的方法或字段的名字；引用类型的记号为空。</summary>
-    private static string? Member(MetadataReader md, EntityHandle handle) => handle.Kind switch
-    {
-        HandleKind.MethodDefinition => md.GetString(md.GetMethodDefinition((MethodDefinitionHandle)handle).Name),
-        HandleKind.FieldDefinition => md.GetString(md.GetFieldDefinition((FieldDefinitionHandle)handle).Name),
-        HandleKind.MemberReference => md.GetString(md.GetMemberReference((MemberReferenceHandle)handle).Name),
-        HandleKind.MethodSpecification => Member(md, md.GetMethodSpecification((MethodSpecificationHandle)handle).Method),
-        _ => null,
-    };
 
     /// <summary>一个记号所属的类型的全名；泛型实例与数组等构造出的类型不展开。</summary>
     private static string? Owner(MetadataReader md, EntityHandle handle) => handle.Kind switch

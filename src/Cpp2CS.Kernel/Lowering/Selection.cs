@@ -303,5 +303,5 @@ public static class Lowering
     /// </summary>
     public static Term? Denote(IReadOnlyList<ManagedInstruction> expression, MethodShape host, IReadOnlyList<Term> arguments,
         IMetadataView metadata, TermPool terms, int pointerBits) =>
-        Writer.Denote(expression, null, (argument, index) => argument ? (host.Parameters[index], arguments[index]) : null, metadata, terms, pointerBits);
+        ExpressionDenotation.Denote(expression, null, (argument, index) => argument ? (host.Parameters[index], arguments[index]) : null, metadata, terms, pointerBits);
 }

@@ -366,6 +366,17 @@ internal static class Counterexamples
                 return "错误的图通过了构造";
             }),
 
+            // ---- 路径条件 ----
+
+            // 设计 7.7：加入知识之后矛盾时得到空；7.4：运行时不可变的位置不被写入改变。语料 ArrayStore.StoreThenLoad 的原生代码
+            // 先读数组长度做下标检查，写元素之后再读一次长度做第二次检查。长度登记为不可变之后两次读取是同一个值，
+            // “第一次检查通过”与“第二次检查不通过”不能同时成立。两条文字以哪种次序加入，结果都须是矛盾。
+            new("不可变位置上的两次读取使检查矛盾", "设计 7.4、7.7；语料 ArrayStore.StoreThenLoad 的原生代码", ImmutableContradiction),
+
+            // 设计 7.4：登记的取值范围与成立的比较一起供区间判定使用。同一个值有几条上界时用最紧的一条，与登记和文字的次序无关：
+            // 数组长度登记的范围（不超过 0xFFFFFFF0）较松，下标检查 x < 15 给出的界较紧；后者成立时 x 的最高位为 0，符号扩展就是零扩展。
+            new("区间判定取最紧的上界", "设计 7.4、7.7", TightestBound),
+
             // ---- 下降 ----
 
             // ECMA-335 III.3.18 brtrue：值非零（真）时转移。语料 Control.Conditional 的真实 IL 是
@@ -389,6 +400,45 @@ internal static class Counterexamples
         }
         Console.WriteLine($"反例：{items.Count} 个，通过 {passed} 个，用时 {clock.Elapsed.TotalSeconds:F1} 秒");
         return passed == items.Count ? 0 : 1;
+    }
+
+    private static string? ImmutableContradiction()
+    {
+        var p = new TermPool();
+        var array = p.EntryParameter(0, Integer(0), 64);
+        var index = p.Slice(p.EntryParameter(0, Integer(1), 64), 0, 32);
+        var address = p.Add(array, p.Constant(0x18, 64));
+        // 第一次读取在写入之前（历元 1），第二次在一次不能证明不重叠的写入之后（版本由那次写入给出）。
+        var before = p.Attribute(new AttributeId(KernelAttributes.Load), 32, address, p.Constant(1, 32));
+        var after = p.Attribute(new AttributeId(KernelAttributes.LoadAfter), 32, address, p.EntryParameter(0, Integer(2), 64));
+        foreach (bool passedFirst in (bool[])[true, false])
+        {
+            (Term Condition, bool Value)[] literals = [(p.Ult(index, before), true), (p.Ult(index, after), false)];
+            if (!passedFirst) Array.Reverse(literals);
+            PathConditions? conditions = PathConditions.Empty(p);
+            foreach (var (condition, value) in literals) conditions = conditions?.With(condition, value);
+            if (conditions is null) return "登记不可变之前两条检查就被判为矛盾";
+            if (conditions.WithImmutable(address, 32) is not null) return $"{(passedFirst ? "先加第一次检查" : "先加第二次检查")}：登记不可变之后仍判为相容";
+        }
+        return null;
+    }
+
+    private static string? TightestBound()
+    {
+        var p = new TermPool();
+        var x = p.Slice(p.EntryParameter(0, Integer(0), 64), 0, 32);
+        var widened = p.SignExtend(x, 64);
+        // 15 与 0xFFFFFFE1 都不是 2 的幂：比较保持为无符号小于（小于 2 的幂的比较会化成高位全零）。
+        foreach (bool tightFirst in (bool[])[true, false])
+        {
+            (Term Condition, bool Value)[] literals = [(p.Ult(x, p.Constant(15, 32)), true), (p.Ult(x, p.Constant(0xFFFFFFE1, 32)), true)];
+            if (!tightFirst) Array.Reverse(literals);
+            PathConditions? conditions = PathConditions.Empty(p).WithUpperBound(x, 0xFFFFFFF0);
+            foreach (var (condition, value) in literals) conditions = conditions?.With(condition, value);
+            if (conditions is null) return "几条上界被判为矛盾";
+            if (conditions.Evaluate(widened) != p.ZeroExtend(x, 64)) return $"{(tightFirst ? "先加较紧的界" : "先加较松的界")}：符号扩展没有化成零扩展";
+        }
+        return null;
     }
 
     private static string? SelectArms()

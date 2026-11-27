@@ -66,20 +66,34 @@ public sealed class PathConditions
     public bool Initialized(EntityRef type) => initialized.Contains(type);
     public PathConditions WithInitialized(EntityRef type) => new(terms, literals, constants, initialized.Add(type), immutable, upper);
 
-    /// <summary>登记一个运行时不可变的位置：它上面的读取与历元无关。</summary>
-    public PathConditions WithImmutable(Term address, int width)
+    /// <summary>
+    /// 登记一个运行时不可变的位置：它上面的读取与历元无关。已有文字里这个位置上的读取换成与历元无关的写法，键随之更新；
+    /// 换写之后两条文字成了同一个条件而取值相反，或成了与取值相反的常量，说明这组文字不能同时成立，返回空。
+    /// </summary>
+    public PathConditions? WithImmutable(Term address, int width)
     {
         if (immutable.Contains((address, width))) return this;
         var next = new PathConditions(terms, literals, constants, initialized, immutable.Add((address, width)), upper);
-        // 已有文字里这个位置上的读取换成与历元无关的写法，键随之更新。
         var rekeyed = ImmutableDictionary<Term, bool>.Empty.ToBuilder();
         foreach (var (literal, truth) in literals)
         {
             bool value = truth;
             var now = Strip(next.Evaluate(literal, ImmutableDictionary<Term, bool>.Empty), ref value);
-            if (!now.IsConstant) rekeyed[now] = value;
+            if (!Settle(rekeyed, now, value)) return null;
         }
         return new PathConditions(terms, rekeyed.ToImmutable(), constants, initialized, next.immutable, upper);
+    }
+
+    /// <summary>
+    /// 把一条换写过的文字放进新的文字表：常量与取值一致的不必再记，相反的是矛盾；同一个条件已经记了相反的取值也是矛盾。
+    /// 矛盾时返回假。结果与文字的列举次序无关。
+    /// </summary>
+    private static bool Settle(ImmutableDictionary<Term, bool>.Builder settled, Term condition, bool value)
+    {
+        if (condition.IsConstant) return condition.IsZero != value;
+        if (settled.TryGetValue(condition, out bool known)) return known == value;
+        settled[condition] = value;
+        return true;
     }
 
     /// <summary>在成立的文字之下求值：已定的条件换成常量，已知等于常量的项换成常量，不可变位置上的读取去掉历元。</summary>
@@ -111,17 +125,18 @@ public sealed class PathConditions
                 return terms.Sub(t.Operands[0], terms.Mul(terms.Divide(t.Op == Op.SRem ? Op.SDiv : Op.UDiv, t.Operands[0], t.Operands[1]), t.Operands[1]));
             return t;
         }
-        // 上界：登记的取值范围，或一条成立的无符号比较（x < y，或 非(y < x)）给出的界。
+        // 上界：登记的取值范围与各条成立的无符号比较（x < y，或 非(y < x)）给出的界里最小的一个，与文字的列举次序无关。
         UInt128? Bounded(Term x)
         {
-            if (UpperBound(x) is { } direct) return direct;
+            UInt128? best = UpperBound(x);
+            void Offer(UInt128 bound) { if (best is not { } known || bound < known) best = bound; }
             foreach (var (literal, truth) in literals)
             {
                 if (literal.Kind != TermKind.Operation || literal.Op != Op.Ult) continue;
-                if (truth && ReferenceEquals(literal.Operands[0], x) && UpperBound(literal.Operands[1]) is { } limit && limit > 0) return limit - 1;
-                if (!truth && ReferenceEquals(literal.Operands[1], x) && UpperBound(literal.Operands[0]) is { } most) return most;
+                if (truth && ReferenceEquals(literal.Operands[0], x) && UpperBound(literal.Operands[1]) is { } limit && limit > 0) Offer(limit - 1);
+                if (!truth && ReferenceEquals(literal.Operands[1], x) && UpperBound(literal.Operands[0]) is { } most) Offer(most);
             }
-            return null;
+            return best;
         }
         bool Nonzero(Term t) =>
             t.Width <= 128 && (t.IsConstant ? !t.IsZero : known.TryGetValue(terms.Eq(t, terms.Zero(t.Width)), out bool zero) && !zero);
@@ -190,11 +205,10 @@ public sealed class PathConditions
         var settled = ImmutableDictionary<Term, bool>.Empty.ToBuilder();
         foreach (var (literal, truth) in nextLiterals)
         {
-            if (ReferenceEquals(literal, c)) { settled[literal] = truth; continue; }
+            if (ReferenceEquals(literal, c)) { if (!Settle(settled, literal, truth)) return null; continue; }
             bool expected = truth;
             var now = Strip(next.Evaluate(literal, ImmutableDictionary<Term, bool>.Empty), ref expected);
-            if (now.IsConstant) { if (now.IsZero == expected) return null; }
-            else settled[now] = expected;
+            if (!Settle(settled, now, expected)) return null;
         }
         return new PathConditions(terms, settled.ToImmutable(), nextConstants, initialized, immutable, nextUpper);
     }

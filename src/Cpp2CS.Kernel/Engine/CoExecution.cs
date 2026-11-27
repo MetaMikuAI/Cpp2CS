@@ -66,6 +66,8 @@ public sealed partial class CoExecution
         public int Fresh { get; init; }
         /// <summary>证明一条声明时，这条路径上与声明有关的记录（见 CoExecution.Claims.cs）。</summary>
         public Trail? Trail { get; init; }
+        /// <summary>模板一侧的一步使路径条件矛盾（登记不可变的位置之后，已成立的文字不能同时成立）：这条路径不存在。</summary>
+        public bool Infeasible { get; init; }
     }
 
     private enum Role : byte { Native, Template, Inner }
@@ -380,6 +382,7 @@ public sealed partial class CoExecution
     private Term Lower(Term term, ref State state)
     {
         var conditions = state.Conditions;
+        bool infeasible = false;
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         Term Go(Term t)
         {
@@ -398,7 +401,8 @@ public sealed partial class CoExecution
                 var layout = facts.Layout;
                 var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
                 result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.ArrayLengthBits, address, terms.Zero(32));
-                conditions = conditions.WithImmutable(address, layout.ArrayLengthBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                if (conditions.WithImmutable(address, layout.ArrayLengthBits) is { } known) conditions = known.WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                else infeasible = true;
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ArrayLengthNative)
             {
@@ -406,7 +410,8 @@ public sealed partial class CoExecution
                 var layout = facts.Layout;
                 var address = terms.Add(result.Operands[0], terms.Constant(layout.ArrayLengthOffset, layout.PointerBits));
                 result = terms.Attribute(new AttributeId(KernelAttributes.Load), layout.PointerBits, address, terms.Zero(32));
-                conditions = conditions.WithImmutable(address, layout.PointerBits).WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                if (conditions.WithImmutable(address, layout.PointerBits) is { } known) conditions = known.WithUpperBound(result, (UInt128)layout.ArrayLengthMaximum);
+                else infeasible = true;
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.FieldAddress && result.Operands[1].Kind == TermKind.Entity)
             {
@@ -430,6 +435,7 @@ public sealed partial class CoExecution
         }
         var lowered = Go(term);
         if (!ReferenceEquals(conditions, state.Conditions)) state = state with { Conditions = conditions };
+        if (infeasible) state = state with { Infeasible = true };
         return lowered;
     }
 
@@ -921,10 +927,18 @@ public sealed partial class CoExecution
         return offset >= header ? offset - header : throw new Refuted(Verdict.MissingFact, $"字段 {field} 的偏移 {offset} 小于对象头，不是值类型的字段");
     }
 
+    /// <summary>模板走到它的下一个事件。这一步使路径条件矛盾时，这条路径不存在，结果是空的事件。</summary>
     private Event Template(ref State state)
+    {
+        var reached = Advance(ref state);
+        return state.Infeasible ? new Event(EventKind.Vacuous) : reached;
+    }
+
+    private Event Advance(ref State state)
     {
         while (true)
         {
+            if (state.Infeasible) return new Event(EventKind.Vacuous);
             if (state.Inner is not null)
             {
                 // 正在展开一次调用：推进被调方法的快照。它返回时，结果按调用约定取出，模板从调用之后继续。
@@ -955,6 +969,7 @@ public sealed partial class CoExecution
             var id = new OccurrenceId(side.Block, side.Index);
             var effect = template[id];
             var operands = Values(templateGraph.Operands(id), side, ref state, lower: true);
+            if (state.Infeasible) return new Event(EventKind.Vacuous);
             var next = side with { Index = side.Index + 1 };
             switch (effect.Kind)
             {

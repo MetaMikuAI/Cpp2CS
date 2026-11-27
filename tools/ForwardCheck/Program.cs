@@ -15,12 +15,16 @@ namespace Cpp2CS.Tools.ForwardCheck;
 ///   il --cases 用例清单.json --assemblies 程序集目录     读语料的真实 IL，按操作目录展开，并在展开的图上核对合流的三个操作
 ///   counterexamples --assemblies 程序集目录              逐项核对有出处的反例（核心库取自程序集目录）
 ///   native --cases … --assemblies … --binary … --metadata … --symbols …   原生一侧的正向核对：真实 IL 的展开与原生快照共同执行
+///   recover … [--isolated]                              恢复与 IL 对照；--isolated 另把每个用例放进新的上下文单独恢复，与整批逐例比较
 /// </summary>
 internal static class Program
 {
     private static int Main(string[] arguments)
     {
         if (arguments.Length == 0) return Usage();
+        // 不带值的开关：recover 的 --isolated。
+        bool isolated = arguments.Contains("--isolated");
+        arguments = [.. arguments.Where(a => a != "--isolated")];
         var options = new Dictionary<string, string>();
         for (int i = 1; i + 1 < arguments.Length; i += 2) options[arguments[i]] = arguments[i + 1];
         switch (arguments[0])
@@ -44,7 +48,7 @@ internal static class Program
                 && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
                 if (arguments.Length % 2 == 0) return Usage();
                 return Recover.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
-                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--emit"));
+                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--emit"), isolated);
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options, options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -59,7 +63,7 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
-        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 目录]");
+        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 目录] [--isolated]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
