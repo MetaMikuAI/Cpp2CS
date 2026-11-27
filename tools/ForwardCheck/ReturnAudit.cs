@@ -19,9 +19,9 @@ internal static class ReturnAudit
         var input = Il2CppInput.Load(binary, metadataPath);
         var file = File.ReadAllBytes(binary);
         var metadata = ModelInput.Facts(input, file);
-        var facts = new BridgeFacts(input, metadata, symbols, file);
         var target = new Arm64Target(input.Elf, file,
             input.Code.Methods.Concat(input.Code.MethodInstances).Where(m => m.Entry.HasValue).Select(m => m.Entry!.Value));
+        var facts = new BridgeFacts(input, metadata, symbols, file, target, null);
         var lifts = new Dictionary<ulong, MethodSnapshot?>();
         MethodSnapshot? Snapshot(ulong entry)
         {

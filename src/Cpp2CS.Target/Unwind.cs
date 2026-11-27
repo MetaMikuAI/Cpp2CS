@@ -10,6 +10,7 @@ public readonly record struct CallSite(ulong Start, ulong End, ulong Landing);
 public sealed class UnwindIndex
 {
     readonly Frame[] frames;
+    public ReadOnlySpan<Frame> Frames => frames;
     readonly byte[] file;
     readonly Elf64 elf;
     readonly ElfSection? exceptions;
