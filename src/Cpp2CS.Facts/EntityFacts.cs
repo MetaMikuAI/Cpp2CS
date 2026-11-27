@@ -143,8 +143,10 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 
     public EntityRef? BaseOf(EntityRef type)
     {
-        if (metadata.Keys.DescribeType(type) is not NamedType { Arguments.Count: 0 } named) return null;
-        if (Model.Types[named.Definition].Parent is not NamedType parent || metadata.Keys.TypeKey(parent) is not long key) return null;
+        // 泛型实例的基类是定义里写的基类代入这个实例的类型实参（ECMA-335 II.9.4）。
+        if (metadata.Keys.DescribeType(type) is not NamedType named) return null;
+        if (Model.Types[named.Definition].Parent is not { } declared) return null;
+        if (EntityKeys.Inflate(declared, named) is not NamedType parent || metadata.Keys.TypeKey(parent) is not long key) return null;
         return new EntityRef(EntityKind.Type, key);
     }
 
