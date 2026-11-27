@@ -323,6 +323,12 @@ public sealed class SnapshotBuilder
             }
 
             if (terminator is null) continue;
+            if (!terminator.Clauses.IsEmpty)
+            {
+                var selectors = new HashSet<long>();
+                foreach (var (selector, _) in terminator.Clauses)
+                    if (selector <= 0 || !selectors.Add(selector)) draft.Report($"B{b}：动作表的选择子须大于零且互异，实际为 {selector}");
+            }
             bool afterCall = terminator.Kind == TerminatorKind.Invoke
                 || (terminator.Kind == TerminatorKind.Single && terminator.Exits[0].Kind == ExitKind.NoReturn);
             if (afterCall && (occurrences.Length == 0 || occurrences[^1] is not CallOccurrence))
