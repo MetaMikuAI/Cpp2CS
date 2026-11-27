@@ -36,6 +36,13 @@ internal sealed class MetadataFile
 
     internal static int Int(ReadOnlySpan<byte> row, int at = 0) => unchecked((int)Elf64.U32(row, at));
     internal int Count(Table table) => tables[(int)table].Count;
+    internal ReadOnlySpan<byte> Data(Table table, int start)
+    {
+        Range(table, start, 0);
+        var (at, size, stride) = tables[(int)table];
+        if (stride != 1) throw new InvalidDataException($"{table} 不是字节表");
+        return bytes.AsSpan(at + start, size - start);
+    }
     internal ReadOnlySpan<byte> Row(Table table, int index)
     {
         var (at, count, stride) = tables[(int)table];

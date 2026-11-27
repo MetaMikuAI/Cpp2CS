@@ -51,9 +51,15 @@ internal sealed partial class SrmMetadata
 
         private Sig Named(int i) => new($"D{i}", new M.NamedType(i, []));
         public Sig GetPrimitiveType(PrimitiveTypeCode code) => Named(facts.CoreType(code.ToString()).Definition);
-        public Sig GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle h, byte kind) => Named(definition(h));
+        private Sig Named(int i, byte kind)
+        {
+            if (kind is 0x11 or 0x12 && (kind == 0x11) != facts.Model.Types[i].ValueType)
+                throw Unresolved($"类型 {i} 的签名种类与定义不符");
+            return Named(i);
+        }
+        public Sig GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle h, byte kind) => Named(definition(h), kind);
         public Sig GetTypeFromReference(MetadataReader reader, TypeReferenceHandle h, byte kind)
-            => Named(reference(h));
+            => Named(reference(h), kind);
         public Sig GetTypeFromSpecification(MetadataReader r, Scope? c, TypeSpecificationHandle h, byte kind) =>
             r.GetTypeSpecification(h).DecodeSignature(this, c);
         public Sig GetGenericInstantiation(Sig definition, ImmutableArray<Sig> args) =>
@@ -89,6 +95,7 @@ internal sealed partial class SrmMetadata
 
     private (Module Module, TypeDefinitionHandle Handle) Definition(int index)
     {
+        if (generatedDefinitions != null) return generatedDefinitions[index];
         var image = Facts.Model.Images.Single(i => index >= i.FirstType && index < i.FirstType + i.TypeCount);
         var target = LoadImage(image.Name) ?? throw Unresolved($"模块 {image.Name}");
         return (target, (TypeDefinitionHandle)MetadataTokens.EntityHandle((int)Facts.Model.Types[index].Token));

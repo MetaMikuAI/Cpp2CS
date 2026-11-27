@@ -9,6 +9,7 @@ public sealed class Il2CppInput
     public Elf64 Elf { get; }
     public MetadataModel Model { get; }
     public CodeMap Code { get; }
+    public Lazy<AssemblyMetadata> AssemblyMetadata { get; }
     private readonly ulong[] fieldTables;
 
     /// <summary>已注册字段槽的链接地址；零填充段内的槽也有地址。</summary>
@@ -110,6 +111,13 @@ public sealed class Il2CppInput
             Array.ConvertAll(reg.Vector(elf, mr), p => p == 0 ? null : runtime.GenericClass(p)), specs,
             Enumerable.Range(0, metadata.Count(Table.Literal)).Select(metadata.StringLiteral).ToArray());
         Code = reg.ReadCode(elf, Model);
+        AssemblyMetadata = new(() =>
+        {
+            ulong sizes = elf.Pointer(mr + 104);
+            return AssemblyTables.Read(metadata, Model, t => (byte)(elf.Word(pointers[t] + 8) >> 16),
+                t => elf.Word(elf.Pointer(sizes + (ulong)t * 8)),
+                t => (int)elf.Word(elf.Pointer(sizes + (ulong)t * 8) + 4));
+        });
     }
 
     // vm/MetadataCache.cpp::GetFieldOffsetFromIndexLocked；vm/Class.cpp::LayoutFieldsLocked。

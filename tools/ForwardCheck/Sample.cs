@@ -13,6 +13,9 @@ internal static class Sample
     }
     internal sealed record Plan(int Population, int Entries, int Count, int Audit, Item[] Items, long[] Shown);
     internal sealed record Group(int Count, string First);
+    internal sealed record OutputRequest(Item[] Complete, long[] Main);
+    internal sealed record Generation(Dictionary<long, string> Endpoints, int Assemblies, int Signatures, double Seconds,
+        long Peak, int Verified, Dictionary<string, int> VerificationIssues, string[] MetadataHoles);
 
     internal sealed class Result
     {
@@ -57,12 +60,13 @@ internal static class Sample
     {
         var options = new Dictionary<string, string>();
         for (int i = 1; i < args.Length; i += 2)
-            if (i + 1 == args.Length || args[i] is not ("--binary" or "--metadata" or "--symbols" or "--count" or "--seed" or "--show" or "--batch-size")
+            if (i + 1 == args.Length || args[i] is not ("--binary" or "--metadata" or "--symbols" or "--count" or "--seed" or "--show" or "--batch-size" or "--out")
                 || !options.TryAdd(args[i], args[i + 1])) return Usage();
         if (!options.TryGetValue("--binary", out var binary) || !options.TryGetValue("--metadata", out var metadata)
             || !int.TryParse(options.GetValueOrDefault("--count", "2000"), out int count) || count < 1
             || !int.TryParse(options.GetValueOrDefault("--seed", "202211"), out int seed)) return Usage();
         if (!int.TryParse(options.GetValueOrDefault("--batch-size", "0"), out int batchSize) || batchSize < 0) return Usage();
+        if (args[0] == "assemblies" && !options.ContainsKey("--out")) return Usage();
         if (Environment.GetEnvironmentVariable("CPP2CS_SAMPLE_WORKER") == "1")
         {
             var input = new SampleInput(binary, metadata, options.GetValueOrDefault("--symbols"));
@@ -72,6 +76,12 @@ internal static class Sample
                 if (line == "抽样")
                 {
                     Console.WriteLine(JsonSerializer.Serialize(input.Draw(count, seed, options.GetValueOrDefault("--show"))));
+                    continue;
+                }
+                if (line.StartsWith("生成 ", StringComparison.Ordinal))
+                {
+                    var request = JsonSerializer.Deserialize<OutputRequest>(line[3..])!;
+                    Console.WriteLine(JsonSerializer.Serialize(input.Generate(request.Complete, request.Main, options.GetValueOrDefault("--out"))));
                     continue;
                 }
                 var item = JsonSerializer.Deserialize<Item>(line)!;
@@ -90,6 +100,7 @@ internal static class Sample
     {
         Console.Error.WriteLine("用法：ForwardCheck sample --binary 原生库 --metadata 元数据 [--symbols 符号库] [--count 个数] [--seed 种子] [--show 地址|方法名] [--batch-size 批量]");
         Console.Error.WriteLine("分批时，每批结束输出“批次暂停”，从标准输入收到“继续”后处理下一批。");
+        Console.Error.WriteLine("ForwardCheck assemblies --binary 原生库 --metadata 元数据 --out 目录，抽样选项同 sample。");
         return 2;
     }
 
@@ -179,12 +190,24 @@ internal static class Sample
                 catch (OperationCanceledException) when (deadline.IsCancellationRequested) { row.Timeout = true; }
                 catch (EndOfStreamException e) { row.Result.Error = e.Message; }
                 row.Milliseconds = method.Elapsed.TotalMilliseconds;
-                if (row.Complete && row.Result.Endpoint == null)
-                    row.Result.Endpoint = row.Timeout ? "终点核对超时" : row.Result.Error ?? "缺终点结论";
                 if (row.Timeout || current.Process.HasExited) Stop();
                 records.Add(row);
                 if (records.Count % 100 == 0) Console.Error.WriteLine($"已测 {records.Count}/{plan.Items.Length}，用时 {clock.Elapsed.TotalSeconds:F1} 秒");
             }
+            var complete = records.Where(r => r.Complete).ToArray();
+            var main = records.Take(plan.Count).Where(r => r.Complete).Select(r => r.Item.Key).ToArray();
+            var writer = await Ready();
+            writer.Process.StandardInput.WriteLine("生成 " + JsonSerializer.Serialize(new OutputRequest(complete.Select(r => r.Item).ToArray(), main)));
+            var generated = JsonSerializer.Deserialize<Generation>(await writer.Read())!;
+            foreach (var row in complete)
+            {
+                row.Written = true;
+                row.Result.Endpoint = generated.Endpoints[row.Item.Key];
+            }
+            Console.WriteLine($"全量生成 {generated.Assemblies} 个程序集，生成用时 {generated.Seconds:F3} 秒，生成期间工作集峰值 {generated.Peak} 字节；全部回读，解码方法签名 {generated.Signatures}");
+            Console.WriteLine($"ILVerify 通过 {generated.Verified}/{main.Length}，问题 {generated.VerificationIssues.Values.Sum()}");
+            foreach (var issue in generated.VerificationIssues) Console.WriteLine($"  ILVerify {issue.Key} {issue.Value}");
+            foreach (var hole in generated.MetadataHoles) Console.WriteLine($"  元数据洞 {hole}");
             Stop();
             Report(plan, records, seed, clock.Elapsed, peak);
             if (show && plan.Shown.Length == 0) Console.Error.WriteLine("总体中没有匹配的方法");

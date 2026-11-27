@@ -42,12 +42,19 @@ internal sealed partial class SrmMetadata : IDisposable
     private readonly string directory;
     public ModelMetadata Facts { get; }
     private readonly Dictionary<string, Module?> modules = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(Module, TypeReferenceHandle), (Module, TypeDefinitionHandle)> resolvedReferences = [];
     private readonly Dictionary<(string Image, int Token), int> types = [], methods = [], fields = [];
+    private Dictionary<int, (Module Module, TypeDefinitionHandle Handle)>? generatedDefinitions;
 
-    public SrmMetadata(string directory, ModelMetadata facts)
+    public SrmMetadata(string directory, ModelMetadata facts, Cpp2CS.Model.AssemblyMetadata? generated = null)
     {
         this.directory = directory;
         Facts = facts;
+        if (generated != null)
+        {
+            IndexGenerated(generated);
+            return;
+        }
         foreach (var img in facts.Model.Images)
         {
             string image = img.Name;
@@ -66,9 +73,13 @@ internal sealed partial class SrmMetadata : IDisposable
         foreach (var module in modules.Values) module?.Dispose();
     }
 
-    public Module? Load(string assembly) => LoadImage(assembly + ".dll");
+    public Module? Load(string assembly)
+    {
+        var definition = Facts.Model.Assemblies.FirstOrDefault(a => string.Equals(a.Name, assembly, StringComparison.OrdinalIgnoreCase));
+        return LoadImage(definition == null ? assembly + ".dll" : Facts.Model.Images[definition.Image].Name);
+    }
 
-    private Module? LoadImage(string image)
+    internal Module? LoadImage(string image)
     {
         if (Path.GetFileName(image) != image) throw Unresolved($"模块名不是文件名 {image}");
         if (modules.TryGetValue(image, out var known)) return known;
@@ -96,6 +107,12 @@ internal sealed partial class SrmMetadata : IDisposable
     }
 
     private (Module Module, TypeDefinitionHandle Handle) Resolve(Module module, TypeReferenceHandle handle)
+    {
+        if (resolvedReferences.TryGetValue((module, handle), out var result)) return result;
+        return resolvedReferences[(module, handle)] = ResolveReference(module, handle);
+    }
+
+    private (Module Module, TypeDefinitionHandle Handle) ResolveReference(Module module, TypeReferenceHandle handle)
     {
         var reference = module.Md.GetTypeReference(handle);
         string @namespace = module.Md.GetString(reference.Namespace), name = module.Md.GetString(reference.Name);

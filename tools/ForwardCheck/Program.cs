@@ -25,7 +25,7 @@ internal static class Program
         for (int i = 1; i + 1 < arguments.Length; i += 2) options[arguments[i]] = arguments[i + 1];
         switch (arguments[0])
         {
-            case "sample":
+            case "sample" or "assemblies":
                 return Sample.Run(arguments);
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
                 using (var metadata = ModelInput.Load(assemblies, options))
@@ -46,7 +46,8 @@ internal static class Program
                 && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
                 if (arguments.Length % 2 == 0) return Usage();
                 return Recover.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
-                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--emit"));
+                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--emit"),
+                    options.GetValueOrDefault("--emit-generated"));
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options, options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -61,7 +62,8 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
-        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 目录]");
+        Console.Error.WriteLine("      ForwardCheck sample|assemblies --binary 原生库 --metadata 元数据文件 [--count 个数] [--seed 种子] [--out 生成目录]");
+        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 副本目录] [--emit-generated 生成目录]");
         Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;

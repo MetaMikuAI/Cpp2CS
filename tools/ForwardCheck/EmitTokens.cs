@@ -64,9 +64,7 @@ internal sealed partial class SrmMetadata
     internal static ImmutableArray<byte> EncodeType(Cpp2CS.Facts.ModelMetadata facts, EntityRef caller, EntityRef entity,
         Func<int, EntityHandle> definitionHandle)
     {
-        if (entity.Kind != EntityKind.Type || (ulong)entity.Key >= (ulong)facts.Model.RuntimeTypes.Count)
-            throw Unresolved($"局部变量类型实体 {entity}");
-        var type = facts.Model.RuntimeTypes[(int)entity.Key];
+        var type = facts.Keys.DescribeType(entity) ?? throw Unresolved($"局部变量类型实体 {entity}");
         var blob = new BlobBuilder();
         WriteType(type is M.ReferenceType reference ? reference.Element : type);
         return blob.ToImmutableArray();
