@@ -37,7 +37,7 @@ public sealed record RuntimeOperation(string Id, ImmutableArray<string> Symbols,
 {
     /// <summary>纯函数：结果是哪个具名函数，作用在前几个整数实参上。</summary>
     public RuntimeFunction Function { get; init; }
-    /// <summary>原型使用的前几个整数实参槽。这份登记中的原型没有栈、浮点或间接结果实参。</summary>
+    /// <summary>核对包装须原样转交的前几个整数实参槽。同一操作的多个原型取并集，均无栈、浮点或间接结果实参。</summary>
     public int Arguments { get; init; } = -1;
     /// <summary>结果是第 0 个实参所指的元数据槽在初始化之后的内容（类指针、方法、字符串等运行时对象的指针）。</summary>
     public bool ReturnsSlot { get; init; }
@@ -88,9 +88,11 @@ public static class RuntimeOperations
             Returns: true, Observable: false, Idempotent: true, ExceptionKind.None, "方法结构", "输入的方法结构", "填充方法上下文表",
             "vm/ClassInlines.cpp: InitRgctxFromCodegenSlow 调用 GenericMethod::InflateRGCTX 后返回原方法")
             { Arguments = 1, ReturnsArgument = true },
-        new("gc.write-barrier", ["_Z25Il2CppCodeGenWriteBarrierPPvS_"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
-            Idempotent: true, ExceptionKind.None, "被写位置的地址、写入的引用", "无", "通知垃圾回收器这个位置被写过；只改回收器的私有状态，不写托管位置（存入本身由生成代码完成）",
-            "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier；gc/BoehmGC.cpp: GarbageCollector::SetWriteBarrier") { Arguments = 2 },
+        new("gc.write-barrier", ["_Z25Il2CppCodeGenWriteBarrierPPvS_", "_ZN6il2cpp2gc16GarbageCollector15SetWriteBarrierEPPv",
+            "_ZN6il2cpp2gc16GarbageCollector15SetWriteBarrierEPPvm"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
+            Idempotent: true, ExceptionKind.None, "被写位置的地址；生成代码入口另取写入的引用，范围重载另取字节数", "无",
+            "通知回收器相应位置已写入，只改回收器私有状态。托管存入由调用者完成",
+            "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier；gc/BoehmGC.cpp、gc/GarbageCollector.cpp: SetWriteBarrier。语料 DWARF 的两个重载分别取 void** 和 (void**, size_t)") { Arguments = 2 },
         new("type.is-instance", ["_Z6IsInstP12Il2CppObjectP11Il2CppClass", "_ZN6il2cpp2vm6Object6IsInstEP12Il2CppObjectP11Il2CppClass"], RuntimeEffect.Pure, Returns: true,
             Observable: false, Idempotent: true, ExceptionKind.None, "对象、类", "对象可以当作该类使用时是对象自己，否则为空", "无；只读对象的类与类的继承、接口数据（运行时不可变）",
             "codegen/il2cpp-codegen-il2cpp.cpp: IsInst；vm/Object.cpp: Object::IsInst（导入类型与 Windows 运行时的分支在本平台不出现）")

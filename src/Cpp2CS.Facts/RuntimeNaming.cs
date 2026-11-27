@@ -10,7 +10,7 @@ public sealed record RuntimeName(ImmutableArray<string> Symbols, string Basis, i
     public AdmissionStrength? Strength { get; init; }
     public ulong? ReferenceClass { get; init; }
     public string? ReferenceBuild { get; init; }
-    public RuntimeOperation? Operation { get; } = RuntimeFingerprint.RegisteredOperation(Symbols);
+    public RuntimeOperation? Operation => RuntimeFingerprint.RegisteredOperation(Symbols);
     public string Name => Symbols.Length == 1 ? Symbols[0] : Operation?.Id ??
         (ReferenceClass is ulong id ? $"参照类 0x{id:x}（{Symbols.Length} 个符号）" : string.Join(" / ", Symbols));
 }
