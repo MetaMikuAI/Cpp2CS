@@ -30,13 +30,26 @@ public static class OperationCatalog
 
     private static CatalogEntry E(string id, string il, string summary, StackClass[] operands, TemplateStep[] steps, TemplateValue? result,
         ResultKind kind, string translation, string runtime, string standard, bool sameKind = false,
-        VariantCondition condition = VariantCondition.None, bool fromSignature = false, int impliedBits = 0, bool impliedReference = false) =>
+        VariantCondition condition = VariantCondition.None, bool fromSignature = false, ScalarStorage? storage = null) =>
         new(id, il, summary, [.. operands], sameKind, condition, [.. steps], result, kind, new(translation, runtime, "ECMA-335 " + standard))
-        { OperandsFromSignature = fromSignature, ImpliedBits = impliedBits, ImpliedReference = impliedReference };
+        { OperandsFromSignature = fromSignature, Storage = storage };
 
     private static readonly StackClass[] None = [];
     private static readonly StackClass[] Integers = [StackClass.Integer, StackClass.Integer];
     private static readonly StackClass[] Floats = [StackClass.Float, StackClass.Float];
+
+    /// <summary>ldind 与 stind 和对应标量的 ldobj 与 stobj 有相同的读写，存储类型由助记符给出。</summary>
+    private static IEnumerable<CatalogEntry> Indirect(string suffix, ScalarStorage storage, string cpp, bool loadOnly = false)
+    {
+        string load = "ldind." + suffix;
+        yield return E(load, load, "间接读取并扩到栈上位宽", [StackClass.ByRef], [Read(LocationKind.Address, P0)],
+            Loaded(S(0)), ResultKind.Subject, $"*(({cpp}*)p)", "—", "III.3.42 ldind.<type>", storage: storage);
+        if (loadOnly) yield break;
+        string store = "stind." + suffix;
+        yield return E(store, store, "按存储类型间接写入", [StackClass.ByRef, StackClass.Assignable],
+            [Write(LocationKind.Address, Stored(P1), P0)], null, ResultKind.None, $"*(({cpp}*)p) = ({cpp})v",
+            storage.Kind == StackKind.Object ? "引用写入的写屏障不可观察" : "—", "III.3.62 stind.<type>", storage: storage);
+    }
 
     private static CatalogEntry Shift(string il, ValueOp op, string symbol, string standard) =>
         E(il, il, "移位量不小于位宽时结果未定义", [StackClass.Integer, StackClass.Int32], [],
@@ -91,6 +104,8 @@ public static class OperationCatalog
             "语料 Construction.ThrowEither：((String_t*)il2cpp_codegen_initialize_runtime_metadata_inline((uintptr_t*)&_stringLiteral8739…))",
             $"{Codegen}: il2cpp_codegen_initialize_runtime_metadata_inline；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 的 kIl2CppMetadataUsageStringLiteral（GetStringLiteralFromIndex）",
             "III.4.16 ldstr"),
+        E("dup", "dup", "复制栈顶的值", [StackClass.Any], [Do(StepKind.PushOperand)], P0, ResultKind.SameAsOperand,
+            "语料 Passing.RewriteLarge：int64_t* L_1 = L_0", "—", "III.3.33 dup"),
         E("pop", "pop", "丢弃栈顶", [StackClass.Any], [], null, ResultKind.None, "（不生成代码）", "—", "III.3.54 pop"),
 
         // ---- 算术与位运算 ----
@@ -134,7 +149,18 @@ public static class OperationCatalog
         E("conv.r8.float", "conv.r8", "浮点转 double", [StackClass.Float], [], V(ValueOp.FloatToDouble, P0), ResultKind.Float64,
             "(double)a", "—", "III.3.27 conv"),
 
-        // ---- 字段 ----
+        // ---- 间接读写与字段。语料 Passing.RewriteLarge：读取 *((int64_t*)L_1)，更新后写回同址。 ----
+        .. Indirect("i1", new(StackKind.Int32, 8, true), "int8_t"),
+        .. Indirect("u1", new(StackKind.Int32, 8, false), "uint8_t", loadOnly: true),
+        .. Indirect("i2", new(StackKind.Int32, 16, true), "int16_t"),
+        .. Indirect("u2", new(StackKind.Int32, 16, false), "uint16_t", loadOnly: true),
+        .. Indirect("i4", new(StackKind.Int32, 32, true), "int32_t"),
+        .. Indirect("u4", new(StackKind.Int32, 32, false), "uint32_t", loadOnly: true),
+        .. Indirect("i8", new(StackKind.Int64, 64, true), "int64_t"),
+        .. Indirect("i", new(StackKind.NativeInt, 0, true), "intptr_t"),
+        .. Indirect("r4", new(StackKind.Float32, 32, false), "float"),
+        .. Indirect("r8", new(StackKind.Float64, 64, false), "double"),
+        .. Indirect("ref", new(StackKind.Object, 0, false), "RuntimeObject*"),
         E("ldobj", "ldobj", "读指针所指的值", [StackClass.ByRef], [Read(LocationKind.Address, P0)], Loaded(S(0)), ResultKind.Subject,
             "*p", "—", "III.4.13 ldobj"),
         E("stobj", "stobj", "写指针所指的值", [StackClass.ByRef, StackClass.Assignable], [Write(LocationKind.Address, Stored(P1), P0)],
@@ -171,17 +197,17 @@ public static class OperationCatalog
             [ThrowIfNull(P0), ThrowIf(V(ValueOp.Not, V(ValueOp.UnsignedLess, P1, Named(RuntimeFunction.ArrayLength, P0))), ExceptionKind.IndexOutOfRange),
                 Read(LocationKind.ArrayElement, P0, P1)],
             S(2), ResultKind.Int32, "NullCheck(a); a->GetAt(i)（GetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK 与读取）",
-            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK", "III.4.8 ldelem.<type>", impliedBits: 32),
+            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK", "III.4.8 ldelem.<type>", storage: new ScalarStorage(StackKind.Int32, 32, true)),
         E("stelem.i4", "stelem.i4", "写 int32 数组的元素", [StackClass.Object, StackClass.Int32, StackClass.Int32],
             [ThrowIfNull(P0), ThrowIf(V(ValueOp.Not, V(ValueOp.UnsignedLess, P1, Named(RuntimeFunction.ArrayLength, P0))), ExceptionKind.IndexOutOfRange),
                 Write(LocationKind.ArrayElement, P2, P0, P1)],
             null, ResultKind.None, "NullCheck(a); a->SetAt(i, v)（SetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK 与写入）",
-            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK", "III.4.27 stelem.<type>", impliedBits: 32),
+            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK", "III.4.27 stelem.<type>", storage: new ScalarStorage(StackKind.Int32, 32, true)),
         E("ldelem.ref", "ldelem.ref", "读对象引用数组的元素", [StackClass.Object, StackClass.Int32],
             [ThrowIfNull(P0), ThrowIf(OutOfBounds(P0, P1), ExceptionKind.IndexOutOfRange), Read(LocationKind.ArrayElement, P0, P1)],
             S(2), ResultKind.Object,
             "语料 ArrayStore.StoreThenLoad：NullCheck(L_3); (L_3)->GetAt(static_cast<il2cpp_array_size_t>(L_5))（GetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK 与读取）",
-            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK；数组结构体的 GetAt", "III.4.8 ldelem.<type>", impliedReference: true),
+            $"{Codegen}: NullCheck, IL2CPP_ARRAY_BOUNDS_CHECK；数组结构体的 GetAt", "III.4.8 ldelem.<type>", storage: new ScalarStorage(StackKind.Object, 0, false)),
         // 三个检查的先后照生成代码：判空，类型（ArrayElementTypeCheck），越界（SetAt 里的 IL2CPP_ARRAY_BOUNDS_CHECK）。
         // 几种异常同时成立时以本运行时的先后为准（设计 16.2）。元素类型是密封类时生成代码不写 ArrayElementTypeCheck：
         // 那时类型检查在可验证的 IL 上不会成立，由类型事实证明，模板不变。
@@ -197,7 +223,7 @@ public static class OperationCatalog
             "语料 ArrayStore.StoreObject：NullCheck(L_0); ArrayElementTypeCheck (L_0, L_2); (L_0)->SetAt(static_cast<il2cpp_array_size_t>(L_1), (RuntimeObject*)L_2)"
                 + "（SetAt 内是 IL2CPP_ARRAY_BOUNDS_CHECK、写入与写屏障）；ArrayStore.StoreString（元素类型 String 是密封类）只有 NullCheck 与 SetAt",
             $"{Codegen}: NullCheck, ArrayElementTypeCheck（value != NULL 且 IsInst(value, array->klass->element_class) == NULL 时抛出 ArrayTypeMismatchException）, IL2CPP_ARRAY_BOUNDS_CHECK；数组结构体的 SetAt",
-            "III.4.27 stelem.<type>", impliedReference: true),
+            "III.4.27 stelem.<type>", storage: new ScalarStorage(StackKind.Object, 0, false)),
         E("ldlen", "ldlen", "数组的长度，本机无符号整数", [StackClass.Object],
             [ThrowIfNull(P0)], Named(RuntimeFunction.ArrayLengthNative, P0), ResultKind.NativeInt,
             "语料 ArrayStore.StoreLengthLoop：NullCheck(L_5); ((RuntimeArray*)L_5)->max_length（il2cpp_array_size_t，指针宽）",

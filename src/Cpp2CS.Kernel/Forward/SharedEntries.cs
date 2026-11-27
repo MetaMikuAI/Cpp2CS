@@ -20,8 +20,8 @@ public static class NativeEntryQueries
         (facts as IGenericEntryFacts)?.GenericEntry(method);
 
     /// <summary>生成签名末尾的 RuntimeMethod* 占下一个整数槽。向量槽不计入，聚合体按实际占用的槽计数。</summary>
-    internal static Slot MethodArgumentSlot(ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>> parameters) =>
-        new(SlotKind.Integer, parameters.Sum(p => p.Count(piece => piece.Slot.Kind == SlotKind.Integer)));
+    internal static Slot MethodArgumentSlot(ImmutableArray<Passing> parameters) =>
+        new(SlotKind.Integer, parameters.Sum(p => p.Pieces.Count(piece => piece.Slot.Kind == SlotKind.Integer)));
 
     /// <summary>先由登记在共享入口的各个签名确定槽位，以免把另一个签名未使用的寄存器当作隐含实参。</summary>
     public static Slot? SharedMethodSlot(ImmutableArray<MethodShape> candidates, out string reason)

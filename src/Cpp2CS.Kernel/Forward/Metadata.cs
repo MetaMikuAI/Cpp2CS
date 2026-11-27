@@ -11,6 +11,9 @@ namespace Cpp2CS.Kernel.Forward;
 /// </summary>
 public sealed record TypeShape(StackKind Kind, int StorageBits, bool Signed, EntityRef Entity)
 {
+    internal static TypeShape? Implied(CatalogEntry entry, int pointerBits) => entry.Storage is { } storage
+        ? new(storage.Kind, storage.Bits == 0 ? pointerBits : storage.Bits, storage.Signed, default) : null;
+
     /// <summary>在求值栈上的位宽。</summary>
     public int StackBits => Kind == StackKind.Int32 ? 32 : StorageBits;
     /// <summary>存储只取 0 与 1：生成代码把 System.Boolean 写成 C++ 的 bool，调用约定规定它的取值只有这两个（设计 16.2）。</summary>

@@ -25,6 +25,9 @@ public enum Verdict : byte
 /// <summary>共同执行的结果。Assumptions 是用到的有定义条件（设计 9.1）。</summary>
 public sealed record ProofResult(Verdict Verdict, string Detail, int Paths, int Steps, ImmutableArray<string> Assumptions);
 
+/// <summary>一个值的放法。Indirect 为零时按低位到高位拼接各段，否则唯一的槽里是指向 Indirect 个字节的地址。</summary>
+public readonly record struct Passing(ImmutableArray<(Slot Slot, int Bits)> Pieces, int Indirect);
+
 /// <summary>
 /// 共同执行（设计 9.3）：现场（原生快照）与模板（按目录展开的效果图）从入口出发，在共享的路径条件下同步推进。
 /// 两侧的值都写成现场一侧的项：模板的形参按调用约定绑定到入口槽位，事件的结果在事件对上之后绑定。
@@ -59,7 +62,7 @@ public sealed partial class CoExecution
     /// Continue 是模板在这次调用之后的位置，Result 是模板里代表调用结果的项。
     /// </summary>
     private sealed record Inner(MethodSnapshot Snapshot, Side Side, Term StackPointer, int Instance,
-        ImmutableDictionary<long, Term> Frame, int FrameGeneration, Side Continue, Term? Result, ImmutableArray<(Slot Slot, int Bits)>? Returned);
+        ImmutableDictionary<long, Term> Frame, int FrameGeneration, Side Continue, Term? Result, Passing? Returned);
 
     private sealed record State(Side Native, Side Template, PathConditions Conditions, int Epoch, int Serial, int FrameGeneration,
         ImmutableList<Store> NativeWrites, ImmutableList<Store> TemplateWrites, ImmutableDictionary<long, Term> Frame)
@@ -122,6 +125,7 @@ public sealed partial class CoExecution
 
     /// <summary>模板一侧是写出的方法体：恒无定义的路径是反驳。</summary>
     private bool output;
+    private bool checkHomogeneous;
 
     private CoExecution(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
         Func<ulong, MethodSnapshot?>? snapshots, int budget)
@@ -145,14 +149,15 @@ public sealed partial class CoExecution
     /// 核对一个方法：原生快照与它的真实 IL 按目录展开的效果图是否等价。两张图须建在同一个项池里，模板的图号大于 0。
     /// snapshots 按入口地址给出别的方法的快照（可以属于别的项池），展开调用时使用；没有时为空。
     /// output：模板一侧是写出的方法体（待证的一方），不是真实 IL。它在现场走得到的路径上没有定义时是反驳，不是通过（设计 9.1）。
+    /// checkHomogeneous 仅用于语料的正向及变异核对，检验同质浮点聚合体的放法（设计 7.10）。
     /// </summary>
     public static ProofResult Check(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
-        Func<ulong, MethodSnapshot?>? snapshots = null, int budget = 200_000, bool output = false)
+        Func<ulong, MethodSnapshot?>? snapshots = null, int budget = 200_000, bool output = false, bool checkHomogeneous = false)
     {
         CoExecution? engine = null;
         try
         {
-            engine = new CoExecution(native, template, body, facts, snapshots, budget) { output = output };
+            engine = new CoExecution(native, template, body, facts, snapshots, budget) { output = output, checkHomogeneous = checkHomogeneous };
             engine.Run();
             return new(Verdict.Proved, "", engine.paths, engine.steps, [.. engine.assumptions]);
         }
@@ -172,32 +177,41 @@ public sealed partial class CoExecution
     }
 
     /// <summary>
-    /// 托管签名的各形参与返回值落在哪些槽位：每个值是一串（槽位，位宽），依次是值的低位到高位，各取所在槽位的低位。
+    /// 托管签名的各形参与返回值的放法。私有区域的内容尚不可取时，经内存传递的值保持为洞。
     /// 整数、引用、地址依次占整数槽，浮点依次占向量槽；值类型按规格登记的传递方式（AggregateConvention）。
     /// 生成代码在末尾另有一个隐含的方法指针实参，不属于托管签名。经栈传递的实参尚未登记。
     /// </summary>
-    private static ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>> Convention(MethodShape method, out ImmutableArray<(Slot Slot, int Bits)>? result)
+    private ImmutableArray<Passing> Convention(MethodShape method, out Passing? result) =>
+        Convention(method, out result, checkHomogeneous);
+
+    private static ImmutableArray<Passing> Convention(MethodShape method, out Passing? result, bool checkHomogeneous)
     {
-        var slots = ImmutableArray.CreateBuilder<ImmutableArray<(Slot, int)>>(method.Parameters.Length);
+        var slots = ImmutableArray.CreateBuilder<Passing>(method.Parameters.Length);
         int integers = 0, vectors = 0;
-        foreach (var parameter in method.Parameters) slots.Add(Place(parameter, ref integers, ref vectors, "实参"));
+        foreach (var parameter in method.Parameters)
+        {
+            var passing = Place(parameter, ref integers, ref vectors, result: false, checkHomogeneous);
+            RequireContents(passing, "实参");
+            slots.Add(passing);
+        }
         if (integers > 7 || vectors > 8) throw new Refuted(Verdict.MissingFact, "经栈传递的实参没有登记");
         result = null;
         if (method.Return is { } returned)
         {
             // 返回值放在它作为第一个实参时所用的寄存器里（AAPCS64 §6.9）。
             int first = 0, firstVector = 0;
-            result = Place(returned, ref first, ref firstVector, "返回值");
+            result = Place(returned, ref first, ref firstVector, result: true, checkHomogeneous);
+            RequireContents(result.Value, "返回值");
         }
         return slots.MoveToImmutable();
     }
 
     /// <summary>一个值从第 integers 个整数槽、第 vectors 个向量槽起放在哪里。</summary>
-    private static ImmutableArray<(Slot Slot, int Bits)> Place(TypeShape type, ref int integers, ref int vectors, string what)
+    private static Passing Place(TypeShape type, ref int integers, ref int vectors, bool result, bool checkHomogeneous)
     {
         if (type.Kind != StackKind.Value)
-            return type.Kind is StackKind.Float32 or StackKind.Float64 ? [(new Slot(SlotKind.Vector, vectors++), type.StorageBits)]
-                : [(new Slot(SlotKind.Integer, integers++), type.StorageBits)];
+            return new(type.Kind is StackKind.Float32 or StackKind.Float64 ? [(new Slot(SlotKind.Vector, vectors++), type.StorageBits)]
+                : [(new Slot(SlotKind.Integer, integers++), type.StorageBits)], 0);
         var rules = AggregateConvention.Aapcs64;
         switch (rules.Classify(type.StorageBits, type.Members))
         {
@@ -207,27 +221,36 @@ public sealed partial class CoExecution
                 var pieces = ImmutableArray.CreateBuilder<(Slot, int)>(count);
                 for (int k = 0; k < count; k++) pieces.Add((new Slot(SlotKind.Integer, integers + k), Math.Min(slotBits, type.StorageBits - k * slotBits)));
                 integers += count;
-                return pieces.MoveToImmutable();
+                return new(pieces.MoveToImmutable(), 0);
             }
             case AggregatePlacement.VectorPerMember:
-                throw new Refuted(Verdict.MissingFact, $"同质浮点聚合体的{what}：放法已登记，语料里没有用例，尚未接入");
+            {
+                if (vectors + type.Members.Length > rules.VectorSlots)
+                    throw new Refuted(Verdict.MissingFact, "经栈传递的实参没有登记");
+                if (!checkHomogeneous)
+                    throw new Refuted(Verdict.MissingFact, $"同质浮点聚合体的{(result ? "返回值" : "实参")}：语料正向核对尚未全部通过");
+                var pieces = ImmutableArray.CreateBuilder<(Slot, int)>(type.Members.Length);
+                foreach (var member in type.Members) pieces.Add((new Slot(SlotKind.Vector, vectors++), member.Bits));
+                return new(pieces.MoveToImmutable(), 0);
+            }
             case AggregatePlacement.Reference:
-                throw new Refuted(Verdict.MissingFact, $"大于 {rules.MaximumInRegistersBytes} 字节的值类型{what}按引用传递，尚未接入");
+                var pointer = result ? new Slot(SlotKind.IndirectResult, 0) : new Slot(SlotKind.Integer, integers++);
+                return new([(pointer, rules.SlotBytes * 8)], type.StorageBits / 8);
             default:
-                throw new Refuted(Verdict.MissingFact, $"值类型{what}的成员未知，传递方式不能判定");
+                throw new Refuted(Verdict.MissingFact, $"值类型{(result ? "返回值" : "实参")}的成员未知，传递方式不能判定");
         }
     }
 
-    /// <summary>按调用约定取出一个值：各段依次是值的低位到高位，每段取所在槽位的低位。</summary>
-    private Term Gather(ImmutableArray<(Slot Slot, int Bits)> pieces, Func<Slot, Term> value)
+    private static void RequireContents(Passing passing, string what)
     {
-        if (pieces.Length == 1) return terms.Slice(value(pieces[0].Slot), 0, pieces[0].Bits);
-        var parts = new Term[pieces.Length];
-        for (int i = 0; i < parts.Length; i++) parts[i] = terms.Slice(value(pieces[i].Slot), 0, pieces[i].Bits);
-        return terms.Concat(parts);
+        if (passing.Indirect != 0)
+            throw new Refuted(Verdict.MissingFact, $"大于 {AggregateConvention.Aapcs64.MaximumInRegistersBytes} 字节的值类型{what}按引用传递，尚未接入");
     }
 
-    private ImmutableDictionary<Term, Term> NativeEntryEnvironment(MethodShape host, ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>> convention)
+    private Term Gather(Passing passing, Func<Slot, Term> value) =>
+        EngineFacts.Gather(terms, passing, value) ?? throw new Refuted(Verdict.MissingFact, "槽位未覆盖值的全部位");
+
+    private ImmutableDictionary<Term, Term> NativeEntryEnvironment(MethodShape host, ImmutableArray<Passing> convention)
     {
         var env = ImmutableDictionary<Term, Term>.Empty;
         if (facts.GenericEntry(host.Entity) is { } generic &&
@@ -244,10 +267,10 @@ public sealed partial class CoExecution
         var env = ImmutableDictionary<Term, Term>.Empty;
         foreach (var parameter in template.EntryParameters)
         {
-            var pieces = convention[parameter.Slot.Index];
+            var passing = convention[parameter.Slot.Index];
             // 入口事实：C++ 的 bool 只取 0 与 1，值就是最低位（设计 7.7、16.2）。
             env = env.SetItem(parameter, method.Parameters[parameter.Slot.Index].TwoValued
-                ? terms.ZeroExtend(terms.Slice(Entry(pieces[0].Slot), 0, 1), pieces[0].Bits) : Gather(pieces, Entry));
+                ? terms.ZeroExtend(terms.Slice(Entry(passing.Pieces[0].Slot), 0, 1), passing.Pieces[0].Bits) : Gather(passing, Entry));
         }
         var conditions = PathConditions.Empty(terms);
         // 入口处成立的文字（设计 7.7）：实例方法的 this 非空；类型初始化器里所属类的初始化已触发。
@@ -1508,7 +1531,7 @@ public sealed partial class CoExecution
             for (int i = 0; i < convention.Length; i++)
             {
                 int offset = 0;
-                foreach (var (at, bits) in convention[i])
+                foreach (var (at, bits) in convention[i].Pieces)
                 {
                     if (at == slot)
                     {

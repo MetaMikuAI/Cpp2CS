@@ -265,8 +265,10 @@ public sealed class IlExpander
 
         // 适用的目录项必须恰好一个。
         CatalogEntry? chosen = null;
+        var declared = context.Subject;
         foreach (var candidate in candidates)
         {
+            context.Subject = declared ?? TypeShape.Implied(candidate, pointerBits);
             if (!Holds(candidate.Condition, context)) continue;
             // 构造函数的 this 由模板给出，不在栈上。
             int skip = candidate.Constructs ? 1 : 0;
@@ -298,12 +300,21 @@ public sealed class IlExpander
             throw new ExpansionException("目录里没有适用的变体", $"{opcode.Canonical}，栈顶 [{stack}]", instruction.Offset);
         }
         used.Add((instruction.Offset, chosen.Id));
+        context.Subject = declared ?? TypeShape.Implied(chosen, pointerBits);
 
         int operandCount = chosen.OperandsFromSignature ? context.Method!.Parameters.Length - (chosen.Constructs ? 1 : 0) : chosen.Operands.Length;
         context.Operands = [.. state.Stack.Skip(state.Stack.Count - operandCount)];
+        // ECMA-335 III.3.42、III.3.62：间接读写的类型须与地址所指的存储相容。
+        if (chosen.Storage != null && chosen.Operands is [StackClass.ByRef, ..])
+        {
+            var pointee = context.Operands[0].Pointee;
+            if (pointee == default)
+                throw new ExpansionException("间接读写的指针目标类型未知", opcode.Name, instruction.Offset);
+            var target = metadata.Type(pointee);
+            if (target.Kind != context.Subject!.Kind || target.StorageBits != context.Subject.StorageBits)
+                throw new ExpansionException("间接读写的类型与指针目标不相容", opcode.Name, instruction.Offset);
+        }
         state.Stack.RemoveRange(state.Stack.Count - operandCount, operandCount);
-        if (chosen.ImpliedBits > 0) context.Subject = new TypeShape(StackKind.Int32, chosen.ImpliedBits, true, default);
-        if (chosen.ImpliedReference) context.Subject = new TypeShape(StackKind.Object, pointerBits, false, default);
         context.Steps = new Term?[chosen.Steps.Length];
 
         for (int s = 0; s < chosen.Steps.Length; s++)
@@ -370,6 +381,7 @@ public sealed class IlExpander
                 case StepKind.Require:
                     Emit(block, new(EffectKind.Require, [values[0]], [], chosen.Id, instruction.Offset));
                     break;
+                case StepKind.PushOperand: state.Stack.Add(context.Operands[0]); break;
                 case StepKind.StoreLocal: state.Locals[instruction.Operand] = values[0]; break;
                 case StepKind.StoreArgument: state.Arguments[instruction.Operand] = values[0]; break;
                 case StepKind.Jump:

@@ -118,8 +118,8 @@ internal sealed partial class TemplateSearch
                 {
                     if (!types.TryGetValue(array, out var arrayType) || arrayType.Kind != StackKind.Object ||
                         facts.Metadata.ElementOf(arrayType.Entity) is not { } element || element.StorageBits != effect.Width) continue;
-                    if (entry.ImpliedReference && element.Kind != StackKind.Object ||
-                        entry.ImpliedBits > 0 && (element.StorageBits != entry.ImpliedBits || element.Kind != StackKind.Int32)) continue;
+                    if (entry.Storage is { } storage && (element.Kind != storage.Kind ||
+                        storage.Bits > 0 && element.StorageBits != storage.Bits)) continue;
                     foreach (var subscript in Indices(address, array, element.StorageBits / 8))
                         yield return new(element, [array, subscript]);
                 }

@@ -236,6 +236,7 @@ internal static class NativeCheck
         var proved = new List<(string Name, ulong Address, string Signature, string Il)>();
         var bodies = new List<(string Name, string Signature, string Il, Module Module, MethodBody Body)>();
         var mutations = new List<(string Name, bool Refuted, string Detail)>();
+        var passingMutations = new List<(string Name, bool Control, bool Refuted, string Detail)>();
         int indistinguishable = 0;
         var assumed = new SortedDictionary<string, int>(StringComparer.Ordinal);
         long steps = 0, paths = 0;
@@ -285,7 +286,16 @@ internal static class NativeCheck
             string signature = method.GetProperty("signature_blob").GetString()!, il = method.GetProperty("il_hex").GetString()!;
             bodies.Add((name, signature, il, metadata.Load(Path.GetFileNameWithoutExtension(method.GetProperty("assembly").GetString()!))!, body));
             facts.BeginCheck();
-            var result = CoExecution.Check(snapshot, expansion.Graph, body, facts, Snapshot);
+            var result = CoExecution.Check(snapshot, expansion.Graph, body, facts, Snapshot, checkHomogeneous: true);
+            if (PassingMutation(name, body) is { } changedPassing)
+            {
+                var changed = IlExpander.Expand(changedPassing, metadata.Facts, metadata.Tokens(bodies[^1].Module, body.Method.Entity),
+                    snapshot.Terms, 2, snapshot.PointerBits);
+                var control = CoExecution.Equivalent(expansion.Graph, changed.Graph, body, facts);
+                var check = CoExecution.Check(snapshot, changed.Graph, changedPassing, facts, Snapshot, output: true, checkHomogeneous: true);
+                passingMutations.Add((name, DifferentObservation(control), result.Verdict == Verdict.Proved && DifferentObservation(check),
+                    $"真实 IL 对变异 IL：{control.Detail}；现场对变异 IL：{check.Verdict} {check.Detail}"));
+            }
             if (result.Verdict == Verdict.Proved) proved.Add((name, address, signature, il));
             if (result.Verdict == Verdict.Proved)
                 foreach (var (offset, change, changed) in FrameMutations(body, expansion))
@@ -295,7 +305,7 @@ internal static class NativeCheck
                     // 只有原始 IL 与变异 IL 在观察点确有不同，才要求现场也能区分。死写入与等价的局部重命名不能作反例。
                     var control = CoExecution.Equivalent(expansion.Graph, graph.Graph, body, facts);
                     if (!DifferentObservation(control)) { indistinguishable++; continue; }
-                    var check = CoExecution.Check(snapshot, graph.Graph, changed, facts, Snapshot, output: true);
+                    var check = CoExecution.Check(snapshot, graph.Graph, changed, facts, Snapshot, output: true, checkHomogeneous: true);
                     mutations.Add(($"{name} 0x{address:x} IL_{offset:x4} {change}", DifferentObservation(check), check.Detail));
                 }
             steps += result.Steps;
@@ -321,7 +331,8 @@ internal static class NativeCheck
                 var snapshot = lifter.Lift(address).Snapshot!;
                 var expansion = IlExpander.Expand(other.Body, metadata.Facts, metadata.Tokens(other.Module, other.Body.Method.Entity), snapshot.Terms, 1, 64);
                 crossed++;
-                if (CoExecution.Check(snapshot, expansion.Graph, other.Body, facts, Snapshot).Verdict == Verdict.Proved) accepted.Add($"{name} 的原生代码 ≡ {other.Name} 的 IL");
+                if (CoExecution.Check(snapshot, expansion.Graph, other.Body, facts, Snapshot, checkHomogeneous: true).Verdict == Verdict.Proved)
+                    accepted.Add($"{name} 的原生代码 ≡ {other.Name} 的 IL");
                 else refuted++;
             }
 
@@ -336,13 +347,38 @@ internal static class NativeCheck
         Console.WriteLine($"  地址变异：IL 对照有差异 {mutations.Count} 个，原生核对被反驳 {mutations.Count(m => m.Refuted)} 个；IL 对照未取得差异 {indistinguishable} 个");
         foreach (var mutation in mutations)
             Console.WriteLine($"    {mutation.Name}：{(mutation.Refuted ? "反驳" : "未取得反驳")} {mutation.Detail}");
+        if (passingMutations.Count > 0)
+        {
+            Console.WriteLine($"  传递变异：IL 对照有差异 {passingMutations.Count(m => m.Control)}/{passingMutations.Count}，原生核对被反驳 {passingMutations.Count(m => m.Refuted)}/{passingMutations.Count}");
+            foreach (var mutation in passingMutations) Console.WriteLine($"    {mutation.Name}：{mutation.Detail}");
+        }
         foreach (var group in outcomes.GroupBy(o => o.Class).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             Console.WriteLine($"{group.Key}（{group.Count()}）");
             foreach (var outcome in group)
                 Console.WriteLine($"  {outcome.Category,-12} {outcome.Name[(outcome.Name.IndexOf("::", StringComparison.Ordinal) + 2)..],-22} {outcome.Detail}");
         }
-        return mutations.All(m => m.Refuted) ? 0 : 1;
+        return mutations.All(m => m.Refuted) && passingMutations.All(m => m.Control && m.Refuted) ? 0 : 1;
+    }
+
+    /// <summary>语料 M2 去掉写回，M3 从调用后读取另一份同类型的零初始化局部。原方法均为直线 IL。</summary>
+    private static MethodBody? PassingMutation(string name, MethodBody body)
+    {
+        if (name is not ("Corpus.Passing::RewriteLarge" or "Corpus.Passing::UseLocalAfterCall")) return null;
+        var instructions = IlDecoder.Decode(body.Code.AsSpan());
+        if (instructions[..^1].Any(i => i.Opcode.Flow != Cpp2CS.Spec.IL.FlowKind.Next) || instructions[^1].Opcode.Canonical != "ret")
+            throw new InvalidDataException($"{name} 的真实 IL 不符合直线变异的前提");
+        if (name == "Corpus.Passing::RewriteLarge")
+        {
+            var store = instructions.Single(i => i.Opcode.Canonical == "stind.i8");
+            return body with { Code = [.. body.Code[..store.Offset], 0x26, 0x26, .. body.Code[store.Next..]] };
+        }
+        var call = instructions.Single(i => i.Opcode.Canonical == "call");
+        var load = instructions.Single(i => i.Offset >= call.Next && i.Opcode.Canonical == "ldloc");
+        if (!body.InitLocals) throw new InvalidDataException($"{name} 的新局部没有零初始化保证");
+        byte local = checked((byte)body.Locals.Length);
+        return body with { Locals = body.Locals.Add(body.Locals[(int)load.Operand]),
+            Code = [.. body.Code[..load.Offset], 0x11, local, .. body.Code[load.Next..]] };
     }
 
     private static bool DifferentObservation(ProofResult result) => result.Verdict == Verdict.Insufficient

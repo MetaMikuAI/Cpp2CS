@@ -203,6 +203,8 @@ public enum StepKind : byte
     /// <summary>按选择子去跳转表里的目标；超出表的范围去下一条指令。</summary>
     Switch,
     Return,
+    /// <summary>把第一个操作数原样压回栈（dup），保留指针的目标类型。</summary>
+    PushOperand,
 }
 
 /// <summary>模板里的一步。Values 的含义随种类而定：位置的基在前，被写的值、实参在后。</summary>
@@ -228,6 +230,9 @@ public sealed record Deviation(string Condition, string Standard, bool Implement
 /// <summary>出处：il2cpp 对这条指令的翻译、运行时头文件里的位置、标准里的条目。</summary>
 public sealed record Provenance(string Translation, string Runtime, string Standard);
 
+/// <summary>助记符规定的存储类型。Bits 为 0 时取目标的指针位宽。</summary>
+public readonly record struct ScalarStorage(StackKind Kind, int Bits, bool Signed);
+
 /// <summary>
 /// 操作目录的一项：一个托管操作。Id 是它的标识，声明只引用标识。
 /// Il 是下降时写出的指令（各形式的规范助记符）；Operands 与 Condition 是适用条件；
@@ -238,10 +243,8 @@ public sealed record CatalogEntry(string Id, string Il, string Summary, Immutabl
 {
     /// <summary>操作数取自方法签名（调用）而不是 Operands。</summary>
     public bool OperandsFromSignature { get; init; }
-    /// <summary>助记符里写明的元素类型的存储位宽（ldelem.i4 的 32）；没有则为 0。</summary>
-    public int ImpliedBits { get; init; }
-    /// <summary>助记符写明元素是对象引用（ldelem.ref、stelem.ref）：存储位宽是指针位宽。</summary>
-    public bool ImpliedReference { get; init; }
+    /// <summary>助记符里写明的存储类型，供数组元素与间接读写取用。</summary>
+    public ScalarStorage? Storage { get; init; }
     /// <summary>方法操作数是构造函数：this 由模板里“新对象”一步的结果给出，栈上只有其余的实参；结果是新对象。</summary>
     public bool Constructs { get; init; }
     /// <summary>下降时不写出指令：空操作的 IL 写法为空（设计 9.1），Il 只在取模板时使用。</summary>
