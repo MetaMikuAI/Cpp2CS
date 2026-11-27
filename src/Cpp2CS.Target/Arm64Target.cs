@@ -73,12 +73,15 @@ public sealed class Arm64Target
     LiftResult Lift(ulong entry, Frame f, LiftLocations? locations, Dictionary<ulong, string> unconfirmed)
     {
         if (locations != null) { locations.UnresolvedBranch = null; locations.BranchReason = null; }
-        var sites = Unwind.Sites(f);
+        CallSite[] sites;
+        try { sites = Unwind.Sites(f); }
+        catch (InvalidDataException error) { return new(null, $"调用点表无效：{error.Message}"); }
+        if (sites.Any(site => site.Specification)) return new(null, "调用点带异常说明");
         var targets = new HashSet<ulong>();
         var tails = new Dictionary<ulong, ulong>();
         var instructions = new Dictionary<ulong, Instruction>();
         var tables = new Dictionary<ulong, JumpTableInfo>();
-        var pads = new Dictionary<ulong, ulong>();
+        var pads = new Dictionary<ulong, CallSite>();
         var pending = new Stack<ulong>();
         pending.Push(entry);
         bool Inside(ulong pc) => pc >= f.Start && pc < f.End && (pc & 3) == 0;
@@ -128,7 +131,7 @@ public sealed class Arm64Target
                     if (site.Landing != 0)
                     {
                         if (!Inside(site.Landing) || !Inside(pc + 4)) return new(null, "展开边越出 FDE");
-                        pads.Add(pc, site.Landing); Edge(site.Landing); Edge(pc + 4); break;
+                        pads.Add(pc, site); Edge(site.Landing); Edge(pc + 4); break;
                     }
                     if (pc + 4 == f.End) break;
                 }
@@ -260,9 +263,16 @@ public sealed class Arm64Target
                 if (i.IsCall)
                 {
                     var target = i.Form == Form.Call ? builder.Terms.Bits(i.Destination(pc), 64) : state.G(i.N);
-                    bool invoke = pads.TryGetValue(pc, out ulong pad);
+                    bool invoke = pads.TryGetValue(pc, out var site);
                     var unwind = state.Call(target, pc, invoke);
-                    if (invoke) { builder.Terminate(b, Terminator.Invoke(To(pc + 4), Exit.To(Block(pad), Out(pad, unwind)), pc)); break; }
+                    if (invoke)
+                    {
+                        var normal = To(pc + 4);
+                        var landing = Exit.To(Block(site.Landing), Out(site.Landing, unwind));
+                        builder.Terminate(b, Terminator.Invoke(normal, landing,
+                            [.. site.Clauses.Select(c => (c.Selector, c.TypeInfo))], site.Cleanup, pc));
+                        break;
+                    }
                     if (pc + 4 == f.End) { builder.Terminate(b, Terminator.Single(Exit.NoReturn, pc)); break; }
                 }
                 else state.Apply(i, pc);

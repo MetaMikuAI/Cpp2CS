@@ -85,7 +85,7 @@ internal static class LiveRows
     }
 
     public static Dictionary<ulong, int[]> Compute(HashSet<ulong> heads, Dictionary<ulong, Instruction> code,
-        Dictionary<ulong, ulong> pads, Dictionary<ulong, JumpTableInfo> tables, ulong end)
+        Dictionary<ulong, CallSite> pads, Dictionary<ulong, JumpTableInfo> tables, ulong end)
     {
         var blocks = new Dictionary<ulong, (UInt128 Use, UInt128 Def, List<ulong> Next)>();
         var live = new Dictionary<ulong, UInt128>();
@@ -110,7 +110,7 @@ internal static class LiveRows
                 }
                 if ((i.Form == Form.Branch || i.Conditional) && code.ContainsKey(i.Destination(pc))) next.Add(i.Destination(pc));
                 if (i.Form == Form.Branch || pc + 4 == end) break;
-                if (pads.TryGetValue(pc, out var pad)) next.Add(pad);
+                if (pads.TryGetValue(pc, out var site)) next.Add(site.Landing);
                 if (heads.Contains(pc + 4)) { next.Add(pc + 4); break; }
             }
             blocks.Add(start, (use, def, next)); live.Add(start, use);

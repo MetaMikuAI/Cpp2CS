@@ -28,6 +28,8 @@ internal static class Program
         {
             case "sample":
                 return Sample.Run(arguments);
+            case "unwind" when options.TryGetValue("--binary", out string? binary):
+                return UnwindAudit.Run(binary);
             case "returns" when options.ContainsKey("--binary") && options.ContainsKey("--metadata"):
                 return ReturnAudit.Run(options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"));
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
@@ -62,6 +64,7 @@ internal static class Program
     {
         Console.Error.WriteLine("用法：ForwardCheck terms [--seed N] [--rounds N]");
         Console.Error.WriteLine("      ForwardCheck snapshot");
+        Console.Error.WriteLine("      ForwardCheck unwind --binary 原生库");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
         Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 目录]");
@@ -281,7 +284,7 @@ internal static class Program
                     TerminatorKind.Single => Terminator.Single(exits[0]),
                     TerminatorKind.Branch => Terminator.Branch(terminator.Condition!, exits[0], exits[1]),
                     TerminatorKind.Switch => Terminator.Switch(terminator.Condition!, exits),
-                    _ => Terminator.Invoke(exits[0], exits[1]),
+                    _ => Terminator.Invoke(exits[0], exits[1], terminator.Clauses, terminator.Cleanup),
                 });
             }
             return builder.Build();

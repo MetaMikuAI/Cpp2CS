@@ -14,7 +14,7 @@ internal sealed class JumpTables
     readonly Dictionary<(ulong, int), HashSet<ulong>> definitions = [];
     const ulong EntryValue = ulong.MaxValue;
 
-    public JumpTables(ulong entry, Dictionary<ulong, Instruction> code, Dictionary<ulong, ulong> pads,
+    public JumpTables(ulong entry, Dictionary<ulong, Instruction> code, Dictionary<ulong, CallSite> pads,
         Dictionary<ulong, JumpTableInfo> tables)
     {
         this.entry = entry;
@@ -36,7 +36,7 @@ internal sealed class JumpTables
             if (i.Form == Form.Branch || i.Conditional) Edge(pc, i.Destination(pc));
             if (i.Form is Form.Return or Form.Trap or Form.Branch) continue;
             Edge(pc, pc + 4);
-            if (pads.TryGetValue(pc, out ulong pad)) Edge(pc, pad);
+            if (pads.TryGetValue(pc, out var site)) Edge(pc, site.Landing);
         }
     }
 

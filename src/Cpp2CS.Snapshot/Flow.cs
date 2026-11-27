@@ -59,14 +59,21 @@ public sealed class Terminator
     /// <summary>Branch 的 1 位条件，或 Switch 的选择子。</summary>
     public Term? Condition { get; }
     public ImmutableArray<Exit> Exits { get; }
+    /// <summary>带展开出口的调用的动作表：依次记录选择子与类型信息对象的地址，全捕获为 0。</summary>
+    public ImmutableArray<(long Selector, ulong TypeInfo)> Clauses { get; }
+    /// <summary>没有子句被选中时也进入落地块，此时选择子为 0。</summary>
+    public bool Cleanup { get; }
     /// <summary>追溯用的原生地址，不作身份。</summary>
     public ulong Address { get; }
 
-    private Terminator(TerminatorKind kind, Term? condition, ImmutableArray<Exit> exits, ulong address)
+    private Terminator(TerminatorKind kind, Term? condition, ImmutableArray<Exit> exits, ulong address,
+        ImmutableArray<(long Selector, ulong TypeInfo)> clauses = default, bool cleanup = false)
     {
         Kind = kind;
         Condition = condition;
         Exits = exits;
+        Clauses = clauses.IsDefault ? [] : clauses;
+        Cleanup = cleanup;
         Address = address;
     }
 
@@ -76,7 +83,9 @@ public sealed class Terminator
     public static Terminator Switch(Term selector, ImmutableArray<Exit> exits, ulong address = 0) =>
         new(TerminatorKind.Switch, selector, exits, address);
     public static Terminator Invoke(Exit normal, Exit unwind, ulong address = 0) =>
-        new(TerminatorKind.Invoke, null, [normal, unwind], address);
+        Invoke(normal, unwind, [], false, address);
+    public static Terminator Invoke(Exit normal, Exit unwind, ImmutableArray<(long Selector, ulong TypeInfo)> clauses, bool cleanup, ulong address = 0) =>
+        new(TerminatorKind.Invoke, null, [normal, unwind], address, clauses, cleanup);
 }
 
 /// <summary>
@@ -483,6 +492,13 @@ public sealed class FlowBuilder<T> where T : class, IFlowOccurrence
                 writer.Write(exit.Kind == ExitKind.Target ? exit.Target.Index : -1);
                 writer.Write(exit.Arguments);
             }
+            writer.Write(terminator.Clauses.Length);
+            foreach (var (selector, typeInfo) in terminator.Clauses)
+            {
+                writer.Write(selector);
+                writer.Write(unchecked((long)typeInfo));
+            }
+            writer.Write(terminator.Cleanup ? 1 : 0);
             frozen.Add(new FlowBlock<T>(new(b), block.Parameters, block.Occurrences, block.Operands, block.DefinesMemory, block.Results, terminator));
         }
         built = true;
