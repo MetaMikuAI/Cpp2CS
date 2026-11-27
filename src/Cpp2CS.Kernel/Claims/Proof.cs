@@ -41,6 +41,10 @@ public static class Proof
         }
         if (claim.Entity is { Kind: EntityKind.Field or EntityKind.Method } member && !context.Metadata.Accessible(member, context.Host.DeclaringType))
             return Refute(RefutationLayer.Explanation, Obligation.Legality, $"{member} 在本方法所属的类里不可访问");
+        if (claim.Entity is { Kind: EntityKind.Method } callee
+            && CallLegality.Check(claim.Operation, callee, claim.Operands.Length > 0 && ReferenceEquals(claim.Operands[0], CallLegality.HostThis(snapshot, context.Host)),
+                context.Host.Entity, context.Metadata) is { } illegal)
+            return Refute(RefutationLayer.Explanation, Obligation.Legality, illegal);
 
         // 去向：快照里没有带展开出口的调用时，方法里没有异常处理区域，一切抛出都去往调用者。
         // 有展开出口时需要异常区域的模型（设计第 18 节）给出每个程序点的处理目标；它尚未建立，不能证明相同。

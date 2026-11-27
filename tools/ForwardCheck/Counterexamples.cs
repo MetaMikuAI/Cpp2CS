@@ -435,6 +435,13 @@ internal static class Counterexamples
             // ldarg.0; brtrue.s L; ldarg.2; ret; L: ldarg.1; ret——条件成立时返回第 1 个形参。下降把选择写成带栈上汇合的转移，
             // 核对表达式时读出的项须与真实 IL 两条路径合成的选择相同；两支互换的写法读出的项须与它不同。
             new("选择的两支不能互换", "ECMA-335 III.3.18 brtrue；语料 Control.Conditional 的真实 IL", SelectArms),
+
+            // ---- 写法的合法性 ----
+
+            // ECMA-335 III.1.8.1.4：构造函数返回之前，须对 this 调用过本类或直接基类的构造函数；III.3.19：call 构造函数只用于此；
+            // III.4.2：callvirt 不用于构造函数，值类型的方法不经虚表。行为相同的写法（直接调用祖父类的构造函数、对值类型的方法用 callvirt）
+            // 通得过共同执行，通不过验证。取核心库里第一条三层的继承链与第一个带实例方法的值类型。
+            new("调用的写法须通得过验证", "ECMA-335 III.1.8.1.4、III.3.19、III.4.2；设计 9.3；核心库的类型定义", () => CallForms(metadata)),
         };
 
         int passed = 0;
@@ -649,6 +656,66 @@ internal static class Counterexamples
         var first = tokens.Method(pair.First);
         var second = tokens.Method(pair.Second);
         return first != second ? null : $"两个实例上的方法都是 {first}";
+    }
+
+    private static string? CallForms(SrmMetadata metadata)
+    {
+        var core = metadata.Load("mscorlib") ?? throw new InvalidOperationException("程序集目录里没有核心库");
+        var md = core.Md;
+        var tokens = metadata.Tokens(core);
+        var facts = new Cpp2CS.Facts.EntityFacts(metadata.Facts);
+        // 没有形参的实例方法：构造函数，或别的方法。签名是 HASTHIS、0 个形参。
+        EntityRef? Member(TypeDefinitionHandle type, bool constructor)
+        {
+            foreach (var handle in md.GetTypeDefinition(type).GetMethods())
+            {
+                var method = md.GetMethodDefinition(handle);
+                var signature = md.GetBlobBytes(method.Signature);
+                if ((method.Attributes & MethodAttributes.Static) != 0 || signature.Length < 2 || signature[0] != 0x20 || signature[1] != 0) continue;
+                if ((md.GetString(method.Name) == ".ctor") == constructor) return tokens.Method(MetadataTokens.GetToken(handle));
+            }
+            return null;
+        }
+        bool Plain(TypeDefinitionHandle type) => md.GetTypeDefinition(type).GetGenericParameters().Count == 0;
+        string? Legal(string what, string? reason) => reason is null ? null : $"{what}被拒绝：{reason}";
+        string? Illegal(string what, string? reason) => reason is null ? $"{what}被接受" : null;
+
+        EntityRef? plain = null;
+        string? chain = "核心库里没有三层的继承链";
+        foreach (var handle in md.TypeDefinitions)
+        {
+            var type = md.GetTypeDefinition(handle);
+            // 没有基类时 BaseType 是空句柄，它的种类也读作类型定义。
+            if (!Plain(handle) || type.BaseType.IsNil || type.BaseType.Kind != HandleKind.TypeDefinition) continue;
+            var parent = (TypeDefinitionHandle)type.BaseType;
+            var above = md.GetTypeDefinition(parent).BaseType;
+            if (!Plain(parent) || above.IsNil || above.Kind != HandleKind.TypeDefinition) continue;
+            var grandparent = (TypeDefinitionHandle)above;
+            if (Member(handle, true) is not { } host || Member(handle, false) is not { } other
+                || Member(parent, true) is not { } direct || Member(grandparent, true) is not { } far) continue;
+            if (facts.DeclaringTypeOf(host) is not { } owner || facts.IsValueType(owner) != false) continue;
+            plain = other;
+            chain = Legal("对 this 调用直接基类的构造函数", CallLegality.Check("call", direct, true, host, facts))
+                ?? Legal("对 this 调用本类的另一个构造函数", CallLegality.Check("call", host, true, host, facts))
+                ?? Illegal("对 this 调用祖父类的构造函数", CallLegality.Check("call", far, true, host, facts))
+                ?? Illegal("对别的对象调用直接基类的构造函数", CallLegality.Check("call", direct, false, host, facts))
+                ?? Illegal("在普通方法里用 call 调用构造函数", CallLegality.Check("call", direct, true, other, facts))
+                ?? Illegal("用 callvirt 调用构造函数", CallLegality.Check("callvirt", direct, true, host, facts))
+                ?? Legal("用 callvirt 调用引用类型的实例方法", CallLegality.Check("callvirt", other, true, other, facts));
+            break;
+        }
+        if (chain is not null || plain is not { } caller) return chain;
+
+        foreach (var handle in md.TypeDefinitions)
+        {
+            if (!Plain(handle) || Member(handle, false) is not { } method) continue;
+            if (facts.DeclaringTypeOf(method) is not { } owner || facts.IsValueType(owner) != true) continue;
+            return Illegal("对值类型的方法用 callvirt", CallLegality.Check("callvirt", method, false, caller, facts))
+                ?? Legal("对值类型的方法用 call", CallLegality.Check("call", method, false, caller, facts))
+                ?? (Member(handle, true) is { } constructor
+                    ? Legal("对着地址调用值类型的构造函数", CallLegality.Check("call", constructor, false, caller, facts)) : null);
+        }
+        return "核心库里没有带实例方法的值类型";
     }
 
     private static string? CoreTypes(SrmMetadata metadata)
