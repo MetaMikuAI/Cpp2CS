@@ -65,6 +65,8 @@ public sealed partial class CoExecution
         ImmutableList<Store> NativeWrites, ImmutableList<Store> TemplateWrites, ImmutableDictionary<long, Term> Frame)
     {
         public Inner? Inner { get; init; }
+        public ImmutableDictionary<Term, Term> Objects { get; init; } = ImmutableDictionary<Term, Term>.Empty;
+        public ImmutableDictionary<Term, Term> Exposed { get; init; } = ImmutableDictionary<Term, Term>.Empty;
         /// <summary>这条路径上已经展开的调用数，以及已经引入的任意值的个数。</summary>
         public int Inlines { get; init; }
         public int Fresh { get; init; }
@@ -108,6 +110,7 @@ public sealed partial class CoExecution
     private readonly Dictionary<RuntimeInlineBody, WalkResult> inlinePaths = [];
     private readonly SortedSet<string> assumptions = new(StringComparer.Ordinal);
     private readonly Term stackPointer;
+    private readonly bool needsFrameContents;
     private int steps, paths;
     /// <summary>最近一次原生读写落在托管堆上（不是帧对象，也不是映像数据区）。</summary>
     private bool heapAccess;
@@ -134,6 +137,8 @@ public sealed partial class CoExecution
         nativeGraph = new PlacedGraph(native);
         templateGraph = new PlacedGraph(template);
         stackPointer = Entry(new Slot(SlotKind.StackPointer, 0));
+        // 第一次传址才确定区间；在此之前也要保留局部写入没有覆盖的字节。
+        needsFrameContents = template.Blocks[template.Entry.Index].Occurrences.Any(e => e.Kind == EffectKind.FrameObject);
     }
 
     /// <summary>
@@ -871,6 +876,8 @@ public sealed partial class CoExecution
     private Term MachineRead(ref State state, bool inner, Term address, int width)
     {
         heapAccess = false;
+        if (inner && ObjectPart(state, address, width) is { } part)
+            return terms.Slice(state.Objects[part.Object], part.Bit, width);
         if (Facts.StructureReads.Name(address, width, facts, terms) is { } named) return named;
         var pointer = inner ? state.Inner!.StackPointer : stackPointer;
         if (FrameOffset(address, pointer) is long offset)
@@ -878,8 +885,11 @@ public sealed partial class CoExecution
             var frame = inner ? state.Inner!.Frame : state.Frame;
             if (frame.TryGetValue(offset, out var stored) && stored.Width >= width) return terms.Slice(stored, 0, width);
             foreach (var (at, value) in frame)
-                if (at < offset + width / 8 && offset < at + value.Width / 8)
+                if (at < (Int128)offset + width / 8 && offset < (Int128)at + value.Width / 8)
+                {
+                    if (!inner && needsFrameContents) return ReadInterval(frame, offset, width);
                     throw new Refuted(Verdict.MissingFact, $"帧上偏移 {offset} 处 {width} 位的读取与已有的写入部分重叠");
+                }
             return terms.Attribute(new AttributeId(KernelAttributes.FrameWord), width, terms.Constant(offset, 64),
                 terms.Constant(inner ? state.Inner!.FrameGeneration : state.FrameGeneration, 32), terms.Constant(inner ? state.Inner!.Instance + 1 : 0, 32));
         }
@@ -904,10 +914,20 @@ public sealed partial class CoExecution
     private void MachineWrite(ref State state, bool inner, Term address, Term value)
     {
         heapAccess = false;
+        if (inner && ObjectPart(state, address, value.Width) is { } part)
+        {
+            WriteObject(ref state, part, value);
+            return;
+        }
         var pointer = inner ? state.Inner!.StackPointer : stackPointer;
         if (FrameOffset(address, pointer) is long offset)
         {
             var before = inner ? state.Inner!.Frame : state.Frame;
+            if (!inner && needsFrameContents)
+            {
+                state = state with { Frame = WriteInterval(before, offset, value) };
+                return;
+            }
             var frame = before;
             int generation = inner ? state.Inner!.FrameGeneration : state.FrameGeneration;
             foreach (var (at, old) in before)
@@ -924,7 +944,8 @@ public sealed partial class CoExecution
             return;
         }
         if (MentionsStack(address, pointer)) throw new Refuted(Verdict.MissingFact, $"地址由栈指针算出，但不是常量偏移：{address}");
-        if (MentionsStack(value, pointer)) throw new Refuted(Verdict.MissingFact, "帧地址被写入堆：帧对象逃逸");
+        if (MentionsStack(value, pointer) || inner && !state.Objects.IsEmpty && ContainsObject(value))
+            throw new Refuted(Verdict.MissingFact, "帧地址被写入堆：帧对象逃逸");
         heapAccess = true;
         state = inner ? state with { TemplateWrites = Append(state.TemplateWrites, address, value, state.Epoch) }
             : state with { NativeWrites = Append(state.NativeWrites, address, value, state.Epoch) };
@@ -971,8 +992,9 @@ public sealed partial class CoExecution
     }
 
     /// <summary>事件与结局处，双方写过的位置内容相同（写入归并，设计 6.2）。</summary>
-    private void CompareWrites(State state)
+    private void CompareWrites(ref State state)
     {
+        ObserveObjects(ref state);
         if (run is not null) Synchronized(state);
         // 双方做了同一串写入（次序、位置、值都相同）：内存相同，不需要别名判定。
         if (state.NativeWrites.Count == state.TemplateWrites.Count)
@@ -1018,6 +1040,8 @@ public sealed partial class CoExecution
         var layout = facts.Layout;
         switch (effect.Location)
         {
+            case LocationKind.Address:
+                return @base[0];
             case LocationKind.StaticField:
             {
                 // 静态字段：所属类的静态区（类结构里的一个指针，按当前的内存读取）加字段的偏移。
@@ -1107,6 +1131,15 @@ public sealed partial class CoExecution
             var next = side with { Index = side.Index + 1 };
             switch (effect.Kind)
             {
+                case EffectKind.FrameObject:
+                {
+                    var address = terms.Attribute(new AttributeId(KernelAttributes.FrameAddress), facts.Layout.PointerBits,
+                        terms.Constant(template.Graph, 32), terms.Constant(state.Inlines, 32), terms.Constant(effect.FrameSlot, 32),
+                        terms.Entity(effect.Entity!.Value, facts.Layout.PointerBits));
+                    state = state with { Objects = state.Objects.Add(address, operands[0]) };
+                    next = next with { Env = next.Env.SetItem(templateGraph.Results(id)[0], address) };
+                    break;
+                }
                 case EffectKind.ThrowIf:
                     switch (state.Conditions.Decide(operands[0]))
                     {
@@ -1132,19 +1165,33 @@ public sealed partial class CoExecution
                 {
                     int width = effect.ResultWidths[0];
                     var address = Locate(effect, operands.AsSpan(), width, state);
-                    var loaded = HeapRead(state.TemplateWrites, address, width, state.Epoch);
+                    var part = ObjectPart(state, address, width);
+                    var loaded = part is { } field ? terms.Slice(state.Objects[field.Object], field.Bit, width)
+                        : HeapRead(state.TemplateWrites, address, width, state.Epoch);
                     next = next with { Env = next.Env.SetItem(templateGraph.Results(id)[0], loaded) };
-                    if (run is not null) state = TemplateRead(state, loaded);
+                    if (run is not null && part is null) state = TemplateRead(state, loaded);
                     break;
                 }
                 case EffectKind.Write:
                 {
                     var value = operands[^1];
                     var address = Locate(effect, operands.AsSpan()[..^1], value.Width, state);
-                    state = state with { TemplateWrites = Append(state.TemplateWrites, address, value, state.Epoch) };
+                    if (ObjectPart(state, address, value.Width) is { } field) WriteObject(ref state, field, value);
+                    else
+                    {
+                        if (!state.Objects.IsEmpty && ContainsObject(value)) throw new Refuted(Verdict.MissingFact, "帧地址被写入堆：帧对象逃逸");
+                        state = state with { TemplateWrites = Append(state.TemplateWrites, address, value, state.Epoch) };
+                    }
                     break;
                 }
                 case EffectKind.Call:
+                    if (!state.Objects.IsEmpty)
+                    {
+                        var parameters = effect.Signature?.Parameters ?? throw new Refuted(Verdict.MissingFact, "托管调用缺少签名");
+                        int first = effect.Indirect ? 1 : 0;
+                        for (int i = 0; i < parameters.Length; i++)
+                            if (state.Objects.ContainsKey(operands[first + i])) RequirePointee(operands[first + i], parameters[i]);
+                    }
                     return new Event(EventKind.Call) { Effect = effect, Occurrence = id, Values = operands, After = next };
                 case EffectKind.ClassInitialize:
                     // 幂等（设计 6.2）：该类的初始化已触发时等于不执行。
@@ -1200,11 +1247,11 @@ public sealed partial class CoExecution
                 if (!conditions.Same(onNative.Values[0], onTemplate.Values[0]))
                     throw new Refuted(Verdict.Insufficient,
                         $"抛出的异常对象不同：现场 {conditions.Evaluate(onNative.Values[0])}，模板 {conditions.Evaluate(onTemplate.Values[0])}");
-                CompareWrites(state);
+                CompareWrites(ref state);
                 paths++;
                 return;
             case (EventKind.Throw, EventKind.Throw) when onNative.Values.Length == 0 && onTemplate.Values.Length == 0 && onNative.Exception == onTemplate.Exception:
-                CompareWrites(state);
+                CompareWrites(ref state);
                 paths++;
                 return;
             case (EventKind.Landing, EventKind.Return):
@@ -1231,7 +1278,7 @@ public sealed partial class CoExecution
                     if (!conditions.Same(value, onTemplate.Values[0]))
                         throw new Refuted(Verdict.Insufficient, $"返回值不同：现场 {conditions.Evaluate(value)}，模板 {conditions.Evaluate(onTemplate.Values[0])}");
                 }
-                CompareWrites(state);
+                CompareWrites(ref state);
                 paths++;
                 return;
             }
@@ -1253,13 +1300,14 @@ public sealed partial class CoExecution
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
                     var expected = Gather(convention[i], slot => Argument(other, onTemplate.Values, slot));
+                    if (BindObject(ref state, given, expected, shape.Parameters[i])) continue;
                     if (!conditions.Same(given, expected))
                         throw new Refuted(Verdict.Insufficient,
                             $"第 {i} 个实参不同：现场 {conditions.Evaluate(given)}，被展开的方法里 {conditions.Evaluate(expected)}");
                     if (MentionsStack(given, stackPointer) || MentionsStack(expected, inner.StackPointer))
                         throw new Refuted(Verdict.MissingFact, "帧地址作为实参：帧对象逃逸");
                 }
-                CompareWrites(state);
+                CompareWrites(ref state);
                 Explore(state with
                 {
                     Native = onNative.After! with { Env = Bind(onNative.After.Env, nativeGraph.Results(onNative.Occurrence), call, null, state.Serial) },
@@ -1295,12 +1343,13 @@ public sealed partial class CoExecution
                 for (int i = 0; i < convention.Length; i++)
                 {
                     var given = Gather(convention[i], slot => Argument(call, onNative.Values, slot));
+                    if (BindObject(ref state, given, onTemplate.Values[i], effect.Signature!.Parameters[i])) continue;
                     if (!conditions.Same(given, onTemplate.Values[i]))
                         throw new Refuted(Verdict.Insufficient,
                             $"第 {i} 个实参不同：现场 {conditions.Evaluate(given)}，模板 {conditions.Evaluate(onTemplate.Values[i])}");
                     if (MentionsStack(given, stackPointer)) throw new Refuted(Verdict.MissingFact, "帧地址作为实参：帧对象逃逸");
                 }
-                CompareWrites(state);
+                CompareWrites(ref state);
                 // 同一个事件：双方的结果相互绑定。此后是新的历元。
                 var results = nativeGraph.Results(onNative.Occurrence);
                 var nativeEnv = onNative.After!.Env;
@@ -1336,7 +1385,7 @@ public sealed partial class CoExecution
                 var given = conditions.Evaluate(onNative.Class!);
                 if (given.Kind != TermKind.Entity) throw new Refuted(Verdict.MissingFact, $"类初始化的实参不是已命名的类指针：{given}");
                 if (given.Entity != type) throw new Refuted(Verdict.Insufficient, $"被初始化的类不同：现场 {given.Entity}，模板 {type}");
-                CompareWrites(state);
+                CompareWrites(ref state);
                 var results = nativeGraph.Results(onNative.Occurrence);
                 var nativeEnv = onNative.After!.Env;
                 for (int k = 0; k < results.Length; k++) nativeEnv = nativeEnv.SetItem(results[k], EventResult(state.Serial, k, results[k].Width));
@@ -1377,7 +1426,7 @@ public sealed partial class CoExecution
                 var given = conditions.Evaluate(onNative.Class!);
                 if (given.Kind != TermKind.Entity) throw new Refuted(Verdict.MissingFact, $"新对象的类不是已命名的类指针：{given}");
                 if (given.Entity != type) throw new Refuted(Verdict.Insufficient, $"新对象的类不同：现场 {given.Entity}，模板 {type}");
-                CompareWrites(state);
+                CompareWrites(ref state);
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 int slot = call.ResultSlots.IndexOf(new Slot(SlotKind.Integer, 0));
                 if (slot < 0) throw new Refuted(Verdict.MissingFact, "新对象的调用没有给出结果槽 Integer0");

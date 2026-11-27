@@ -14,6 +14,8 @@ public enum EffectKind : byte
     NewObject,
     /// <summary>抛出操作数给出的异常对象，不返回。</summary>
     Throw,
+    /// <summary>为本次方法调用的形参或局部建立帧对象，操作数是初始内容，结果是托管指针。</summary>
+    FrameObject,
 }
 
 /// <summary>
@@ -27,6 +29,8 @@ public sealed class TemplateEffect : IFlowOccurrence
     public ImmutableArray<Term> Operands { get; }
     public ImmutableArray<int> ResultWidths { get; }
     public LocationKind Location { get; init; }
+    /// <summary>帧内变量序号，形参在前，局部在后。</summary>
+    public int FrameSlot { get; init; }
     /// <summary>字段、被调方法或被初始化的类。</summary>
     public EntityRef? Entity { get; init; }
     public ExceptionKind Exception { get; init; }
@@ -59,6 +63,7 @@ public sealed class TemplateEffect : IFlowOccurrence
     public void WriteContent(DigestWriter writer)
     {
         writer.Write((int)Kind);
+        if (Kind == EffectKind.FrameObject) writer.Write(FrameSlot);
         writer.Write((int)Location);
         writer.Write((int)Exception);
         writer.Write((int)Function);

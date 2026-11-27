@@ -54,6 +54,8 @@ public enum VariantCondition : byte
     StaticMethodWithInitializer,
     /// <summary>构造函数，所属的类型是引用类型（this 是对象引用）。</summary>
     ReferenceTypeConstructor,
+    /// <summary>方法体是否对这个形参或局部使用过 ldarga 或 ldloca（设计 18.1）。</summary>
+    AddressTaken, AddressNotTaken,
 }
 
 /// <summary>模板抛出的异常。</summary>
@@ -71,6 +73,8 @@ public enum LocationKind : byte
     StaticField,
     /// <summary>一维零基数组的元素：基是数组引用与下标。</summary>
     ArrayElement,
+    /// <summary>托管指针所指的存储。</summary>
+    Address,
 }
 
 /// <summary>
@@ -129,6 +133,7 @@ public enum ValueOp : byte
     Immediate,
     /// <summary>指令指定的形参、局部变量当前的值。</summary>
     Argument, Local,
+    ArgumentAddress, LocalAddress, StorageZero, ToInt64,
     /// <summary>空引用。</summary>
     Null,
     /// <summary>指令的字面量操作数（ldstr 的字符串）：实体，位宽是指针位宽。</summary>

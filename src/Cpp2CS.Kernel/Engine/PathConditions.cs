@@ -22,6 +22,10 @@ public static class KernelAttributes
     public const int InnerEntry = 1006;
     /// <summary>操作数给出的类型或方法实例的运行时泛型上下文表。</summary>
     public const int RgctxTable = 1008;
+    /// <summary>模板的帧对象地址，由图、本次调用与入口的对象序号区分。</summary>
+    public const int FrameAddress = 1009;
+    /// <summary>事件之后已暴露对象的内容，由事件与模板对象的身份区分。</summary>
+    public const int ExposedContent = 1010;
 }
 
 /// <summary>

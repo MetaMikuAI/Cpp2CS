@@ -265,7 +265,7 @@ public sealed partial class CoExecution
     /// <summary>到达落点，模板也走完：结果是声明的定义；被推后的旁观效果记成落点约束。</summary>
     private void Landed(State state)
     {
-        CompareWrites(state);
+        CompareWrites(ref state);
         var claim = run!.Claim;
         if (claim.Definition is { } definition)
         {
