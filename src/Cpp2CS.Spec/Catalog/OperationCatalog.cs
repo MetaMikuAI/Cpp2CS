@@ -278,6 +278,9 @@ public static class OperationCatalog
             "语料 Guards.MetadataOnBranches：if (!s_Il2CppMethodInitialized) { il2cpp_codegen_initialize_runtime_metadata(…); s_Il2CppMethodInitialized = true; }",
             "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata；vm/MetadataCache.cpp: MetadataCache::InitializeRuntimeMetadata",
             "III.3.51 nop") with { Elided = true },
+        E("call.instance", "call", "按方法令牌直接调用实例方法", None, [new(StepKind.Call, [])], Loaded(S(0)), ResultKind.Subject,
+            "语料 Corpus.Cases.cpp:2907 Base__ctor_m…(__this, NULL)；mscorlib.cpp:3023 ErrorInfo_get_Error_m…_inline((&___0_errorInfo), NULL)",
+            "—", "III.3.19 call", condition: VariantCondition.InstanceMethod, fromSignature: true),
     ];
 
     private static readonly FrozenDictionary<string, CatalogEntry> byId = entries.ToFrozenDictionary(e => e.Id);

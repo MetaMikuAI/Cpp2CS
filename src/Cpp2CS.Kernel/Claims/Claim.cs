@@ -149,7 +149,10 @@ public interface IEntityMetadata : IMetadataView
     /// <summary>调用的写法是否合法要问的几件事（<see cref="CallLegality"/>）。回答不了时为空。</summary>
     EntityRef? DeclaringTypeOf(EntityRef method);
     bool? IsInstanceConstructor(EntityRef method);
+    bool? IsVirtual(EntityRef method);
     bool? IsValueType(EntityRef type);
+    /// <summary>核心库的 System.Object，其实例构造函数没有基类初始化义务。</summary>
+    EntityRef SystemObject { get; }
     /// <summary>类型的直接基类。没有基类，或回答不了（例如基类要代入类型实参才能写出）时为空。</summary>
     EntityRef? BaseOf(EntityRef type);
 }

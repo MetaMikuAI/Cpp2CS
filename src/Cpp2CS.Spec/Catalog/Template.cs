@@ -56,6 +56,8 @@ public enum VariantCondition : byte
     ReferenceTypeConstructor,
     /// <summary>方法体是否对这个形参或局部使用过 ldarga 或 ldloca（设计 18.1）。</summary>
     AddressTaken, AddressNotTaken,
+    /// <summary>有 this 的方法，按方法令牌直接调用。</summary>
+    InstanceMethod,
 }
 
 /// <summary>模板抛出的异常。</summary>

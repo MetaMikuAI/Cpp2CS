@@ -19,15 +19,18 @@ internal sealed class Adversary
     private readonly SortedDictionary<string, int> byReason = new(StringComparer.Ordinal);
     private readonly List<string> accepted = [];
     private readonly List<string> failures = [];
+    private readonly List<string> constructorFailures = [];
+    private int constructorMutations;
     private int cases;
 
-    public int Failures => failures.Count;
+    public int Failures => failures.Count + constructorFailures.Count;
 
     public void Run(string name, FactView view, RecoveryContext context, Explanation reference, IReadOnlyList<ProofOutcome> pool, Func<ManagedBody, bool> equivalent)
     {
         cases++;
         var graph = view.Effects;
         var snapshot = graph.Snapshot;
+        MutateInitialization(name, view, reference);
         var effects = new List<EffectRef>();
         foreach (var effect in graph.Effects)
             if (effect.Kind != NativeEffectKind.None) effects.Add(EffectRef.Of(effect.Occurrence));
@@ -135,6 +138,50 @@ internal sealed class Adversary
         }
     }
 
+    // 参照方法已与真实 IL 对照。只变异能到达正常返回的初始化点，抛出路径本身没有返回义务。
+    private void MutateInitialization(string name, FactView view, Explanation reference)
+    {
+        var graph = view.Effects;
+        var host = graph.Host;
+        if (view.Metadata.IsInstanceConstructor(host.Entity) != true || view.Metadata.IsValueType(host.DeclaringType) != false
+            || host.DeclaringType == view.Metadata.SystemObject || CallLegality.HostThis(graph.Snapshot, host) is not { } receiver) return;
+        foreach (var c in reference.Selected)
+        {
+            var claim = c.Claim;
+            if (OperationCatalog.Get(claim.Operation).Il != "call" || claim.Entity is not { } target
+                || view.Metadata.IsInstanceConstructor(target) != true || claim.Operands[0] != receiver || !ReachesReturn(claim.Landing.Block)) continue;
+            Check("删除", reference.Selected.Remove(c));
+            Check("重复", reference.Selected.Add(c));
+
+            void Check(string kind, ImmutableArray<Certificate> changed)
+            {
+                constructorMutations++;
+                var body = Lowering.ConstructorRejection(reference, changed);
+                if (body is not { Holes: [{ Layer: HoleLayer.Explanation, Obligation: Obligation.Legality }],
+                    Instructions: [{ Opcode: ".unrecovered" }] } || body.Encode() != null)
+                    constructorFailures.Add($"{name} {claim.Landing}：{kind}初始化点后没有留下合法性入口洞");
+            }
+        }
+
+        bool ReachesReturn(BlockId start)
+        {
+            var visited = new HashSet<BlockId>();
+            var pending = new Stack<BlockId>();
+            pending.Push(start);
+            while (pending.TryPop(out var block))
+            {
+                if (!visited.Add(block) || graph.EndsInThrow(block)) continue;
+                var exits = graph.Snapshot.Terminator(block).Exits;
+                for (int i = 0; i < exits.Length; i++)
+                {
+                    if (exits[i].Kind == ExitKind.Return) return true;
+                    if (exits[i].Kind == ExitKind.Target && graph.Live(new(block, i))) pending.Push(exits[i].Target);
+                }
+            }
+            return false;
+        }
+    }
+
     public void Report()
     {
         int submitted = byKind.Values.Sum(v => v.Submitted), refuted = byKind.Values.Sum(v => v.Refuted);
@@ -145,6 +192,9 @@ internal sealed class Adversary
             Console.WriteLine($"  {kind}：提交 {v.Submitted}，被反驳 {v.Refuted}，凭据而等价 {v.Harmless}，凭据而写不全 {v.Partial}，凭据而不等价 {v.Wrong}");
         Console.WriteLine($"  反驳的依据：{string.Join("，", byReason.Select(r => $"{r.Key} {r.Value}"))}");
         foreach (string line in failures) Console.WriteLine($"  放过了错误的声明：{line}");
+        if (constructorMutations > 0)
+            Console.WriteLine($"构造函数初始化点变异：删除、重复各 {constructorMutations / 2}，留下合法性入口洞 {constructorMutations - constructorFailures.Count}/{constructorMutations}");
+        foreach (string line in constructorFailures) Console.WriteLine($"  {line}");
         foreach (string line in accepted.Order(StringComparer.Ordinal)) Console.WriteLine($"  拿到凭据：{line}");
     }
 }

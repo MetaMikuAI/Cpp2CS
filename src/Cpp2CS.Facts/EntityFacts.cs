@@ -13,6 +13,7 @@ namespace Cpp2CS.Facts;
 public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
 {
     private MetadataModel Model => metadata.Model;
+    public EntityRef SystemObject => metadata.TypeEntity(metadata.CoreType("Object"));
 
     public MethodShape Method(EntityRef entity) => metadata.Method(entity);
     public FieldShape Field(EntityRef entity) => metadata.Field(entity);
@@ -110,6 +111,27 @@ public sealed class EntityFacts(ModelMetadata metadata) : IEntityMetadata
         if (metadata.Keys.DescribeMethod(method) is not { } instance) return null;
         var definition = Model.Methods[instance.Definition];
         return definition.Name == ".ctor" && definition.Flags.HasFlag(MethodAttributes.RTSpecialName) && !definition.Flags.HasFlag(MethodAttributes.Static);
+    }
+
+    public bool? IsVirtual(EntityRef method) => metadata.Keys.DescribeMethod(method) is { } instance
+        ? Model.Methods[instance.Definition].Flags.HasFlag(MethodAttributes.Virtual) : null;
+
+    /// <summary>声明在给定类型上的实例构造函数。只有形参数量相符、可确定栈宽的签名能用于发现。</summary>
+    public IEnumerable<MethodShape> InstanceConstructors(EntityRef type, int argumentCount)
+    {
+        if (metadata.Keys.DescribeType(type) is not NamedType owner) yield break;
+        var declaration = Model.Types[owner.Definition];
+        for (int i = declaration.FirstMethod; i < declaration.FirstMethod + declaration.MethodCount; i++)
+        {
+            if (Model.Methods[i].Parameters.Count + 1 != argumentCount) continue;
+            if (IsInstanceConstructor(new(EntityKind.Method, i)) != true) continue;
+            long? key = owner.Arguments.Count == 0 ? i : metadata.Keys.MethodKey(new MethodInstance(i, owner.Arguments, []));
+            if (key is null) continue;
+            MethodShape shape;
+            try { shape = metadata.Method(new(EntityKind.Method, key.Value)); }
+            catch (ExpansionException e) when (e.Reason == "元数据事实不足") { continue; }
+            yield return shape;
+        }
     }
 
     public bool? IsValueType(EntityRef type) => metadata.Keys.DescribeType(type) switch

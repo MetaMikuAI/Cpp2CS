@@ -12,8 +12,8 @@ namespace Cpp2CS.Kernel;
 public static class CallLegality
 {
     /// <summary>
-    /// 不合法时给出原因，合法时为空。operation 是声明的目录项（按它的 IL 助记符判断）；target 是被调方法；host 是宿主方法；receiverIsHostThis：第 0 个操作数就是宿主方法入口处的 this。
-    /// 只问实体之间的关系，不需要方法的形状。
+    /// 按目录项的 IL 助记符和实例变体检查调用。receiverIsHostThis 表示第 0 个操作数是宿主入口处的 this。
+    /// 不合法时给出原因，合法时为空。
     /// 元数据回答不了的事实按不合法处理。
     /// </summary>
     public static string? Check(CatalogEntry entry, EntityRef target, bool receiverIsHostThis, EntityRef host, IEntityMetadata metadata)
@@ -29,8 +29,14 @@ public static class CallLegality
             // 值类型的方法不经虚表，接收方是托管指针：callvirt 只在带 constrained. 前缀、目标声明在引用类型上时用于值类型。
             return valueType ? $"{target} 声明在值类型上：须用 call" : null;
         }
-        // 值类型的构造函数可以对着一个地址直接调用（ldloca; …; call .ctor）。
-        if (!constructor || valueType) return null;
+        // 值类型的接收方是托管指针，可以按令牌直接调用。
+        if (valueType) return null;
+        if (!constructor)
+        {
+            if (entry.Condition != VariantCondition.InstanceMethod) return null;
+            if (metadata.IsVirtual(target) is not bool isVirtual) return $"{target} 是不是虚方法不可知";
+            return isVirtual && !receiverIsHostThis ? $"{target} 是虚方法：call 的接收方须是本方法的 this" : null;
+        }
         // 引用类型的构造函数经 call 调用，只用于在构造函数里初始化 this；创建对象用 newobj。
         if (metadata.IsInstanceConstructor(host) != true) return $"{target} 是构造函数：只有构造函数里才能用 call 调用它";
         if (!receiverIsHostThis) return $"{target} 是构造函数：call 的接收方须是本方法的 this";
