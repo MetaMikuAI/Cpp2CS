@@ -79,10 +79,12 @@ internal static class NamingCheck
         var included = functions.Concat(imports.Keys).ToHashSet();
         var empty = new FingerprintBody(0, Convert.ToHexString(SHA256.HashData([])), [], false);
         var rows = new List<FingerprintRow>();
-        var unclassified = new HashSet<ulong>();
-        foreach (ulong a in functions)
+        foreach (ulong a in starts.Except(imports.Keys).Order())
         {
-            var body = bounds.TryGetValue(a, out var f) ? image.Read(f, starts) : empty;
+            bool runtime = included.Contains(a);
+            // 表外入口的 FDE 自身就是歧义证据，即使另有符号给出不同长度。
+            var frame = !runtime && unwind.Find(a) is { } fde && fde.Start == a ? fde : bounds.GetValueOrDefault(a);
+            var body = frame.End > a ? image.Read(frame, starts) : empty;
             bool comparable = body.Comparable;
             var references = new List<FingerprintReference>();
             foreach (var r in body.References)
@@ -93,12 +95,12 @@ internal static class NamingCheck
                 else if (starts.Contains(r.Target))
                 {
                     // 入口已知而编译单元未知。只保留引用位置与目标，不把它当作生成代码或运行时行。
-                    unclassified.Add(r.Target);
                     references.Add(r);
                 }
                 else comparable = false;
             }
-            rows.Add(new(a, names.GetValueOrDefault(a) ?? [], body with { References = [.. references], Comparable = comparable }, 0));
+            rows.Add(new(a, runtime ? names.GetValueOrDefault(a) ?? [] : [],
+                body with { References = [.. references], Comparable = comparable }, 0, runtime));
         }
         static string Hash(string path)
         {
@@ -106,8 +108,8 @@ internal static class NamingCheck
             return Convert.ToHexString(SHA256.HashData(stream));
         }
         ImportAnchor[] stubs = [.. imports.Select(i => new ImportAnchor(i.Key, i.Value))];
-        return new(2, build, Hash(symbols), Hash(debug), image.Target, version, toolchain,
-            RuntimeFingerprint.Partition([.. rows], stubs), stubs, [.. unclassified.Order()]);
+        return new(3, build, Hash(symbols), Hash(debug), image.Target, version, toolchain,
+            RuntimeFingerprint.Partition([.. rows], stubs), stubs);
     }
 
     // LLD 的 AArch64 PLT 头占 32 字节，随后每个 JUMP_SLOT 对应 16 字节。
@@ -162,7 +164,8 @@ internal static class NamingCheck
             string debug = options.GetValueOrDefault("--debug") ?? Path.Combine(Path.GetDirectoryName(binary)!, "libil2cpp.dbg.so");
             var generated = Generate(input, image, unwind, entries, symbols, debug, version, toolchain);
             generated.Write(path);
-            Console.WriteLine($"构建 {generated.BuildId}，行 {generated.Rows.Length}，类 {generated.Rows.DistinctBy(r => r.Class).Count()}，可比较 {generated.Rows.Count(r => r.Body.Comparable)}，导入 {generated.Imports.Length}");
+            var runtime = generated.Rows.Where(r => r.Runtime).ToArray();
+            Console.WriteLine($"构建 {generated.BuildId}，运行时行 {runtime.Length}，类 {runtime.DistinctBy(r => r.Class).Count()}，可比较 {runtime.Count(r => r.Body.Comparable)}，导入 {generated.Imports.Length}，表外行 {generated.Rows.Length - runtime.Length}");
             return 0;
         }
         if (options.ContainsKey("--symbols")) return 2;

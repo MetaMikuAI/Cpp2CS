@@ -45,13 +45,17 @@ public sealed class RuntimeNaming
             if (!managed.Contains(address) && aliases.Length != 0) names[address] = new([.. aliases], "符号");
         if (reference.Target != target) { Admission = $"目标不符 {reference.Target} / {target ?? "未知"}，整表拒用"; return; }
 
-        var classes = reference.Rows.GroupBy(r => r.Class).ToDictionary(g => g.Key, g =>
+        // 表外函数只提供歧义反证，不进入锚点索引与传递目标。
+        var outsideKeys = reference.Rows.Where(r => !r.Runtime && r.Body.Comparable)
+            .Select(r => r.Body.LocalKey).ToHashSet(StringComparer.Ordinal);
+        var runtime = reference.Rows.Where(r => r.Runtime).ToArray();
+        var classes = runtime.GroupBy(r => r.Class).ToDictionary(g => g.Key, g =>
         {
             var body = g.First().Body;
             return new ClassInfo(body, body.Comparable ? body.LocalKey : null,
                 [.. g.SelectMany(r => r.Names).Distinct().Order(StringComparer.Ordinal)]);
         });
-        var classOf = reference.Rows.ToDictionary(r => r.Address, r => r.Class);
+        var classOf = runtime.ToDictionary(r => r.Address, r => r.Class);
         foreach (var group in reference.Imports.GroupBy(i => i.Name))
         {
             ulong id = group.Min(i => i.Address);
@@ -59,7 +63,7 @@ public sealed class RuntimeNaming
             classes.Add(id, new(null, null, [group.Key]));
         }
         var byName = classes.SelectMany(c => c.Value.Names.Select(name => (name, c.Key))).ToLookup(p => p.name, p => p.Key);
-        var byKey = classes.Where(c => c.Value.Key != null).ToLookup(c => c.Value.Key!, c => c.Key);
+        var byKey = classes.Where(c => c.Value.Key != null && !outsideKeys.Contains(c.Value.Key)).ToLookup(c => c.Value.Key!, c => c.Key);
         var local = image.Where(p => p.Value.Comparable).ToDictionary(p => p.Key, p => p.Value.LocalKey);
         Comparison Compare(Pair p)
         {

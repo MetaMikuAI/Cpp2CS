@@ -19,12 +19,12 @@ public sealed record FingerprintBody(int Length, string Sha256, FingerprintRefer
     }));
 }
 
-public sealed record FingerprintRow(ulong Address, string[] Names, FingerprintBody Body, ulong Class);
+public sealed record FingerprintRow(ulong Address, string[] Names, FingerprintBody Body, ulong Class, bool Runtime);
 public sealed record ImportAnchor(ulong Address, string Name);
 
-/// <summary>参照行只来自运行时编译单元。导入桩单独按重定位登记，不充当运行时函数体。</summary>
+/// <summary>全映像参与划分。只有运行时编译单元的行可以供名；导入桩按重定位单独登记。</summary>
 public sealed record RuntimeFingerprint(int Format, string BuildId, string SymbolsSha256, string DebugSha256, string Target,
-    string RuntimeVersion, string Toolchain, FingerprintRow[] Rows, ImportAnchor[] Imports, ulong[] UnclassifiedCode)
+    string RuntimeVersion, string Toolchain, FingerprintRow[] Rows, ImportAnchor[] Imports)
 {
     public static FingerprintRow[] Partition(FingerprintRow[] rows, ImportAnchor[] imports)
     {
@@ -37,8 +37,8 @@ public sealed record RuntimeFingerprint(int Format, string BuildId, string Symbo
                 .Select(e => $"{e.Offset}:{e.Kind}:{e.Target}")) : $"?{r.Address}");
         while (true)
         {
-            var groups = rows.GroupBy(r => keys[r.Address] + "/" + string.Join(',', r.Body.References
-                .Where(e => e.Kind == ReferenceKind.Code).Select(e => colors.GetValueOrDefault(e.Target, importClasses.GetValueOrDefault(e.Target, e.Target)))));
+            var groups = rows.GroupBy(r => (r.Runtime, Key: keys[r.Address] + "/" + string.Join(',', r.Body.References
+                .Where(e => e.Kind == ReferenceKind.Code).Select(e => colors.GetValueOrDefault(e.Target, importClasses.GetValueOrDefault(e.Target, e.Target))))));
             var next = new Dictionary<ulong, ulong>();
             foreach (var group in groups)
             {
@@ -61,20 +61,19 @@ public sealed record RuntimeFingerprint(int Format, string BuildId, string Symbo
     private void Validate()
     {
         static bool Hash(string? s) => s is { Length: 64 } && s.All(Uri.IsHexDigit);
-        if (Format != 2 || string.IsNullOrEmpty(BuildId) || !BuildId.All(Uri.IsHexDigit) ||
+        if (Format != 3) throw new InvalidDataException("参照表需要全映像划分，请重新建表");
+        if (string.IsNullOrEmpty(BuildId) || !BuildId.All(Uri.IsHexDigit) ||
             !Hash(SymbolsSha256) || !Hash(DebugSha256) || string.IsNullOrWhiteSpace(RuntimeVersion) ||
-            string.IsNullOrWhiteSpace(Toolchain) || string.IsNullOrWhiteSpace(Target) || Rows == null || Imports == null || UnclassifiedCode == null)
+            string.IsNullOrWhiteSpace(Toolchain) || string.IsNullOrWhiteSpace(Target) || Rows == null || Imports == null)
             throw new InvalidDataException("指纹表头无效");
         var addresses = new HashSet<ulong>();
-        foreach (ulong address in UnclassifiedCode)
-            if (!addresses.Add(address)) throw new InvalidDataException("缺编译单元的目标地址重复");
         foreach (var import in Imports)
             if (import == null || !addresses.Add(import.Address) || string.IsNullOrEmpty(import.Name))
                 throw new InvalidDataException("导入锚点无效");
         foreach (var row in Rows)
             if (row is not { Body: { References: not null } b, Names: not null } || !addresses.Add(row.Address) ||
                 b.Length < 0 || b.Length % 4 != 0 || !Hash(b.Sha256) || b.Comparable && b.Length == 0 ||
-                row.Names.Any(string.IsNullOrEmpty) || row.Names.Distinct().Count() != row.Names.Length)
+                !row.Runtime && row.Names.Length != 0 || row.Names.Any(string.IsNullOrEmpty) || row.Names.Distinct().Count() != row.Names.Length)
                 throw new InvalidDataException("指纹行无效");
         foreach (var row in Rows)
         {
