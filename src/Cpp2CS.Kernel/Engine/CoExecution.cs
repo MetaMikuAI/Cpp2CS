@@ -68,6 +68,8 @@ public sealed partial class CoExecution
         public ImmutableHashSet<Term> PureCalls { get; init; } = [];
         /// <summary>证明一条声明时，这条路径上与声明有关的记录（见 CoExecution.Claims.cs）。</summary>
         public Trail? Trail { get; init; }
+        /// <summary>模板一侧的一步使路径条件矛盾（登记不可变的位置之后，已成立的文字不能同时成立）：这条路径不存在。</summary>
+        public bool Infeasible { get; init; }
     }
 
     private enum Role : byte { Native, Template, Inner }
@@ -104,6 +106,11 @@ public sealed partial class CoExecution
     private int steps, paths;
     /// <summary>最近一次原生读写落在托管堆上（不是帧对象，也不是映像数据区）。</summary>
     private bool heapAccess;
+    private ImmutableArray<RuntimeTargetDefinition>? targetDefinitions;
+
+    /// <summary>规格登记的、随目标而变的定义（设计 7.8）：按快照给出的目标选行。比较两张模板时没有现场，也就没有这些行。</summary>
+    private ImmutableArray<RuntimeTargetDefinition> TargetDefinitions => targetDefinitions ??=
+        native?.Target is { } target ? [.. RuntimeTargetDefinitions.Entries.Where(d => d.Targets.Contains(target))] : [];
 
     private CoExecution(MethodSnapshot native, FlowGraph<TemplateEffect> template, MethodBody body, INativeFacts facts,
         Func<ulong, MethodSnapshot?>? snapshots, int budget)
@@ -335,7 +342,7 @@ public sealed partial class CoExecution
             substituted[i] = foreign ? Import(row[i], side.Env, memo, ref fresh) : Substitute(row[i], side.Env, memo);
             // 声明的操作数是原生一侧的项：模板的形参换成它们之后，再按现场的环境取值。
             if (lower && run is not null) substituted[i] = Substitute(substituted[i], state.Native.Env, native2 ??= new(ReferenceEqualityComparer.Instance));
-            if (lower) substituted[i] = Lower(substituted[i], ref state);
+            if (lower && !state.Infeasible) substituted[i] = Lower(substituted[i], ref state);
         }
         if (fresh != state.Fresh) state = state with { Fresh = fresh };
         var result = ImmutableArray.CreateBuilder<Term>(row.Length);
@@ -378,18 +385,21 @@ public sealed partial class CoExecution
     private Term Lower(Term term, ref State state)
     {
         var conditions = state.Conditions;
+        // 登记不可变的位置使路径条件矛盾时（PathConditions.WithImmutable 得到空），这条路径不存在；其余的项不再下降。
+        bool infeasible = false;
         var atCall = state;
         var layout = facts.Layout;
         Term Field(Term owner, int offset, int bits)
         {
             var address = conditions.Evaluate(terms.Add(owner, terms.Constant(offset, layout.PointerBits)));
-            conditions = conditions.WithImmutable(address, bits);
+            if (conditions.WithImmutable(address, bits) is { } known) conditions = known;
+            else infeasible = true;
             return terms.Attribute(new AttributeId(KernelAttributes.Load), bits, address, terms.Zero(32));
         }
         var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
         Term Go(Term t)
         {
-            if (t.Operands.Length == 0) return t;
+            if (infeasible || t.Operands.Length == 0) return t;
             if (memo.TryGetValue(t, out var done)) return done;
             var parts = new Term[t.Operands.Length];
             bool changed = false;
@@ -398,13 +408,14 @@ public sealed partial class CoExecution
                 parts[i] = Go(t.Operands[i]);
                 changed |= !ReferenceEquals(parts[i], t.Operands[i]);
             }
+            if (infeasible) return t;
             Term result = changed ? terms.Rebuild(t, parts) : t;
             if (result.Kind == TermKind.Attribute && result.Attribute.Value is (int)RuntimeFunction.ArrayLength or (int)RuntimeFunction.ArrayLengthNative)
             {
                 // il2cpp-object-internals.h: Il2CppArray::max_length；il2cpp-codegen-il2cpp.h: IL2CPP_ARRAY_BOUNDS_CHECK。
                 int bits = result.Attribute.Value == (int)RuntimeFunction.ArrayLength ? layout.ArrayLengthBits : layout.ArrayLengthStorageBits;
                 result = Field(result.Operands[0], layout.ArrayLengthOffset, bits);
-                conditions = conditions.WithUpperBound(conditions.Evaluate(result), (UInt128)layout.ArrayLengthMaximum);
+                if (!infeasible) conditions = conditions.WithUpperBound(conditions.Evaluate(result), (UInt128)layout.ArrayLengthMaximum);
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.ClassOf)
             {
@@ -427,24 +438,59 @@ public sealed partial class CoExecution
                 var named = result;
                 if (!atCall.PureCalls.Any(call => call.Attribute == named.Attribute && conditions.Same(call.Operands[0], named.Operands[0])
                     && conditions.Same(call.Operands[1], named.Operands[1])))
-                    result = InlineTypeTest(result, type, atCall, ref conditions);
+                    result = InlineTypeTest(result, type, atCall, ref conditions, ref infeasible);
             }
             else if (result.Kind == TermKind.Attribute && result.Attribute.Value == (int)RuntimeFunction.FieldAddress && result.Operands[1].Kind == TermKind.Entity)
             {
                 // 经地址取字段的地址：所属值的地址加字段在值里的偏移。
                 result = terms.Add(result.Operands[0], terms.Constant(OffsetInValue(result.Operands[1].Entity), result.Width));
             }
+            else if (result.Kind == TermKind.Attribute && TargetDefinition(result) is { } definition)
+            {
+                // 具名函数在这个目标上的定义（规格登记的等式，设计 7.8）只对有定义条件成立的执行成立（9.1）：
+                // 条件并入路径条件，用到这条等式的结论只对这些执行有效，记进用到的有定义条件；条件在此处不能成立时不用这条等式。
+                if (conditions.Decide(definition.Defined) == true) result = definition.Value;
+                else if (conditions.With(definition.Defined, true) is { } assumed)
+                {
+                    conditions = assumed;
+                    assumptions.Add($"{definition.Function} 的目标定义的有定义条件");
+                    result = definition.Value;
+                }
+            }
             memo[t] = result;
             return result;
         }
         var lowered = Go(term);
         if (!ReferenceEquals(conditions, state.Conditions)) state = state with { Conditions = conditions };
+        if (infeasible) state = state with { Infeasible = true };
         return lowered;
     }
 
+    /// <summary>具名函数的项在这个目标上登记的定义：定义与有定义条件里的形参换成这个项的实参。没有登记时为空。</summary>
+    private (Term Value, Term Defined, RuntimeFunction Function)? TargetDefinition(Term named)
+    {
+        foreach (var definition in TargetDefinitions)
+        {
+            if (named.Attribute.Value != (int)definition.Function || named.Width != definition.Value.Width
+                || named.Operands.Length != 1 || named.Operands[0].Width != definition.Argument.Width) continue;
+            var memo = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
+            Term Instantiate(Term t)
+            {
+                if (ReferenceEquals(t, definition.Argument)) return named.Operands[0];
+                if (memo.TryGetValue(t, out var done)) return done;
+                var parts = new Term[t.Operands.Length];
+                for (int i = 0; i < parts.Length; i++) parts[i] = Instantiate(t.Operands[i]);
+                return memo[t] = terms.Transplant(t, parts);
+            }
+            return (Instantiate(definition.Value), Instantiate(definition.DefinedWhen), definition.Function);
+        }
+        return null;
+    }
+
     /// <summary>执行规格登记的 IsInstSealed 或 IsInstClass 的纯内联图（设计 9.1）。
-    /// 走查给出所有返回路径，实参按内联体的签名绑定。尚未确定的分支用选择项保留。</summary>
-    private Term InlineTypeTest(Term call, RuntimeTypeCondition type, State state, ref PathConditions conditions)
+    /// 走查给出所有返回路径，实参按内联体的签名绑定。尚未确定的分支用选择项保留。
+    /// 内联体里的读取登记为不可变时路径条件矛盾：在必经前缀上，调用点所在的路径不存在（infeasible 置真）；否则只是内联体的这条路径不存在。</summary>
+    private Term InlineTypeTest(Term call, RuntimeTypeCondition type, State state, ref PathConditions conditions, ref bool infeasible)
     {
         if (inlineBodies.IsDefault) inlineBodies = RuntimeInlineBodies.ForLayout(facts.Layout);
         var body = inlineBodies.Single(b => b.Function == RuntimeFunction.IsInstance && b.TargetType == type);
@@ -474,6 +520,12 @@ public sealed partial class CoExecution
             {
                 Step();
                 var test = Value(literal.Term!);
+                if (local.Infeasible)
+                {
+                    if (ReferenceEquals(guard, terms.True)) { infeasible = true; return call; }
+                    guard = terms.False;
+                    break;
+                }
                 // 只有必经前缀上的读取可以在整个调用点登记为不可变。
                 if (ReferenceEquals(guard, terms.True)) conditions = local.Conditions;
                 bool truth = literal.Value != 0;
@@ -490,6 +542,11 @@ public sealed partial class CoExecution
             }
             if (guard.IsZero) continue;
             var value = Value(path.Outcome[0]);
+            if (local.Infeasible)
+            {
+                if (ReferenceEquals(guard, terms.True)) { infeasible = true; return call; }
+                continue;
+            }
             value = local.Conditions.Evaluate(value);
             if (ReferenceEquals(guard, terms.True)) { conditions = local.Conditions; return value; }
             returns.Add((guard, value));
@@ -969,10 +1026,18 @@ public sealed partial class CoExecution
         return offset >= header ? offset - header : throw new Refuted(Verdict.MissingFact, $"字段 {field} 的偏移 {offset} 小于对象头，不是值类型的字段");
     }
 
+    /// <summary>模板走到它的下一个事件。这一步使路径条件矛盾时，这条路径不存在，结果是空的事件。</summary>
     private Event Template(ref State state)
+    {
+        var reached = Advance(ref state);
+        return state.Infeasible ? new Event(EventKind.Vacuous) : reached;
+    }
+
+    private Event Advance(ref State state)
     {
         while (true)
         {
+            if (state.Infeasible) return new Event(EventKind.Vacuous);
             if (state.Inner is not null)
             {
                 // 正在展开一次调用：推进被调方法的快照。它返回时，结果按调用约定取出，模板从调用之后继续。
@@ -1003,6 +1068,7 @@ public sealed partial class CoExecution
             var id = new OccurrenceId(side.Block, side.Index);
             var effect = template[id];
             var operands = Values(templateGraph.Operands(id), side, ref state, lower: true);
+            if (state.Infeasible) return new Event(EventKind.Vacuous);
             var next = side with { Index = side.Index + 1 };
             switch (effect.Kind)
             {

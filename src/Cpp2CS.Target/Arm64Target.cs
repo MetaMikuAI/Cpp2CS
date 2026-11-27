@@ -179,7 +179,7 @@ public sealed class Arm64Target
             }
         }
         var live = LiveRows.Compute(heads, instructions, pads, tables, f.End);
-        var builder = new SnapshotBuilder(64);
+        var builder = new SnapshotBuilder(64, target: "arm64");
         builder.SetReturnSlots(Abi.Slots(Abi.Return));
         int[] widths = Enumerable.Range(0, Abi.Count).Select(Abi.Width).ToArray();
         var ids = new Dictionary<ulong, BlockId>();

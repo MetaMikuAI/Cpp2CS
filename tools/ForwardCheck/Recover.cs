@@ -18,10 +18,43 @@ namespace Cpp2CS.Tools.ForwardCheck;
 /// </summary>
 internal static partial class Recover
 {
+    /// <summary>
+    /// isolated 为真时，整批跑完之后再把每个用例放进新的上下文（重新读入二进制、元数据、事实与快照）单独恢复一次，
+    /// 与整批的结果逐例比较：结论不能依赖同一进程里先跑了哪些用例。
+    /// </summary>
     public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show,
-        string? emit, string? generated)
+        string? emit, string? generated, bool isolated = false)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
+        var items = document.RootElement.EnumerateArray().ToList();
+        var together = new Dictionary<string, string>(StringComparer.Ordinal);
+        int status = Batch(items, assemblies, binary, metadataPath, symbolFile, target, show, emit, generated, together, quiet: false);
+        if (!isolated) return status;
+        var differences = new List<string>();
+        int compared = 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var item in items)
+        {
+            var alone = new Dictionary<string, string>(StringComparer.Ordinal);
+            Batch([item], assemblies, binary, metadataPath, symbolFile, target, "", null, null, alone, quiet: true);
+            foreach (var (name, line) in alone)
+            {
+                compared++;
+                if (!together.TryGetValue(name, out var batched) || batched != line) differences.Add($"{name}\n      整批：{batched?.Trim() ?? "没有"}\n      单独：{line.Trim()}");
+            }
+        }
+        Console.WriteLine($"逐例单独恢复：用例 {compared} 个，与整批逐例相同 {compared - differences.Count} 个，不同 {differences.Count} 个；用时 {clock.Elapsed.TotalSeconds:F1} 秒");
+        foreach (string line in differences) Console.WriteLine($"  不同  {line}");
+        return status != 0 || differences.Count > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// 恢复一组用例。summaries 按用例名记下每个用例的结论行（声明、凭据、选中的条数，等价与否，指令条数或各层的独立洞，首个洞）。
+    /// quiet 为真时只做恢复与 IL 对照，不输出，不做对抗声明、交叉对照与写出。
+    /// </summary>
+    private static int Batch(IReadOnlyList<JsonElement> items, string assemblies, string binary, string metadataPath, string symbolFile, string target,
+        string show, string? emit, string? generated, Dictionary<string, string> summaries, bool quiet)
+    {
         var input = Il2CppInput.Load(binary, metadataPath);
         byte[] bytes = File.ReadAllBytes(binary);
         using var metadata = ModelInput.Open(assemblies, input, bytes);
@@ -54,9 +87,15 @@ internal static partial class Recover
         var byReason = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var refuted = new SortedDictionary<string, int>(StringComparer.Ordinal);
         var rows = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var assumed = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
         var lines = new List<string>();
+        void Line(string name, string text)
+        {
+            lines.Add(text);
+            summaries[name] = text;
+        }
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        foreach (var item in document.RootElement.EnumerateArray())
+        foreach (var item in items)
         {
             var description = item.GetProperty("case");
             var method = item.GetProperty("method");
@@ -76,13 +115,13 @@ internal static partial class Recover
             catch (ExpansionException e)
             {
                 unreadable++;
-                lines.Add($"  不能对照 {name}：真实 IL 读不出来：{e.Message}");
+                Line(name, $"  不能对照 {name}：真实 IL 读不出来：{e.Message}");
                 continue;
             }
             if (Snapshot(address) is not { } snapshot)
             {
                 unreadable++;
-                lines.Add($"  不能对照 {name}：没有快照");
+                Line(name, $"  不能对照 {name}：没有快照");
                 continue;
             }
 
@@ -102,6 +141,11 @@ internal static partial class Recover
                 foreach (string row in outcome.Certificate?.Rows ?? [])
                 {
                     if (!rows.TryGetValue(row, out var users)) rows[row] = users = [];
+                    users.Add(name);
+                }
+                foreach (string assumption in outcome.Certificate?.Assumptions ?? [])
+                {
+                    if (!assumed.TryGetValue(assumption, out var users)) assumed[assumption] = users = [];
                     users.Add(name);
                 }
                 if (outcome.Refutation is { } refutation) Tally(refuted, Reason(refutation.Layer.ToString(), refutation.Obligation));
@@ -136,7 +180,7 @@ internal static partial class Recover
                     Tally(kinds, reason);
                 }
                 var first = body.Holes.FirstOrDefault(h => !h.Derived) ?? body.Holes[0];
-                lines.Add($"  有洞     {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}；"
+                Line(name, $"  有洞     {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}；"
                     + $"独立洞 {explanation.IndependentHoles}（{string.Join("，", kinds.Select(k => $"{k.Key} {k.Value}"))}）；首个：{first.What}：{Short(first.Reason)}");
                 continue;
             }
@@ -165,7 +209,7 @@ internal static partial class Recover
                 recoveredBodies.Add((name, Signature(real.Method), recovered, tokens));
                 realBodies.Add((name, Signature(real.Method), real, metadata.Tokens(module, real.Method.Entity), snapshot.Terms, snapshot.PointerBits));
             }
-            if (verdict.Length == 0)
+            if (verdict.Length == 0 && !quiet)
                 adversary.Run(name, view, context, explanation, outcomes, candidate =>
                 {
                     var (body2, tokens2) = candidate.Encode()!.Value;
@@ -173,15 +217,17 @@ internal static partial class Recover
                     var actual = IlExpander.Expand(body2, entities, tokens2, snapshot.Terms, 2, snapshot.PointerBits);
                     return CoExecution.Equivalent(expected.Graph, actual.Graph, real, facts, metadata.Callees(snapshot.Terms, snapshot.PointerBits)).Verdict == Verdict.Proved;
                 });
-            lines.Add($"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
+            Line(name, $"  {(verdict.Length == 0 ? "等价    " : "不等价  ")} {name}：声明 {claims.Count}、凭据 {outcomes.Count(o => o.Certificate is not null)}、选中 {explanation.Selected.Length}"
                 + $"、指令 {body.Instructions.Count(i => i.Opcode[0] != '.')} 条{(verdict.Length == 0 ? "" : "；" + Short(verdict))}");
         }
 
+        if (quiet) return different == 0 ? 0 : 1;
         Console.WriteLine($"恢复与 IL 对照（{target}）：用例 {cases} 个，等价 {equivalent} 个，不等价 {different} 个，有洞 {holed} 个，不能对照 {unreadable} 个；用时 {clock.Elapsed.TotalSeconds:F1} 秒");
         Console.WriteLine($"  声明 {submitted} 条，凭据 {certified} 条，选中 {chosen} 条；选择不精确 {inexact} 个方法");
         Console.WriteLine($"  独立洞按层与义务：{string.Join("，", byReason.Select(k => $"{k.Key} {k.Value}"))}");
         Console.WriteLine($"  被反驳的声明按层与义务：{string.Join("，", refuted.Select(k => $"{k.Key} {k.Value}"))}");
         Console.WriteLine($"  用到的独立关系的行：{string.Join("，", rows.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
+        Console.WriteLine($"  凭据用到的有定义条件：{string.Join("，", assumed.Select(r => $"{r.Key}（{r.Value.Count} 个用例）"))}");
         foreach (string line in lines.Order(StringComparer.Ordinal)) Console.WriteLine(line);
 
         int pairs = 0, rejected = 0, number = 3;

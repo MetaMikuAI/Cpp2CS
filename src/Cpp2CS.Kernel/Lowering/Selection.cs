@@ -296,4 +296,12 @@ public static class Lowering
         if (writer.Unwritable.Count > 0) throw new InvalidOperationException("解释里有写不出的声明：选择没有核对值可得");
         return new ManagedBody(writer.Host, [.. writer.Code], writer.Locals, [.. writer.Holes]);
     }
+
+    /// <summary>
+    /// 下降核对表达式时，一段指令代表的项（设计第 10 节）：按目录展开，经内核的分情况读出栈顶的值。ldarg 的第 i 个形参类型是
+    /// host 的第 i 个参数，代表 arguments[i]。不是表达式时为空。供验证使用（设计第 15 节）。
+    /// </summary>
+    public static Term? Denote(IReadOnlyList<ManagedInstruction> expression, MethodShape host, IReadOnlyList<Term> arguments,
+        IMetadataView metadata, TermPool terms, int pointerBits) =>
+        ExpressionDenotation.Denote(expression, null, (argument, index) => argument ? (host.Parameters[index], arguments[index]) : null, metadata, terms, pointerBits);
 }

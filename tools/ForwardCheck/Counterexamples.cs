@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using Cpp2CS.Kernel;
 using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Kernel.Sources;
@@ -413,6 +414,27 @@ internal static class Counterexamples
                 }
                 return "错误的图通过了构造";
             }),
+
+            // ---- 路径条件 ----
+
+            // 设计 7.7：加入知识之后矛盾时得到空；7.4：运行时不可变的位置不被写入改变。语料 ArrayStore.StoreThenLoad 的原生代码
+            // 先读数组长度做下标检查，写元素之后再读一次长度做第二次检查。长度登记为不可变之后两次读取是同一个值，
+            // “第一次检查通过”与“第二次检查不通过”不能同时成立。两条文字以哪种次序加入，结果都须是矛盾。
+            new("不可变位置上的两次读取使检查矛盾", "设计 7.4、7.7；语料 ArrayStore.StoreThenLoad 的原生代码", ImmutableContradiction),
+
+            // 同上：写入前后两次读同一个不可变位置，一次已知等于 5，一次已知等于 7。登记不可变之后两次读取是同一个值，不能同时等于两个常量。
+            new("不可变位置上的两次读取等于不同的常量", "设计 7.4、7.7", ImmutableConstants),
+
+            // 设计 7.4：登记的取值范围与成立的比较一起供区间判定使用。同一个值有几条上界时用最紧的一条，与登记和文字的次序无关：
+            // 数组长度登记的范围（不超过 0xFFFFFFF0）较松，下标检查 x < 15 给出的界较紧；后者成立时 x 的最高位为 0，符号扩展就是零扩展。
+            new("区间判定取最紧的上界", "设计 7.4、7.7", TightestBound),
+
+            // ---- 下降 ----
+
+            // ECMA-335 III.3.18 brtrue：值非零（真）时转移。语料 Control.Conditional 的真实 IL 是
+            // ldarg.0; brtrue.s L; ldarg.2; ret; L: ldarg.1; ret——条件成立时返回第 1 个形参。下降把选择写成带栈上汇合的转移，
+            // 核对表达式时读出的项须与真实 IL 两条路径合成的选择相同；两支互换的写法读出的项须与它不同。
+            new("选择的两支不能互换", "ECMA-335 III.3.18 brtrue；语料 Control.Conditional 的真实 IL", SelectArms),
         };
 
         int passed = 0;
@@ -430,6 +452,92 @@ internal static class Counterexamples
         }
         Console.WriteLine($"反例：{items.Count} 个，通过 {passed} 个，用时 {clock.Elapsed.TotalSeconds:F1} 秒");
         return passed == items.Count ? 0 : 1;
+    }
+
+    private static string? ImmutableContradiction()
+    {
+        var p = new TermPool();
+        var array = p.EntryParameter(0, Integer(0), 64);
+        var index = p.Slice(p.EntryParameter(0, Integer(1), 64), 0, 32);
+        var address = p.Add(array, p.Constant(0x18, 64));
+        // 第一次读取在写入之前（历元 1），第二次在一次不能证明不重叠的写入之后（版本由那次写入给出）。
+        var before = p.Attribute(new AttributeId(KernelAttributes.Load), 32, address, p.Constant(1, 32));
+        var after = p.Attribute(new AttributeId(KernelAttributes.LoadAfter), 32, address, p.EntryParameter(0, Integer(2), 64));
+        foreach (bool passedFirst in (bool[])[true, false])
+        {
+            (Term Condition, bool Value)[] literals = [(p.Ult(index, before), true), (p.Ult(index, after), false)];
+            if (!passedFirst) Array.Reverse(literals);
+            PathConditions? conditions = PathConditions.Empty(p);
+            foreach (var (condition, value) in literals) conditions = conditions?.With(condition, value);
+            if (conditions is null) return "登记不可变之前两条检查就被判为矛盾";
+            if (conditions.WithImmutable(address, 32) is not null) return $"{(passedFirst ? "先加第一次检查" : "先加第二次检查")}：登记不可变之后仍判为相容";
+        }
+        return null;
+    }
+
+    private static string? ImmutableConstants()
+    {
+        var p = new TermPool();
+        var array = p.EntryParameter(0, Integer(0), 64);
+        var address = p.Add(array, p.Constant(0x18, 64));
+        var before = p.Attribute(new AttributeId(KernelAttributes.Load), 32, address, p.Constant(1, 32));
+        var after = p.Attribute(new AttributeId(KernelAttributes.LoadAfter), 32, address, p.EntryParameter(0, Integer(2), 64));
+        foreach (bool beforeFirst in (bool[])[true, false])
+        {
+            Term[] equalities = [p.Eq(before, p.Constant(5, 32)), p.Eq(after, p.Constant(7, 32))];
+            if (!beforeFirst) Array.Reverse(equalities);
+            PathConditions? conditions = PathConditions.Empty(p);
+            foreach (var equality in equalities) conditions = conditions?.With(equality, true);
+            if (conditions is null) return "登记不可变之前两条等式就被判为矛盾";
+            if (conditions.WithImmutable(address, 32) is not null) return $"{(beforeFirst ? "先加写入之前的读取" : "先加写入之后的读取")}：登记不可变之后仍判为相容";
+        }
+        return null;
+    }
+
+    private static string? TightestBound()
+    {
+        var p = new TermPool();
+        var x = p.Slice(p.EntryParameter(0, Integer(0), 64), 0, 32);
+        var widened = p.SignExtend(x, 64);
+        // 15 与 0xFFFFFFE1 都不是 2 的幂：比较保持为无符号小于（小于 2 的幂的比较会化成高位全零）。
+        foreach (bool tightFirst in (bool[])[true, false])
+        {
+            (Term Condition, bool Value)[] literals = [(p.Ult(x, p.Constant(15, 32)), true), (p.Ult(x, p.Constant(0xFFFFFFE1, 32)), true)];
+            if (!tightFirst) Array.Reverse(literals);
+            PathConditions? conditions = PathConditions.Empty(p).WithUpperBound(x, 0xFFFFFFF0);
+            foreach (var (condition, value) in literals) conditions = conditions?.With(condition, value);
+            if (conditions is null) return "几条上界被判为矛盾";
+            if (conditions.Evaluate(widened) != p.ZeroExtend(x, 64)) return $"{(tightFirst ? "先加较紧的界" : "先加较松的界")}：符号扩展没有化成零扩展";
+        }
+        return null;
+    }
+
+    private static string? SelectArms()
+    {
+        var boolean = new TypeShape(StackKind.Int32, 8, false, default) { TwoValued = true };
+        TypeShape[] parameters = [boolean, Int32, Int32];
+        var graph = Expand([0x02, 0x2d, 0x02, 0x04, 0x2a, 0x03, 0x2a], Int32, parameters);
+        // 真实 IL 的两条路径：各带分支条件的一个取值与返回值。
+        var paths = Walk(graph);
+        if (paths.Length != 2) return $"真实 IL 走查得到 {paths.Length} 条路径";
+        Term? condition = null;
+        var returned = new Term?[2];
+        foreach (var path in paths)
+        {
+            if (path.End != PathEnd.Return || path.Conditions.Length != 1 || path.Conditions[0].Term is not { } test || (condition ??= test) != test)
+                return "真实 IL 的路径应各在同一个分支条件下返回";
+            returned[path.Conditions[0].Value != 0 ? 0 : 1] = path.Outcome[0];
+        }
+        var expected = graph.Terms.Select(condition!, returned[0]!, returned[1]!);
+        var host = new MethodShape(default, false, [.. parameters], Int32, VariantCondition.StaticMethod);
+        var arguments = graph.EntryParameters.OrderBy(e => e.Slot.Index).ToArray();
+        // 条件成立时转到 L1 取 taken，否则顺序执行取 fallthrough，两支在 L2 汇合。
+        ManagedInstruction[] Written(int taken, int fallthrough) =>
+            [new("ldarg", 0), new("brtrue", Target: 1), new("ldarg", fallthrough), new("br", Target: 2), new(".label", 1), new("ldarg", taken), new(".label", 2)];
+        var written = Lowering.Denote(Written(1, 2), host, arguments, new StaticFieldView(), graph.Terms, 64);
+        if (written != expected) return $"下降的写法读出 {written?.ToString() ?? "空"}，真实 IL 是 {expected}";
+        var swapped = Lowering.Denote(Written(2, 1), host, arguments, new StaticFieldView(), graph.Terms, 64);
+        return swapped is not null && swapped != expected ? null : $"两支互换的写法读出 {swapped?.ToString() ?? "空"}，应与 {expected} 不同";
     }
 
     // ---- 辅助 ----

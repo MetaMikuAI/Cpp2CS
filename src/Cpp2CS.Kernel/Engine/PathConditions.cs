@@ -66,8 +66,11 @@ public sealed class PathConditions
     public bool Initialized(EntityRef type) => initialized.Contains(type);
     public PathConditions WithInitialized(EntityRef type) => new(terms, literals, constants, initialized.Add(type), immutable, upper);
 
-    /// <summary>登记一个运行时不可变的位置：它上面的读取与历元无关。</summary>
-    public PathConditions WithImmutable(Term address, int width)
+    /// <summary>
+    /// 登记一个运行时不可变的位置：它上面的读取与历元无关。已有文字、等式与上界里这个位置上的读取换成与历元无关的写法，键随之更新；
+    /// 换写之后两条文字成了同一个条件而取值相反、成了与取值相反的常量，或同一个项等于两个不同的常量，说明这组条件不能同时成立，返回空。
+    /// </summary>
+    public PathConditions? WithImmutable(Term address, int width)
     {
         if (immutable.GetValueOrDefault(address) >= width) return this;
         var fields = immutable.SetItem(address, width);
@@ -79,10 +82,16 @@ public sealed class PathConditions
         {
             bool value = truth;
             var now = Strip(canonical.Evaluate(literal), ref value);
-            if (!now.IsConstant) rekeyed[now] = value;
+            if (!Settle(rekeyed, now, value)) return null;
         }
         var values = ImmutableDictionary<Term, Term>.Empty.ToBuilder();
-        foreach (var (term, constant) in constants) values[canonical.Evaluate(term)] = constant;
+        foreach (var (term, constant) in constants)
+        {
+            var key = canonical.Evaluate(term);
+            if (key.IsConstant) { if (!ReferenceEquals(key, constant)) return null; continue; }
+            if (values.TryGetValue(key, out var known)) { if (!ReferenceEquals(known, constant)) return null; continue; }
+            values[key] = constant;
+        }
         var bounds = ImmutableDictionary<Term, UInt128>.Empty.ToBuilder();
         foreach (var (term, maximum) in upper)
         {
@@ -90,6 +99,18 @@ public sealed class PathConditions
             if (!bounds.TryGetValue(key, out var bound) || maximum < bound) bounds[key] = maximum;
         }
         return new PathConditions(terms, rekeyed.ToImmutable(), values.ToImmutable(), initialized, fields, bounds.ToImmutable());
+    }
+
+    /// <summary>
+    /// 把一条换写过的文字放进新的文字表：常量与取值一致的不必再记，相反的是矛盾；同一个条件已经记了相反的取值也是矛盾。
+    /// 矛盾时返回假。结果与文字的列举次序无关。
+    /// </summary>
+    private static bool Settle(ImmutableDictionary<Term, bool>.Builder settled, Term condition, bool value)
+    {
+        if (condition.IsConstant) return condition.IsZero != value;
+        if (settled.TryGetValue(condition, out bool known)) return known == value;
+        settled[condition] = value;
+        return true;
     }
 
     /// <summary>从同一地址开始的读取是否完全落在已登记的不可变字内。</summary>
@@ -129,17 +150,18 @@ public sealed class PathConditions
                 return terms.Sub(t.Operands[0], terms.Mul(terms.Divide(t.Op == Op.SRem ? Op.SDiv : Op.UDiv, t.Operands[0], t.Operands[1]), t.Operands[1]));
             return t;
         }
-        // 上界：登记的取值范围，或一条成立的无符号比较（x < y，或 非(y < x)）给出的界。
+        // 上界：登记的取值范围与各条成立的无符号比较（x < y，或 非(y < x)）给出的界里最小的一个，与文字的列举次序无关。
         UInt128? Bounded(Term x)
         {
-            if (UpperBound(x) is { } direct) return direct;
+            UInt128? best = UpperBound(x);
+            void Offer(UInt128 bound) { if (best is not { } known || bound < known) best = bound; }
             foreach (var (literal, truth) in literals)
             {
                 if (literal.Kind != TermKind.Operation || literal.Op != Op.Ult) continue;
-                if (truth && ReferenceEquals(literal.Operands[0], x) && UpperBound(literal.Operands[1]) is { } limit && limit > 0) return limit - 1;
-                if (!truth && ReferenceEquals(literal.Operands[1], x) && UpperBound(literal.Operands[0]) is { } most) return most;
+                if (truth && ReferenceEquals(literal.Operands[0], x) && UpperBound(literal.Operands[1]) is { } limit && limit > 0) Offer(limit - 1);
+                if (!truth && ReferenceEquals(literal.Operands[1], x) && UpperBound(literal.Operands[0]) is { } most) Offer(most);
             }
-            return null;
+            return best;
         }
         bool Nonzero(Term t) =>
             t.Width <= 128 && (t.IsConstant ? !t.IsZero : known.TryGetValue(terms.Eq(t, terms.Zero(t.Width)), out bool zero) && !zero);
@@ -208,11 +230,10 @@ public sealed class PathConditions
         var settled = ImmutableDictionary<Term, bool>.Empty.ToBuilder();
         foreach (var (literal, truth) in nextLiterals)
         {
-            if (ReferenceEquals(literal, c)) { settled[literal] = truth; continue; }
+            if (ReferenceEquals(literal, c)) { if (!Settle(settled, literal, truth)) return null; continue; }
             bool expected = truth;
             var now = Strip(next.Evaluate(literal, ImmutableDictionary<Term, bool>.Empty), ref expected);
-            if (now.IsConstant) { if (now.IsZero == expected) return null; }
-            else settled[now] = expected;
+            if (!Settle(settled, now, expected)) return null;
         }
         return new PathConditions(terms, settled.ToImmutable(), nextConstants, initialized, immutable, nextUpper);
     }
