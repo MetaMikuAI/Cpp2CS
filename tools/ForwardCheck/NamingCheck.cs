@@ -10,15 +10,21 @@ namespace Cpp2CS.Tools.ForwardCheck;
 
 internal static class NamingCheck
 {
-    internal static Dictionary<ulong, string[]> Symbols(Il2CppInput input, string? path, bool truthOnly = false, FingerprintImage? image = null)
+    internal static Elf64? OpenSymbols(Elf64 elf, string? path)
+    {
+        if (path == null) return null;
+        var symbols = Elf64.Load(path);
+        if (symbols.BuildId() != elf.BuildId() || symbols.Machine != elf.Machine)
+            throw new InvalidDataException("分离符号与映像的构建标识或目标不一致");
+        if (!symbols.Sections.Any(s => s.Type == 2)) throw new InvalidDataException("符号文件缺少完整符号表");
+        return symbols;
+    }
+
+    internal static Dictionary<ulong, string[]> Symbols(Il2CppInput input, Elf64? symbols, bool truthOnly = false, FingerprintImage? image = null)
     {
         IEnumerable<ElfSymbol> rows = input.Elf.DynamicSymbols;
-        if (path != null)
+        if (symbols != null)
         {
-            var symbols = Elf64.Load(path);
-            if (symbols.BuildId() != input.Elf.BuildId() || symbols.Machine != input.Elf.Machine)
-                throw new InvalidDataException("分离符号与映像的构建标识或目标不一致");
-            if (!symbols.Sections.Any(s => s.Type == 2)) throw new InvalidDataException("符号文件缺少完整符号表");
             if (!truthOnly) image?.AddObjectBounds(symbols.ObjectSymbols().Where(s => s.Section < symbols.Sections.Count).Select(s => (s.Value, s.Size)));
             rows = truthOnly ? symbols.FunctionSymbols() : rows.Concat(symbols.FunctionSymbols());
         }
@@ -50,10 +56,11 @@ internal static class NamingCheck
     }
 
     internal static RuntimeNaming Match(Il2CppInput input, FingerprintImage image, UnwindIndex unwind,
-        RegisteredEntries entries, Dictionary<ulong, string[]> symbols, RuntimeFingerprint table)
+        RegisteredEntries entries, Dictionary<ulong, string[]> symbols, RuntimeFingerprint table, IReadOnlyDictionary<ulong, string> imports)
     {
         var anchors = symbols.ToDictionary();
-        foreach (var (a, name) in image.ImportStubs()) anchors[a] = [name];
+        // v4 用 @plt 区分导入桩与同名函数体；重定位里的符号名本身不带这个后缀。
+        foreach (var (a, name) in imports) anchors[a] = [name + "@plt"];
         var bodies = new Dictionary<ulong, FingerprintBody>();
         if (table.Target == image.Target)
         {
@@ -67,6 +74,11 @@ internal static class NamingCheck
         return new(table, bodies, anchors, entries.Managed, image.Target);
     }
 
+    internal static void NameImports(Dictionary<ulong, RuntimeName> names, IReadOnlyDictionary<ulong, string> imports)
+    {
+        foreach (var (address, symbol) in imports) names[address] = new([symbol], "导入重定位");
+    }
+
     private static RuntimeFingerprint Generate(Il2CppInput input, FingerprintImage image, UnwindIndex unwind, RegisteredEntries entries,
         string symbols, string debug, string version, string toolchain)
     {
@@ -74,8 +86,8 @@ internal static class NamingCheck
         string build = input.Elf.BuildId();
         if (Elf64.Load(debug).BuildId() != build) throw new InvalidDataException("调试信息与映像的构建标识不一致");
         var units = new CompilationUnits(debug, image.AddObjectBounds);
-        var names = Symbols(input, symbols, image: image);
-        var symbolFile = Elf64.Load(symbols);
+        var symbolFile = OpenSymbols(input.Elf, symbols)!;
+        var names = Symbols(input, symbolFile, image: image);
         var bounds = Bounds(unwind, symbolFile.FunctionSymbols().Concat(input.Elf.DynamicSymbols));
         var imports = image.ImportStubs();
         var starts = Entries(unwind, entries, names.Keys.Concat(imports.Keys));
@@ -111,7 +123,7 @@ internal static class NamingCheck
             using var stream = File.OpenRead(path);
             return Convert.ToHexString(SHA256.HashData(stream));
         }
-        ImportAnchor[] stubs = [.. imports.Select(i => new ImportAnchor(i.Key, i.Value))];
+        ImportAnchor[] stubs = [.. imports.Select(i => new ImportAnchor(i.Key, i.Value + "@plt"))];
         return new(4, build, Hash(symbols), Hash(debug), image.Target, version, toolchain,
             RuntimeFingerprint.Partition([.. rows], stubs), stubs);
     }
@@ -147,7 +159,7 @@ internal static class NamingCheck
             if (page.Name != "adrp" || load.Name != "ldr" || load.Size != 64 || page.D != load.N ||
                 (page.Destination(pc) & ~4095ul) + (ulong)load.Imm != r.Address || r.Addend != 0 ||
                 r.Symbol >= elf.DynamicSymbols.Count) throw new InvalidDataException("对照桩与重定位不一致");
-            yield return (pc, elf.DynamicSymbols[(int)r.Symbol].Name + "@plt");
+            yield return (pc, elf.DynamicSymbols[(int)r.Symbol].Name);
         }
     }
 
@@ -174,29 +186,34 @@ internal static class NamingCheck
         }
         if (options.ContainsKey("--symbols")) return 2;
         var table = RuntimeFingerprint.Read(path);
-        var result = Match(input, image, unwind, entries, Symbols(input, null), table);
+        var imports = image.ImportStubs();
+        var result = Match(input, image, unwind, entries, Symbols(input, null), table, imports);
+        var names = result.Names.ToDictionary();
+        NameImports(names, imports);
         Console.WriteLine(result.Admission);
         foreach (var example in result.Counterexamples) Console.WriteLine(example);
         if (!options.TryGetValue("--truth-symbols", out string? truthPath))
         {
-            foreach (var group in result.Names.Values.GroupBy(n => n.Basis)) Console.WriteLine($"{group.Key} {group.Count()}");
+            foreach (var group in names.Values.GroupBy(n => n.Basis)) Console.WriteLine($"{group.Key} {group.Count()}");
             return result.Admitted ? 0 : 1;
         }
         var target = new Arm64Target(input.Elf, bytes, entries.Managed.Select(a => a - input.Elf.ImageBase));
-        Callee Direct(ulong a) => result.Names.TryGetValue(a, out var n) ?
-            new(n.Operation == null ? CalleeKind.Unknown : CalleeKind.Runtime, n.Operation, n.Name, n.Basis) :
-            new(CalleeKind.Unknown, null, "", "");
+        Callee Direct(ulong a)
+        {
+            var n = names.GetValueOrDefault(a);
+            return new(n?.Operation == null ? CalleeKind.Unknown : CalleeKind.Runtime, n?.Operation, n?.Name ?? "", n?.Basis ?? "");
+        }
         var wrappers = new Dictionary<ulong, ulong>();
         foreach (var f in unwind.Frames)
-            if (!entries.Managed.Contains(f.Start) && !entries.Runtime.Contains(f.Start) && !result.Names.ContainsKey(f.Start) && image.MayCallNamed(f, result.Names) &&
+            if (!entries.Managed.Contains(f.Start) && !entries.Runtime.Contains(f.Start) && !names.ContainsKey(f.Start) && image.MayCallNamed(f, names) &&
                 BridgeFacts.WrapperTarget(target, f.Start, Direct, out _) is ulong to) wrappers.Add(f.Start, to);
         // 盲测完成后才读独立符号。同址真值的每个名字都应落入该参照类的名字集合。
-        var truth = Symbols(input, truthPath, truthOnly: true).Where(p => !entries.Managed.Contains(p.Key)).ToDictionary();
+        var truth = Symbols(input, OpenSymbols(input.Elf, truthPath), truthOnly: true).Where(p => !entries.Managed.Contains(p.Key)).ToDictionary();
         foreach (var (a, name) in TruthImports(input, truthPath, options.GetValueOrDefault("--truth-debug"))) truth[a] = [name];
         bool Verified(ulong a, RuntimeName n) => truth.TryGetValue(a, out var aliases) &&
             (n.Strength == null ? n.Symbols.All(aliases.Contains) : aliases.All(n.Symbols.Contains));
         int wrong = 0;
-        foreach (var group in result.Names.GroupBy(p => (p.Value.Basis, p.Value.Depth)).OrderBy(g => g.Key))
+        foreach (var group in names.GroupBy(p => (p.Value.Basis, p.Value.Depth)).OrderBy(g => g.Key))
         {
             int count = 0, correct = 0;
             foreach (var (a, name) in group)
@@ -208,8 +225,8 @@ internal static class NamingCheck
             Console.WriteLine($"{group.Key.Basis} {group.Key.Depth} 层 认出 {count}，正确 {correct}，错误 {count - correct}，召回 {correct}/{truth.Count}");
             wrong += count - correct;
         }
-        Console.WriteLine($"合计认出 {result.Names.Count}，正确 {result.Names.Count - wrong}，错误 {wrong}，真值地址 {truth.Count}");
-        int correctWrappers = wrappers.Count(p => Verified(p.Value, result.Names[p.Value]));
+        Console.WriteLine($"合计认出 {names.Count}，正确 {names.Count - wrong}，错误 {wrong}，真值地址 {truth.Count}");
+        int correctWrappers = wrappers.Count(p => Verified(p.Value, names[p.Value]));
         Console.WriteLine($"另有包装 {wrappers.Count}，目标核对正确 {correctWrappers}，错误 {wrappers.Count - correctWrappers}");
         return wrong == 0 && correctWrappers == wrappers.Count && result.Admitted ? 0 : 1;
     }

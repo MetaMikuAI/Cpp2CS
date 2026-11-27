@@ -188,20 +188,22 @@ internal sealed class FingerprintImage(Elf64 elf, byte[] file, UnwindIndex unwin
     public Dictionary<ulong, string> ImportStubs()
     {
         var plt = new Dictionary<ulong, string>();
+        if (elf.Machine != 183 || elf.Sections.SingleOrDefault(s => s.Name == ".plt") is not { Type: 1 } section ||
+            (section.Flags & 6) != 6 || elf.FileOffset(section.Address, section.Size) is not int at || (ulong)at != section.Offset)
+            return plt;
         var slots = elf.Relocations.Where(r => r.Type == 1026 && r.Symbol < elf.DynamicSymbols.Count && r.Addend == 0)
             .ToDictionary(r => r.Address, r => elf.DynamicSymbols[(int)r.Symbol].Name);
-        if (elf.Sections.SingleOrDefault(s => s.Name == ".plt") is { } section)
-            for (int i = 0; i + 16 <= (int)section.Size; i += 4)
-            {
-                var code = file.AsSpan((int)section.Offset + i, 16);
-                uint a = BinaryPrimitives.ReadUInt32LittleEndian(code), l = BinaryPrimitives.ReadUInt32LittleEndian(code[4..]);
-                uint d = BinaryPrimitives.ReadUInt32LittleEndian(code[8..]), b = BinaryPrimitives.ReadUInt32LittleEndian(code[12..]);
-                if ((a & 0x9f00001f) != 0x90000010 || (l & 0xffc003ff) != 0xf9400211 ||
-                    (d & 0xffc003ff) != 0x91000210 || b != 0xd61f0220 || ((l >> 10) & 4095) * 8 != ((d >> 10) & 4095)) continue;
-                ulong pc = section.Address + (uint)i;
-                ulong slot = (Decoder.Decode(a).Destination(pc) & ~4095ul) + ((d >> 10) & 4095);
-                if (slots.TryGetValue(slot, out string? name) && name.Length > 0) plt.Add(pc, name + "@plt");
-            }
+        for (int i = 0; i <= (int)section.Size - 16; i += 4)
+        {
+            var code = file.AsSpan(at + i, 16);
+            uint a = BinaryPrimitives.ReadUInt32LittleEndian(code), l = BinaryPrimitives.ReadUInt32LittleEndian(code[4..]);
+            uint d = BinaryPrimitives.ReadUInt32LittleEndian(code[8..]), b = BinaryPrimitives.ReadUInt32LittleEndian(code[12..]);
+            if ((a & 0x9f00001f) != 0x90000010 || (l & 0xffc003ff) != 0xf9400211 ||
+                (d & 0xffc003ff) != 0x91000210 || b != 0xd61f0220 || ((l >> 10) & 4095) * 8 != ((d >> 10) & 4095)) continue;
+            ulong pc = section.Address + (uint)i;
+            ulong slot = (Decoder.Decode(a).Destination(pc) & ~4095ul) + ((d >> 10) & 4095);
+            if (slots.TryGetValue(slot, out string? name) && name.Length > 0) plt.Add(pc, name);
+        }
         return plt;
     }
 

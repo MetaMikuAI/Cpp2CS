@@ -6,6 +6,8 @@ public sealed record RuntimeLayout(int PointerBits, int ObjectHeaderBytes, int A
 {
     public int ObjectClassOffset { get; init; }
     public int ObjectMonitorOffset { get; init; }
+    public int ExceptionWrapperExOffset { get; init; }
+    public int ExceptionWrapperExBits { get; init; }
     public int ArrayBoundsOffset { get; init; }
     public int ArrayLengthStorageBits { get; init; }
     public int ArrayBoundsBytes { get; init; }
@@ -55,6 +57,8 @@ public sealed record RuntimeLayout(int PointerBits, int ObjectHeaderBytes, int A
     {
         ObjectClassOffset = 0,            // il2cpp-object-internals.h | offset Il2CppObject.klass
         ObjectMonitorOffset = 8,          // il2cpp-object-internals.h | offset Il2CppObject.monitor
+        ExceptionWrapperExOffset = 0,     // il2cpp-object-internals.h | ptroffset Il2CppExceptionWrapper.ex
+        ExceptionWrapperExBits = 64,      // il2cpp-object-internals.h | bits Il2CppExceptionWrapper.ex
         ArrayBoundsOffset = 16,           // il2cpp-object-internals.h | offset Il2CppArray.bounds
         ArrayLengthStorageBits = 64,      // il2cpp-object-internals.h | bits Il2CppArray.max_length
         ArrayBoundsBytes = 16,            // il2cpp-object-internals.h | size Il2CppArrayBounds

@@ -33,6 +33,8 @@ public sealed record Callee(CalleeKind Kind, RuntimeOperation? Operation, string
 /// </summary>
 public interface INativeFacts
 {
+    /// <summary>这个地址上的 C++ 类型信息对象描述的类型名（Itanium ABI 的名字串，不含 _ZTS 前缀）。依据是符号或对象第二个字指向的名字串。</summary>
+    string? TypeInfoName(ulong address) => null;
     /// <summary>方法结构的 klass 字段指向的类型实例。</summary>
     EntityRef? MethodClass(EntityRef method) => null;
     /// <summary>按所属实例的类型与方法实参代入上下文定义，返回已有实体及指针种类。</summary>
