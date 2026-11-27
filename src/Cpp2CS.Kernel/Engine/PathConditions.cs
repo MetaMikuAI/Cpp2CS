@@ -20,6 +20,8 @@ public static class KernelAttributes
     public const int ExceptionObject = 1007;
     /// <summary>被展开的方法入口处没有由实参给出的槽位：操作数是第几次展开、槽位的种类与序号。</summary>
     public const int InnerEntry = 1006;
+    /// <summary>操作数给出的类型或方法实例的运行时泛型上下文表。</summary>
+    public const int RgctxTable = 1008;
 }
 
 /// <summary>

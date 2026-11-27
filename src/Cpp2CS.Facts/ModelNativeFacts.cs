@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Cpp2CS.Kernel.Engine;
 using Cpp2CS.Kernel.Forward;
 using Cpp2CS.Model;
 using Cpp2CS.Snapshot;
@@ -71,6 +72,45 @@ public sealed class ModelNativeFacts
     }
 
     public bool IsEntry(ulong address) => entries.ContainsKey(address);
+
+    public EntityRef? MethodClass(EntityRef method)
+    {
+        if (metadata.Keys.DescribeMethod(method) is not { } spec) return null;
+        var owner = new NamedType(metadata.Model.Methods[spec.Definition].Owner, spec.TypeArguments);
+        return metadata.Keys.TypeKey(owner) is long key ? new(EntityKind.Type, key) : null;
+    }
+
+    // GenericMetadata::InflateRGCTXLocked 按类型变量的类别与序号从当前上下文取实参。
+    public (EntityRef Entity, RgctxKind Kind)? RgctxEntry(EntityRef entity, int index)
+    {
+        IReadOnlyList<TypeReference> classArgs, methodArgs;
+        RgctxOwner owner;
+        if (metadata.Keys.DescribeType(entity) is NamedType { Arguments.Count: > 0 } type)
+            (owner, classArgs, methodArgs) = (new(false, type.Definition), type.Arguments, []);
+        else if (metadata.Keys.DescribeMethod(entity) is { MethodArguments.Count: > 0 } method)
+            (owner, classArgs, methodArgs) = (new(true, method.Definition), method.TypeArguments, method.MethodArguments);
+        else return null;
+        if (!metadata.Model.GenericContexts.TryGetValue(owner, out var rows) || (uint)index >= rows.Length) return null;
+        bool bound = true;
+        TypeReference Inflate(TypeReference t) => EntityKeys.Substitute(t, v =>
+        {
+            var args = v.Method ? methodArgs : classArgs;
+            if ((uint)v.Position < args.Count) return args[v.Position];
+            bound = false;
+            return v;
+        });
+        var row = rows[index];
+        if (row.Kind is RgctxDataType.Class or RgctxDataType.Type && row.Type != null &&
+            metadata.Keys.TypeKey(Inflate(row.Type)) is long typeKey && bound)
+            return (new(EntityKind.Type, typeKey), row.Kind == RgctxDataType.Type ? RgctxKind.TypeHandle : RgctxKind.Class);
+        if (row is { Kind: RgctxDataType.Method, Method: { } target })
+        {
+            var instance = new MethodInstance(target.Definition, target.TypeArguments.Select(Inflate).ToArray(),
+                target.MethodArguments.Select(Inflate).ToArray());
+            if (bound && metadata.Keys.MethodKey(instance) is long key) return (new(EntityKind.Method, key), RgctxKind.Method);
+        }
+        return null;
+    }
     public ulong? Entry(EntityRef method) => method.Kind == EntityKind.Method && method.Key >= 0 && method.Key < code.Methods.Count
         ? code.Methods[(int)method.Key].Entry : null;
 

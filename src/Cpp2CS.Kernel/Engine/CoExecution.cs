@@ -222,6 +222,16 @@ public sealed partial class CoExecution
         return terms.Concat(parts);
     }
 
+    private ImmutableDictionary<Term, Term> NativeEntryEnvironment(MethodShape host, ImmutableArray<ImmutableArray<(Slot Slot, int Bits)>> convention)
+    {
+        var env = ImmutableDictionary<Term, Term>.Empty;
+        if (facts.GenericEntry(host.Entity) is { } generic &&
+            native.EntryParameters.FirstOrDefault(p => p.Slot == NativeEntryQueries.MethodArgumentSlot(convention)) is { } hidden &&
+            hidden.Width == native.PointerBits && ParameterSummary.ReadsHidden(native, hidden.Slot))
+            return env.Add(hidden, terms.Entity(generic.ExpectedMethod, native.PointerBits));
+        return env;
+    }
+
     private void Run()
     {
         var method = body.Method;
@@ -243,7 +253,7 @@ public sealed partial class CoExecution
         }
         if (body.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
         var none = ImmutableDictionary<int, int>.Empty;
-        Explore(new State(new Side(native.Entry, 0, ImmutableDictionary<Term, Term>.Empty, none), new Side(template.Entry, 0, env, none),
+        Explore(new State(new Side(native.Entry, 0, NativeEntryEnvironment(method, convention), none), new Side(template.Entry, 0, env, none),
             conditions, Epoch: 1, Serial: 0, FrameGeneration: 0, [], [], ImmutableDictionary<long, Term>.Empty));
     }
 
@@ -737,6 +747,7 @@ public sealed partial class CoExecution
                             // 结果登记为“实参所指的元数据槽的内容”时，类型的槽给出的是该类型的实体（与读这个槽相同）。
                             Term? content = callee.Operation.ReturnsSlot && Argument(call, operands, new Slot(SlotKind.Integer, 0)) is { IsConstant: true } slot
                                 && facts.EntityAtSlot((ulong)slot.Value) is { } named ? terms.Entity(named, facts.Layout.PointerBits) : null;
+                            if (callee.Operation.ReturnsArgument) content = Argument(call, operands, new Slot(SlotKind.Integer, 0));
                             for (int k = 0; k < results.Length; k++)
                                 env = env.SetItem(results[k], content is not null && call.ResultSlots[k] == new Slot(SlotKind.Integer, 0) && results[k].Width == content.Width
                                     ? content : EventResult(state.Serial, k, results[k].Width));
@@ -860,6 +871,7 @@ public sealed partial class CoExecution
     private Term MachineRead(ref State state, bool inner, Term address, int width)
     {
         heapAccess = false;
+        if (Facts.StructureReads.Name(address, width, facts, terms) is { } named) return named;
         var pointer = inner ? state.Inner!.StackPointer : stackPointer;
         if (FrameOffset(address, pointer) is long offset)
         {
@@ -1232,7 +1244,7 @@ public sealed partial class CoExecution
                 var inner = state.Inner!;
                 var call = (CallOccurrence)native[onNative.Occurrence];
                 var other = (CallOccurrence)inner.Snapshot[onTemplate.Occurrence];
-                var shape = callee.MethodAtCall(slot => HiddenArgument(other, onTemplate, slot, conditions), out string reason)
+                var shape = callee.MethodAtCall(onNative.Address, snapshots, slot => HiddenArgument(other, onTemplate, slot, conditions), out string reason)
                     ?? throw new Refuted(Verdict.MissingFact, reason);
                 var convention = Convention(shape, out _);
                 if (callee.SharedSignatures.HasValue)

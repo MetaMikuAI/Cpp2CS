@@ -110,6 +110,7 @@ public sealed class Il2CppInput
         Model = new(assemblies, images, types, fields, methods, Enumerable.Range(0, pointers.Length).Select(runtime.At).ToArray(),
             Array.ConvertAll(reg.Vector(elf, mr), p => p == 0 ? null : runtime.GenericClass(p)), specs,
             Enumerable.Range(0, metadata.Count(Table.Literal)).Select(metadata.StringLiteral).ToArray());
+        Model = Model with { GenericContexts = GenericContexts.Read(elf, reg.Modules, Model) };
         Code = reg.ReadCode(elf, Model);
         AssemblyMetadata = new(() =>
         {

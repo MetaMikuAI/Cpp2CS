@@ -70,14 +70,21 @@ public sealed class EntityKeys
     internal static TypeReference Element(TypeReference type) => type is ReferenceType reference ? reference.Element : type;
 
     /// <summary>metadata/GenericMetadata.cpp::InflateIfNeeded：依所属的类型与方法容器按位置代入。</summary>
-    public static TypeReference Inflate(TypeReference type, NamedType owner, int method = -1, IReadOnlyList<TypeReference>? arguments = null) => type switch
+    public static TypeReference Inflate(TypeReference type, NamedType owner, int method = -1, IReadOnlyList<TypeReference>? arguments = null) =>
+        Substitute(type, v => v switch
+        {
+            { Method: false } when v.Owner == owner.Definition && (uint)v.Position < owner.Arguments.Count => owner.Arguments[v.Position],
+            { Method: true } when v.Owner == method && arguments != null && (uint)v.Position < arguments.Count => arguments[v.Position],
+            _ => v,
+        });
+
+    internal static TypeReference Substitute(TypeReference type, Func<VariableType, TypeReference> variable) => type switch
     {
-        VariableType v when !v.Method && v.Owner == owner.Definition && (uint)v.Position < owner.Arguments.Count => owner.Arguments[v.Position],
-        VariableType v when v.Method && v.Owner == method && arguments != null && (uint)v.Position < arguments.Count => arguments[v.Position],
-        NamedType n when n.Arguments.Count != 0 => n with { Arguments = n.Arguments.Select(a => Inflate(a, owner, method, arguments)).ToArray() },
-        ReferenceType r => new ReferenceType(Inflate(r.Element, owner, method, arguments)),
-        PointerType p => new PointerType(Inflate(p.Element, owner, method, arguments)),
-        ArrayType a => a with { Element = Inflate(a.Element, owner, method, arguments) },
+        VariableType v => variable(v),
+        NamedType n when n.Arguments.Count != 0 => n with { Arguments = n.Arguments.Select(a => Substitute(a, variable)).ToArray() },
+        ReferenceType r => new ReferenceType(Substitute(r.Element, variable)),
+        PointerType p => new PointerType(Substitute(p.Element, variable)),
+        ArrayType a => a with { Element = Substitute(a.Element, variable) },
         _ => type,
     };
 }

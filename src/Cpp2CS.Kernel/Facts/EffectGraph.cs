@@ -167,6 +167,10 @@ public sealed class EffectGraph
         Term? pointer = snapshot.EntryParameters.FirstOrDefault(p => p.Slot == new Slot(SlotKind.StackPointer, 0));
         if (convention is null || pointer is null) { Failure = convention is null ? reason : "快照的入口没有声明栈指针"; return; }
         Term? Entry(Slot slot) => snapshot.EntryParameters.FirstOrDefault(p => p.Slot == slot);
+        if (facts.GenericEntry(host.Entity) is { } generic &&
+            Entry(NativeEntryQueries.MethodArgumentSlot(convention.Value)) is { } hidden && hidden.Width == snapshot.PointerBits &&
+            ParameterSummary.ReadsHidden(snapshot, hidden.Slot))
+            resolved[hidden] = terms.Entity(generic.ExpectedMethod, snapshot.PointerBits);
         for (int i = 0; i < convention.Value.Length; i++)
         {
             if (EngineFacts.Gather(terms, convention.Value[i], Entry) is not { } entry) { Failure = $"快照的入口没有声明第 {i} 个形参的槽位"; return; }
@@ -245,7 +249,9 @@ public sealed class EffectGraph
                     case ReadOccurrence read:
                     {
                         var address = operands[0];
-                        if (EngineFacts.FrameOffset(address, pointer) is long offset)
+                        if (StructureReads.Name(address, read.Width, facts, terms) is { } named)
+                            resolved[results[0]] = named;
+                        else if (EngineFacts.FrameOffset(address, pointer) is long offset)
                         {
                             if (frame.TryGetValue(offset, out var stored) && stored.Width >= read.Width) resolved[results[0]] = terms.Slice(stored, 0, read.Width);
                         }
@@ -278,7 +284,7 @@ public sealed class EffectGraph
                         break;
                     }
                     case CallOccurrence call:
-                        effect = Call(id, call, operands, results, facts, pointer, Unnamed);
+                        effect = Call(id, call, operands, results, facts, pointer, snapshots, Unnamed);
                         // 不返回的另外两种依据（设计 7.5）：这次调用是函数范围里的最后一条指令；被调托管方法的效果摘要。
                         if (ReturnSummary.LastInFunction(snapshot, id))
                         {
@@ -348,7 +354,7 @@ public sealed class EffectGraph
     }
 
     private NativeEffect? Call(OccurrenceId id, CallOccurrence call, ImmutableArray<Term> operands, ImmutableArray<Term> results, INativeFacts facts,
-        Term pointer, Func<string, NativeEffect> unnamed)
+        Term pointer, Func<ulong, MethodSnapshot?>? snapshots, Func<string, NativeEffect> unnamed)
     {
         if (call.Target is null) return unnamed($"原语调用 {call.Primitive} 没有登记");
         if (!operands[0].IsConstant) return unnamed($"调用的目标没有命名：{operands[0]}");
@@ -380,7 +386,7 @@ public sealed class EffectGraph
         }
         if (callee.Kind == CalleeKind.Managed)
         {
-            if (callee.MethodAtCall(Argument, out string reason) is not { } shape) return unnamed(reason);
+            if (callee.MethodAtCall(address, snapshots, Argument, out string reason) is not { } shape) return unnamed(reason);
             if (EngineFacts.Convention(shape, out var returned, out reason) is not { } slots) return unnamed(reason);
             var arguments = ImmutableArray.CreateBuilder<Term>(slots.Length);
             for (int i = 0; i < slots.Length; i++)
@@ -416,6 +422,9 @@ public sealed class EffectGraph
                 if (operation.ReturnsSlot && Argument(new Slot(SlotKind.Integer, 0)) is { IsConstant: true } slot
                     && facts.EntityAtSlot((ulong)slot.Value) is { } type && Returned(new Slot(SlotKind.Integer, 0)) is { } content && content.Width == pointerBits)
                     resolved[content] = terms.Entity(type, pointerBits);
+                if (operation.ReturnsArgument && Argument(new Slot(SlotKind.Integer, 0)) is { } argument &&
+                    Returned(new Slot(SlotKind.Integer, 0)) is { } result && result.Width == argument.Width)
+                    resolved[result] = argument;
                 return null;
             case RuntimeEffect.Pure:
             {

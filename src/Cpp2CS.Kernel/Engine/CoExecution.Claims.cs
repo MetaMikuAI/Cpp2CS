@@ -173,7 +173,7 @@ public sealed partial class CoExecution
         }
         if (context.InitializerOf is { } initialized) conditions = conditions.WithInitialized(initialized);
         var none = ImmutableDictionary<int, int>.Empty;
-        Explore(new State(new Side(native.Entry, 0, ImmutableDictionary<Term, Term>.Empty, none), new Side(template.Entry, 0, env, none),
+        Explore(new State(new Side(native.Entry, 0, NativeEntryEnvironment(host, convention), none), new Side(template.Entry, 0, env, none),
             conditions, Epoch: 1, Serial: 0, FrameGeneration: 0, [], [], ImmutableDictionary<long, Term>.Empty)
         {
             Trail = new Trail(false, [], [], [], [], 1, false, false, []),

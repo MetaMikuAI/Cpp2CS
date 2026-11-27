@@ -26,10 +26,18 @@ public sealed record ParameterDefinition(string Name, TypeReference Type, Parame
 public sealed record MethodDefinition(int Owner, string Name, uint Token, MethodAttributes Flags, MethodImplAttributes ImplFlags,
     TypeReference ReturnType, IReadOnlyList<ParameterDefinition> Parameters, IReadOnlyList<GenericParameter> GenericParameters);
 public sealed record MethodInstance(int Definition, IReadOnlyList<TypeReference> TypeArguments, IReadOnlyList<TypeReference> MethodArguments);
+/// <summary>il2cpp-metadata.h 的 Il2CppRGCTXDataType 与定义数据。受约束调用同时引用类型与编码的方法。</summary>
+public enum RgctxDataType { Invalid, Type, Class, Method, Array, Constrained }
+public sealed record RgctxDefinition(RgctxDataType Kind, TypeReference? Type, MethodInstance? Method, uint? EncodedMethod = null);
+public readonly record struct RgctxOwner(bool IsMethod, int Definition);
 public sealed record MetadataModel(IReadOnlyList<AssemblyDefinition> Assemblies, IReadOnlyList<ImageDefinition> Images,
     IReadOnlyList<TypeDefinition> Types, IReadOnlyList<FieldDefinition> Fields, IReadOnlyList<MethodDefinition> Methods,
     IReadOnlyList<TypeReference> RuntimeTypes, IReadOnlyList<NamedType?> GenericClasses,
-    IReadOnlyList<MethodInstance> MethodInstances, IReadOnlyList<string> StringLiterals);
+    IReadOnlyList<MethodInstance> MethodInstances, IReadOnlyList<string> StringLiterals)
+{
+    public IReadOnlyDictionary<RgctxOwner, RgctxDefinition[]> GenericContexts { get; init; } =
+        new Dictionary<RgctxOwner, RgctxDefinition[]>();
+}
 
 /// <summary>入口使用 RVA。相同入口可以对应多个定义或规格，下标保留各自的身份。</summary>
 public readonly record struct MethodCode(ulong? Entry, int? Invoker);

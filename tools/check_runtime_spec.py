@@ -162,6 +162,21 @@ def measured(field, definitions, source):
         locations = {offset for offset, _ in items}
         return locations.pop() if len(locations) == 1 else None
     offset, member = offsets[member_names]
+    if field.measure == "bitindex":
+        attr = member.attributes
+        if "DW_AT_bit_size" not in attr or attr["DW_AT_bit_size"].value != 1:
+            return None
+        if "DW_AT_data_bit_offset" in attr:
+            return attr["DW_AT_data_bit_offset"].value % 8
+        if "DW_AT_bit_offset" in attr:
+            start = attr["DW_AT_bit_offset"].value
+            return (type_bits(member) - start - 1 if member.cu.structs.little_endian else start) % 8
+        return None
+    if field.measure == "ptroffset":
+        t = member.get_DIE_from_attribute("DW_AT_type")
+        if t.tag == "DW_TAG_pointer_type" and type_bits(t) == 64:
+            return offset
+        return None
     if field.measure == "offset":
         return offset
     if field.measure == "bits":

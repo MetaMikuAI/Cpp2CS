@@ -137,6 +137,8 @@ internal sealed class BridgeFacts : IGenericEntryFacts
     public void BeginCheck() => offsetReason = "";
     public ulong? Entry(EntityRef method) => native.Entry(method);
     public GenericEntry? GenericEntry(EntityRef method) => native.GenericEntry(method);
+    public EntityRef? MethodClass(EntityRef method) => native.MethodClass(method);
+    public (EntityRef Entity, RgctxKind Kind)? RgctxEntry(EntityRef owner, int index) => native.RgctxEntry(owner, index);
     public int? InstanceFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Instance, out offsetReason);
     public int? StaticFieldOffset(EntityRef field) => native.Offset(field, FieldStorage.Static, out offsetReason);
 

@@ -21,6 +21,10 @@ public sealed record RuntimeLayout(int PointerBits, int ObjectHeaderBytes, int A
     public int ClassTypeHierarchyDepthOffset { get; init; }
     public int ClassTypeHierarchyDepthBits { get; init; }
     public int ClassInitializedFlagsOffset { get; init; }
+    public int ClassInitializedAndNoErrorBit { get; init; }
+    public int MethodClassOffset { get; init; }
+    public int MethodRgctxOffset { get; init; }
+    public int ClassRgctxOffset { get; init; }
     public int ClassSizeFlagsOffset { get; init; }
     public int VirtualInvokeDataBytes { get; init; }
     public int VirtualMethodPointerOffset { get; init; }
@@ -66,6 +70,10 @@ public sealed record RuntimeLayout(int PointerBits, int ObjectHeaderBytes, int A
         ClassTypeHierarchyDepthOffset = 0x130, // il2cpp-class-internals.h | offset Il2CppClass.typeHierarchyDepth
         ClassTypeHierarchyDepthBits = 8,  // il2cpp-class-internals.h | bits Il2CppClass.typeHierarchyDepth
         ClassInitializedFlagsOffset = 0x135, // il2cpp-class-internals.h | bitbyte Il2CppClass.initialized_and_no_error,initialized,enumtype,nullabletype,is_generic,has_references,init_pending,size_init_pending
+        ClassInitializedAndNoErrorBit = 0, // il2cpp-class-internals.h | bitindex Il2CppClass.initialized_and_no_error
+        MethodClassOffset = 0x20,         // il2cpp-class-internals.h | ptroffset MethodInfo.klass
+        MethodRgctxOffset = 0x38,         // il2cpp-class-internals.h | ptroffset MethodInfo.rgctx_data
+        ClassRgctxOffset = 0xc0,          // il2cpp-class-internals.h | ptroffset Il2CppClass.rgctx_data
         ClassSizeFlagsOffset = 0x136,     // il2cpp-class-internals.h | bitbyte Il2CppClass.size_inited,has_finalize,has_cctor,is_blittable,is_import_or_windows_runtime,is_vtable_initialized,is_byref_like
         VirtualInvokeDataBytes = 16,      // il2cpp-class-internals.h | size VirtualInvokeData
         VirtualMethodPointerOffset = 0,    // il2cpp-class-internals.h | offset VirtualInvokeData.methodPtr

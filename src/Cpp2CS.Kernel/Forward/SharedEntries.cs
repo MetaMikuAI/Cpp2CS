@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Cpp2CS.Kernel.Engine;
+using Cpp2CS.Kernel.Facts;
 using Cpp2CS.Snapshot;
 
 namespace Cpp2CS.Kernel.Forward;
@@ -23,7 +24,7 @@ public static class NativeEntryQueries
         new(SlotKind.Integer, parameters.Sum(p => p.Count(piece => piece.Slot.Kind == SlotKind.Integer)));
 
     /// <summary>先由登记在共享入口的各个签名确定槽位，以免把另一个签名未使用的寄存器当作隐含实参。</summary>
-    internal static Slot? SharedMethodSlot(ImmutableArray<MethodShape> candidates, out string reason)
+    public static Slot? SharedMethodSlot(ImmutableArray<MethodShape> candidates, out string reason)
     {
         reason = "共享入口的候选签名不全";
         Slot? common = null;
@@ -42,14 +43,26 @@ public static class NativeEntryQueries
     }
 
     /// <summary>按登记入口和调用点的实参给原生调用命名。</summary>
-    internal static MethodShape? MethodAtCall(this Callee callee, Func<Slot, Term?> argument, out string reason)
+    internal static MethodShape? MethodAtCall(this Callee callee, ulong entry, Func<ulong, MethodSnapshot?>? snapshots,
+        Func<Slot, Term?> argument, out string reason)
     {
         if (callee.SharedSignatures is not { } candidates)
         {
             reason = callee.Signature is null ? $"被调方法 {callee.Name} 的签名未知" : "";
             return callee.Signature;
         }
+        const string unread = "共享入口的被调方法不读隐含实参：身份没有依据";
+        if (snapshots?.Invoke(entry) is not { } snapshot)
+        {
+            reason = unread;
+            return null;
+        }
         if (SharedMethodSlot(candidates, out reason) is not { } hidden) return null;
+        if (!ParameterSummary.ReadsHidden(snapshot, hidden))
+        {
+            reason = unread;
+            return null;
+        }
         if (argument(hidden) is not { Kind: TermKind.Entity } value)
         {
             reason = $"共享入口的隐含实参 {hidden} 未解析为实体";

@@ -4,6 +4,9 @@ using Cpp2CS.Spec.Runtime;
 
 namespace Cpp2CS.Kernel.Engine;
 
+/// <summary>上下文表项中指针的运行时种类。</summary>
+public enum RgctxKind { Class, TypeHandle, Method }
+
 /// <summary>一次对常量地址的调用被认成了什么。</summary>
 public enum CalleeKind : byte
 {
@@ -30,6 +33,10 @@ public sealed record Callee(CalleeKind Kind, RuntimeOperation? Operation, string
 /// </summary>
 public interface INativeFacts
 {
+    /// <summary>方法结构的 klass 字段指向的类型实例。</summary>
+    EntityRef? MethodClass(EntityRef method) => null;
+    /// <summary>按所属实例的类型与方法实参代入上下文定义，返回已有实体及指针种类。</summary>
+    (EntityRef Entity, RgctxKind Kind)? RgctxEntry(EntityRef owner, int index) => null;
     /// <summary>运行时结构的布局。</summary>
     RuntimeLayout Layout { get; }
     /// <summary>目标类型的元数据满足哪一条 IsInst 内联体的前提。没有依据时保留具名函数。</summary>

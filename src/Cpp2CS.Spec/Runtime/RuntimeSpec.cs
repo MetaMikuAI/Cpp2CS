@@ -41,6 +41,8 @@ public sealed record RuntimeOperation(string Id, ImmutableArray<string> Symbols,
     public int Arguments { get; init; } = -1;
     /// <summary>结果是第 0 个实参所指的元数据槽在初始化之后的内容（类指针、方法、字符串等运行时对象的指针）。</summary>
     public bool ReturnsSlot { get; init; }
+    /// <summary>结果就是第 0 个整数实参。</summary>
+    public bool ReturnsArgument { get; init; }
 }
 
 /// <summary>具名函数的等式（设计 7.8）。每条写明出处。</summary>
@@ -78,6 +80,14 @@ public static class RuntimeOperations
             Idempotent: true, ExceptionKind.None, "元数据槽的地址", "槽初始化之后的内容", "把槽里的编码换成运行时对象的指针；只写映像里的元数据槽",
             "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata_inline 返回 MetadataCache::InitializeRuntimeMetadata 的结果；vm/MetadataCache.cpp: InitializeRuntimeMetadata 返回 *metadataPointer")
             { ReturnsSlot = true, Arguments = 1 },
+        new("class.initialize-metadata", ["_ZN6il2cpp2vm12ClassInlines19InitFromCodegenSlowEP11Il2CppClass"], RuntimeEffect.Unobservable,
+            Returns: true, Observable: false, Idempotent: true, ExceptionKind.None, "类", "输入的类", "初始化类元数据",
+            "vm/ClassInlines.cpp: InitFromCodegenSlow 调用 Class::Init，正常返回原类；设计 16.2 排除类型加载错误")
+            { Arguments = 1, ReturnsArgument = true },
+        new("method.initialize-rgctx", ["_ZN6il2cpp2vm12ClassInlines24InitRgctxFromCodegenSlowEPK10MethodInfo"], RuntimeEffect.Unobservable,
+            Returns: true, Observable: false, Idempotent: true, ExceptionKind.None, "方法结构", "输入的方法结构", "填充方法上下文表",
+            "vm/ClassInlines.cpp: InitRgctxFromCodegenSlow 调用 GenericMethod::InflateRGCTX 后返回原方法")
+            { Arguments = 1, ReturnsArgument = true },
         new("gc.write-barrier", ["_Z25Il2CppCodeGenWriteBarrierPPvS_"], RuntimeEffect.Unobservable, Returns: true, Observable: false,
             Idempotent: true, ExceptionKind.None, "被写位置的地址、写入的引用", "无", "通知垃圾回收器这个位置被写过；只改回收器的私有状态，不写托管位置（存入本身由生成代码完成）",
             "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier；gc/BoehmGC.cpp: GarbageCollector::SetWriteBarrier") { Arguments = 2 },
