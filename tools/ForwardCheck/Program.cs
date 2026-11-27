@@ -29,6 +29,8 @@ internal static class Program
         for (int i = 1; i + 1 < arguments.Length; i += 2) options[arguments[i]] = arguments[i + 1];
         switch (arguments[0])
         {
+            case "fingerprint" or "naming-check":
+                return NamingCheck.Run(arguments[0], options);
             case "sample" or "assemblies":
                 return Sample.Run(arguments);
             case "keys" or "layouts" when options.TryGetValue("--assemblies", out var assemblies):
@@ -43,15 +45,15 @@ internal static class Program
             case "counterexamples" when options.ContainsKey("--assemblies"):
                 return Counterexamples.Run(options["--assemblies"], options);
             case "native" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies") && options.ContainsKey("--binary")
-                && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
-                return NativeCheck.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
-                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""));
+                && options.ContainsKey("--metadata") && (options.ContainsKey("--symbols") || options.ContainsKey("--fingerprint")):
+                return NativeCheck.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"),
+                    options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--fingerprint"));
             case "recover" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies") && options.ContainsKey("--binary")
-                && options.ContainsKey("--metadata") && options.ContainsKey("--symbols"):
+                && options.ContainsKey("--metadata") && (options.ContainsKey("--symbols") || options.ContainsKey("--fingerprint")):
                 if (arguments.Length % 2 == 0) return Usage();
-                return Recover.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options["--symbols"],
+                return Recover.Run(options["--cases"], options["--assemblies"], options["--binary"], options["--metadata"], options.GetValueOrDefault("--symbols"),
                     options.GetValueOrDefault("--target", "arm64-v8a"), options.GetValueOrDefault("--show", ""), options.GetValueOrDefault("--emit"),
-                    options.GetValueOrDefault("--emit-generated"), isolated);
+                    options.GetValueOrDefault("--emit-generated"), isolated, options.GetValueOrDefault("--fingerprint"));
             case "il" when options.ContainsKey("--cases") && options.ContainsKey("--assemblies"):
                 return CheckIl(options, options["--cases"], options["--assemblies"], int.Parse(options.GetValueOrDefault("--pointer-bits", "64")),
                     options.GetValueOrDefault("--show", ""));
@@ -66,9 +68,11 @@ internal static class Program
         Console.Error.WriteLine("      ForwardCheck snapshot");
         Console.Error.WriteLine("      ForwardCheck il --cases 用例清单.json --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--pointer-bits 64] [--show 方法名]");
         Console.Error.WriteLine("      ForwardCheck counterexamples --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件]");
-        Console.Error.WriteLine("      ForwardCheck sample|assemblies --binary 原生库 --metadata 元数据文件 [--count 个数] [--seed 种子] [--out 生成目录]");
-        Console.Error.WriteLine("      ForwardCheck recover --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名|all] [--emit 副本目录] [--isolated] [--emit-generated 生成目录]");
-        Console.Error.WriteLine("      ForwardCheck native --cases 用例清单.json --assemblies 程序集目录 --binary 原生库 --metadata 元数据文件 --symbols 带符号的原生库 [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck sample|assemblies --binary 原生库 --metadata 元数据文件 [--fingerprint 参照表] [--count 个数] [--seed 种子] [--out 生成目录]");
+        Console.Error.WriteLine("      ForwardCheck recover --cases 清单 --assemblies 程序集目录 --binary 原生库 --metadata 元数据 (--symbols 符号库 | --fingerprint 参照表) [--show 方法名|all] [--emit 目录] [--isolated] [--emit-generated 生成目录]");
+        Console.Error.WriteLine("      ForwardCheck native --cases 清单 --assemblies 程序集目录 --binary 原生库 --metadata 元数据 (--symbols 符号库 | --fingerprint 参照表) [--show 方法名]");
+        Console.Error.WriteLine("      ForwardCheck fingerprint --binary 原生库 --metadata 元数据 --symbols 符号库 [--debug 调试库] --runtime-version 版本 --toolchain 工具链 --fingerprint 输出表");
+        Console.Error.WriteLine("      ForwardCheck naming-check --binary 原生库 --metadata 元数据 --fingerprint 参照表 [--truth-symbols 对照符号库] [--truth-debug 对照调试库]");
         Console.Error.WriteLine("      ForwardCheck keys|layouts --assemblies 程序集目录 [--binary 原生库 --metadata 元数据文件] [--order reverse] [--keys-file 输出文件]");
         return 2;
     }

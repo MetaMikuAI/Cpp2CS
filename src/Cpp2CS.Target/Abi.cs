@@ -32,6 +32,8 @@ public static class Abi
         _ => throw new ArgumentOutOfRangeException(nameof(s))
     };
     internal static readonly int[] Arguments = [0, 1, 2, 3, 4, 5, 6, 7, 8, 32, 33, 34, 35, 36, 37, 38, 39, 31];
+    public static IReadOnlyList<Slot> CallArgumentSlots { get; } =
+        Array.AsReadOnly(Arguments.Select(r => Entry(r)!.Value).ToArray());
     internal static readonly int[] Results = [0, 1, 32, 33, 34, 35];
     internal static readonly int[] Return = [.. Results, 30, 31, .. Enumerable.Range(19, 11), .. Enumerable.Range(40, 8)];
     internal static readonly int[] TailInputs = [.. Arguments, 30, .. Enumerable.Range(19, 11), .. Enumerable.Range(40, 8)];

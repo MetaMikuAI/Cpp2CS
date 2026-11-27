@@ -22,13 +22,13 @@ internal static partial class Recover
     /// isolated 为真时，整批跑完之后再把每个用例放进新的上下文（重新读入二进制、元数据、事实与快照）单独恢复一次，
     /// 与整批的结果逐例比较：结论不能依赖同一进程里先跑了哪些用例。
     /// </summary>
-    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string symbolFile, string target, string show,
-        string? emit, string? generated, bool isolated = false)
+    public static int Run(string casesPath, string assemblies, string binary, string metadataPath, string? symbolFile, string target, string show,
+        string? emit, string? generated, bool isolated = false, string? fingerprint = null)
     {
         using var document = JsonDocument.Parse(File.ReadAllBytes(casesPath));
         var items = document.RootElement.EnumerateArray().ToList();
         var together = new Dictionary<string, string>(StringComparer.Ordinal);
-        int status = Batch(items, assemblies, binary, metadataPath, symbolFile, target, show, emit, generated, together, quiet: false);
+        int status = Batch(items, assemblies, binary, metadataPath, symbolFile, target, show, emit, generated, fingerprint, together, quiet: false);
         if (!isolated) return status;
         var differences = new List<string>();
         int compared = 0;
@@ -36,7 +36,7 @@ internal static partial class Recover
         foreach (var item in items)
         {
             var alone = new Dictionary<string, string>(StringComparer.Ordinal);
-            Batch([item], assemblies, binary, metadataPath, symbolFile, target, "", null, null, alone, quiet: true);
+            Batch([item], assemblies, binary, metadataPath, symbolFile, target, "", null, null, fingerprint, alone, quiet: true);
             foreach (var (name, line) in alone)
             {
                 compared++;
@@ -52,16 +52,17 @@ internal static partial class Recover
     /// 恢复一组用例。summaries 按用例名记下每个用例的结论行（声明、凭据、选中的条数，等价与否，指令条数或各层的独立洞，首个洞）。
     /// quiet 为真时只做恢复与 IL 对照，不输出，不做对抗声明、交叉对照与写出。
     /// </summary>
-    private static int Batch(IReadOnlyList<JsonElement> items, string assemblies, string binary, string metadataPath, string symbolFile, string target,
-        string show, string? emit, string? generated, Dictionary<string, string> summaries, bool quiet)
+    private static int Batch(IReadOnlyList<JsonElement> items, string assemblies, string binary, string metadataPath, string? symbolFile, string target,
+        string show, string? emit, string? generated, string? fingerprint, Dictionary<string, string> summaries, bool quiet)
     {
         var input = Il2CppInput.Load(binary, metadataPath);
         byte[] bytes = File.ReadAllBytes(binary);
         using var metadata = ModelInput.Open(assemblies, input, bytes);
-        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes);
         var entities = new EntityFacts(metadata.Facts);
         var lifter = new Arm64Target(input.Elf, bytes,
             input.Code.Methods.Concat(input.Code.MethodInstances).Where(m => m.Entry.HasValue).Select(m => m.Entry!.Value));
+        var facts = new BridgeFacts(input, metadata.Facts, symbolFile, bytes, lifter, fingerprint);
+        if (!quiet && fingerprint != null) Console.WriteLine(facts.Admission);
         var lifts = new Dictionary<ulong, MethodSnapshot?>();
         MethodSnapshot? Snapshot(ulong entry)
         {

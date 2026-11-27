@@ -21,13 +21,15 @@ internal sealed class SampleInput
     private readonly Arm64Target target;
     private readonly (long Key, ulong Address)[] population;
 
-    public SampleInput(string binary, string path, string? symbols)
+    private readonly bool reportNaming;
+
+    public SampleInput(string binary, string path, string? symbols, string? fingerprint)
     {
         input = Il2CppInput.Load(binary, path);
         var file = File.ReadAllBytes(binary);
         metadata = ModelInput.Facts(input, file);
         entities = new(metadata);
-        facts = new(input, metadata, symbols, file);
+        reportNaming = fingerprint != null;
         var rows = new List<(long, ulong)>();
         for (int i = 0; i < input.Code.Methods.Count; i++)
             if (input.Code.Methods[i].Entry is ulong rva) rows.Add((i, rva));
@@ -39,6 +41,7 @@ internal sealed class SampleInput
         if (methods.DistinctBy(r => r.Item1).Count() != methods.Length)
             throw new InvalidDataException("同一托管方法实体登记了多个原生入口");
         target = new(input.Elf, file, methods.Select(m => m.Item2));
+        facts = new(input, metadata, symbols, file, target, fingerprint);
         population = methods.Select(m => (m.Item1, checked(m.Item2 + input.Elf.ImageBase))).ToArray();
     }
 
@@ -101,7 +104,8 @@ internal sealed class SampleInput
                 if (!sampled.Contains(key)) items.Add(new(key, entry, name));
             }
         }
-        return new(population.Length, target.Entries.Count, main, audit, items.ToArray(), shown.ToArray());
+        return new(population.Length, target.Entries.Count, main, audit, items.ToArray(), shown.ToArray(),
+            reportNaming ? facts.Admission : null, reportNaming ? facts.CountCalls() : null);
     }
 
     public void Recover(Sample.Item item, Sample.Result result, Action<string> progress)
